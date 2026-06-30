@@ -1,3 +1,12 @@
 [workspace]
 members = ["muxrd", "muxrctl"]
 resolver = "2"
+
+# Shared package metadata inherited by both crates via `*.workspace = true`.
+# The release workflow bumps `version` here (the single source of truth); both
+# binaries report it through CARGO_PKG_VERSION.
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT"

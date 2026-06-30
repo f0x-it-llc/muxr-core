@@ -13,6 +13,21 @@ Two binaries:
 | [`muxrd`](muxrd/) | `muxrd` | gRPC server (protobuf package `muxr.v1`) that relays over a terminal multiplexer — zellij (Unix-domain IPC) or herdr (JSON-API + binary wire sockets). TLS (self-signed, an external CA cert, or plaintext h2c behind a proxy) + per-token auth, read-only tokens, daemonize. |
 | [`muxrctl`](muxrctl/) | `muxrctl` | Terminal UI to install, configure, and pair the server: cert/SAN setup, token management, QR-code device pairing (fingerprint-pinned or system-CA), live status. Links `muxrd` as a library for its pure ops. |
 
+## Install
+
+Install the latest pre-built suite (both binaries) on Linux or macOS:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.sh | bash
+```
+
+This installs `muxrd` and `muxrctl` into `~/.local/bin` (override with
+`MUXR_INSTALL_DIR`). Pin a version with `… | bash -s -- --version 0.1.0`.
+Pre-built targets: `x86_64`/`aarch64` × `unknown-linux-gnu`/`apple-darwin`.
+Windows is unsupported (the server requires a Unix host). Each
+[release](https://github.com/f0x-it-llc/muxr-core/releases) also ships a
+`checksums-sha256.txt` for manual verification.
+
 ## Build
 
 ```bash
@@ -96,6 +111,33 @@ The wire contract is `muxrd/proto/muxr.proto` (package
 `muxr.v1`). The server compiles it via `build.rs`; clients generate
 their own stubs from the same file. A reference Dart client lives in
 [`muxrd/clients/dart_test_client/`](muxrd/clients/dart_test_client/).
+
+## Releasing
+
+Releases are cut by the **Release** GitHub Actions workflow
+(`.github/workflows/release.yml`), triggered manually from the Actions tab
+(`workflow_dispatch`):
+
+1. **Version** — auto-computed from conventional commits via
+   [git-cliff](https://git-cliff.org/) (`cliff.toml`), or supply an explicit
+   `version` input. The single source of truth is `[workspace.package].version`
+   in the root `Cargo.toml`; both crates inherit it.
+2. **Bump + tag** — the workflow updates the workspace version, commits
+   `chore(release): … [skip ci]`, and pushes a `vX.Y.Z` tag to `main`.
+3. **Build** — both binaries are compiled for all four targets (Linux
+   `x86_64`/`aarch64` on native runners, macOS `x86_64`/`aarch64`) and packaged
+   as one `muxr-core-v<ver>-<target>.tar.gz` suite archive per target.
+4. **Publish** — a GitHub Release is created with the suite archives,
+   `checksums-sha256.txt`, `install.sh`, and a git-cliff changelog.
+
+The version job pushes the bump commit + tag using the built-in `GITHUB_TOKEN`.
+This requires `main` to accept pushes from `github-actions[bot]`; if `main` is
+protected by a ruleset that blocks the bot, switch the `version` job's checkout
+to a GitHub App token (set `vars.RELEASE_APP_ID` + `secrets.RELEASE_APP_PRIVATE_KEY`
+and pass `token:` to `actions/checkout`).
+
+The non-semver `fonts-v1` tag (font-catalog asset release) is excluded from
+version computation via the anchored `tag_pattern` in `cliff.toml`.
 
 ## License
 

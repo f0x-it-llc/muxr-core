@@ -1,9 +1,9 @@
 [package]
 name = "muxrd"
-version = "0.1.0"
-edition = "2024"
-rust-version = "1.92"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 publish = false
 
 # ─── Binaries ────────────────────────────────────────────────────────────────

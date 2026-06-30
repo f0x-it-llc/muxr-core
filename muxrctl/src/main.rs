@@ -19,6 +19,27 @@ use anyhow::Result;
 use app::AppState;
 
 fn main() -> Result<()> {
+    // Handle --version / --help BEFORE any terminal init so they never touch the
+    // alternate screen (and so install scripts can probe the binary safely).
+    for arg in std::env::args().skip(1) {
+        match arg.as_str() {
+            "--version" | "-V" => {
+                println!("muxrctl {}", env!("CARGO_PKG_VERSION"));
+                return Ok(());
+            }
+            "--help" | "-h" => {
+                println!(
+                    "muxrctl {} — install / configure / pair TUI for muxrd\n\n\
+                     USAGE:\n    muxrctl [--version] [--help]\n\n\
+                     Run with no arguments to launch the control panel.",
+                    env!("CARGO_PKG_VERSION")
+                );
+                return Ok(());
+            }
+            _ => {}
+        }
+    }
+
     // Logging to stderr. The TUI owns stdout (alternate screen), so env_logger's
     // default stderr target does not corrupt the rendered frame. Quiet by
     // default; raise with e.g. `RUST_LOG=muxrctl=debug`.
