@@ -385,11 +385,11 @@ fn sidecar_covers_all_requested_when_superset() {
     use muxrd::tls::SanEntry;
     use std::net::{IpAddr, Ipv4Addr};
 
-    let stored = vec![
+    let stored = [
         SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5))),
         SanEntry::Dns("myhost.local".to_owned()),
     ];
-    let requested = vec![SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)))];
+    let requested = [SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)))];
     let all_covered = requested.iter().all(|r| stored.contains(r));
     assert!(all_covered, "stored superset should cover requested SANs");
 }
@@ -400,7 +400,7 @@ fn sidecar_does_not_cover_new_san() {
     use std::net::{IpAddr, Ipv4Addr};
 
     let stored: Vec<SanEntry> = vec![]; // empty — no extras when cert was generated
-    let requested = vec![SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)))];
+    let requested = [SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)))];
     let all_covered = requested.iter().all(|r| stored.contains(r));
     assert!(!all_covered, "empty sidecar should not cover new SAN");
 }

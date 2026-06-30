@@ -63,7 +63,9 @@ pub fn load_advertise_trust() -> &'static str {
     let path = match ctl_state_path() {
         Ok(p) => p,
         Err(e) => {
-            log::debug!("ctl_state: cannot resolve data dir ({e}); defaulting advertise_trust=auto");
+            log::debug!(
+                "ctl_state: cannot resolve data dir ({e}); defaulting advertise_trust=auto"
+            );
             return TRUST_AUTO;
         }
     };

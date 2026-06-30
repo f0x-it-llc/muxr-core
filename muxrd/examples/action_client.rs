@@ -91,12 +91,11 @@ async fn tls_channel(addr: &str, cert_pem: &str) -> Result<Channel> {
         .with_context(|| format!("connect to {addr}"))
 }
 
-type AuthedClient = MuxrClient<
-    tonic::service::interceptor::InterceptedService<
-        Channel,
-        Box<dyn Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Send + Sync>,
-    >,
->;
+type BearerInterceptor =
+    Box<dyn Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Send + Sync>;
+
+type AuthedClient =
+    MuxrClient<tonic::service::interceptor::InterceptedService<Channel, BearerInterceptor>>;
 
 /// Count panes and return a flat list of (tab_id, pane_id, is_plugin, title).
 async fn layout_panes(
@@ -413,11 +412,10 @@ async fn build_authed(
     let bearer: MetadataValue<_> = format!("Bearer {session_token}")
         .parse()
         .context("construct bearer header")?;
-    let interceptor: Box<dyn Fn(Request<()>) -> Result<Request<()>, tonic::Status> + Send + Sync> =
-        Box::new(move |mut req: Request<()>| {
-            req.metadata_mut().insert("authorization", bearer.clone());
-            Ok(req)
-        });
+    let interceptor: BearerInterceptor = Box::new(move |mut req: Request<()>| {
+        req.metadata_mut().insert("authorization", bearer.clone());
+        Ok(req)
+    });
     Ok(MuxrClient::with_interceptor(channel, interceptor))
 }
 

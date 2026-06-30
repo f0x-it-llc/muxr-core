@@ -142,13 +142,14 @@ fn collect_sans(cli_sans: &[String], bind_addr: &str) -> Vec<SanEntry> {
     // Auto-include the bind IP when it is non-loopback.
     if let Some(host) = bind_addr.rsplit_once(':').map(|(h, _)| h) {
         let host = host.trim_matches(|c| c == '[' || c == ']'); // strip IPv6 brackets
-        if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-            if !ip.is_loopback() && !ip.is_unspecified() {
-                let entry = SanEntry::Ip(ip);
-                if !sans.contains(&entry) {
-                    log::debug!("tls: auto-including non-loopback bind IP {ip} in cert SANs");
-                    sans.push(entry);
-                }
+        if let Ok(ip) = host.parse::<std::net::IpAddr>()
+            && !ip.is_loopback()
+            && !ip.is_unspecified()
+        {
+            let entry = SanEntry::Ip(ip);
+            if !sans.contains(&entry) {
+                log::debug!("tls: auto-including non-loopback bind IP {ip} in cert SANs");
+                sans.push(entry);
             }
         }
     }
@@ -199,7 +200,7 @@ async fn cmd_init(bind_override: Option<&str>, args: InitArgs) -> Result<()> {
 
             // Print the SANs covered by the cert (informational; ext cert SANs are
             // whatever the CA issued — we just validate the files are loadable).
-            let builtin = vec!["127.0.0.1", "localhost"];
+            let builtin = ["127.0.0.1", "localhost"];
             let extra_desc: Vec<String> = extra_sans
                 .iter()
                 .map(|s| match s {
@@ -225,14 +226,14 @@ async fn cmd_init(bind_override: Option<&str>, args: InitArgs) -> Result<()> {
             // flag.  cmd_init doesn't bind, so there is no security gap here,
             // but surfacing the same note helps the operator anticipate what
             // `start` will require.
-            if let Ok(addr) = cfg.bind_addr.parse::<std::net::SocketAddr>() {
-                if !addr.ip().is_loopback() {
-                    println!(
-                        "Note     : h2c + non-loopback bind ({}) — \
+            if let Ok(addr) = cfg.bind_addr.parse::<std::net::SocketAddr>()
+                && !addr.ip().is_loopback()
+            {
+                println!(
+                    "Note     : h2c + non-loopback bind ({}) — \
                          `start` will require --i-know-this-is-behind-a-proxy",
-                        cfg.bind_addr
-                    );
-                }
+                    cfg.bind_addr
+                );
             }
         }
         CertSource::SelfSigned => {
@@ -246,7 +247,7 @@ async fn cmd_init(bind_override: Option<&str>, args: InitArgs) -> Result<()> {
             println!("Key      : {}", data_dir.join("server.key").display());
 
             // Print the SANs covered by the cert.
-            let builtin = vec!["127.0.0.1", "localhost"];
+            let builtin = ["127.0.0.1", "localhost"];
             let extra_desc: Vec<String> = extra_sans
                 .iter()
                 .map(|s| match s {
@@ -324,10 +325,9 @@ fn cmd_list_tokens() -> Result<()> {
         .max(13); // len("Created (UTC)")
 
     println!(
-        "{:<name_w$}  {:<date_w$}  {}",
+        "{:<name_w$}  {:<date_w$}  Read-only",
         "Name",
         "Created (UTC)",
-        "Read-only",
         name_w = name_w,
         date_w = date_w,
     );
@@ -702,48 +702,6 @@ async fn serve(
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `cert_identity` must return `None` for h2c — no TLS identity to load.
-    #[test]
-    fn cert_identity_h2c_returns_none() {
-        // No crypto provider needed — h2c returns before touching TLS.
-        let result = cert_identity(&CertSource::H2c, &[]);
-        assert!(
-            result.is_ok(),
-            "cert_identity(H2c) should not error: {:?}",
-            result.err()
-        );
-        assert!(
-            result.unwrap().is_none(),
-            "cert_identity(H2c) must return None"
-        );
-    }
-
-    /// `cert_identity` for SelfSigned must return `Some` with a non-empty cert PEM.
-    #[test]
-    fn cert_identity_self_signed_returns_some() {
-        // Install the ring crypto provider so TLS ops work in the test runtime.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        let result = cert_identity(&CertSource::SelfSigned, &[]);
-        assert!(
-            result.is_ok(),
-            "cert_identity(SelfSigned) should succeed: {:?}",
-            result.err()
-        );
-        let pair = result.unwrap();
-        assert!(pair.is_some(), "cert_identity(SelfSigned) must return Some");
-        let (_identity, cert_pem) = pair.unwrap();
-        assert!(
-            cert_pem.contains("CERTIFICATE"),
-            "cert PEM must contain CERTIFICATE block"
-        );
-    }
-}
-
 // ── status ──────────────────────────────────────────────────────────────────
 
 /// `status` — query the control socket and print running/stopped.
@@ -876,5 +834,47 @@ fn cleanup_stale() {
     control::cleanup();
     if let Ok(path) = pidfile_path() {
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `cert_identity` must return `None` for h2c — no TLS identity to load.
+    #[test]
+    fn cert_identity_h2c_returns_none() {
+        // No crypto provider needed — h2c returns before touching TLS.
+        let result = cert_identity(&CertSource::H2c, &[]);
+        assert!(
+            result.is_ok(),
+            "cert_identity(H2c) should not error: {:?}",
+            result.err()
+        );
+        assert!(
+            result.unwrap().is_none(),
+            "cert_identity(H2c) must return None"
+        );
+    }
+
+    /// `cert_identity` for SelfSigned must return `Some` with a non-empty cert PEM.
+    #[test]
+    fn cert_identity_self_signed_returns_some() {
+        // Install the ring crypto provider so TLS ops work in the test runtime.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let result = cert_identity(&CertSource::SelfSigned, &[]);
+        assert!(
+            result.is_ok(),
+            "cert_identity(SelfSigned) should succeed: {:?}",
+            result.err()
+        );
+        let pair = result.unwrap();
+        assert!(pair.is_some(), "cert_identity(SelfSigned) must return Some");
+        let (_identity, cert_pem) = pair.unwrap();
+        assert!(
+            cert_pem.contains("CERTIFICATE"),
+            "cert PEM must contain CERTIFICATE block"
+        );
     }
 }

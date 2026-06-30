@@ -1124,10 +1124,9 @@ mod tests {
         assert_eq!(state.cert.advertise_trust, AdvertiseTrust::Ca);
         // A SaveAdvertiseTrust(Ca) action is emitted.
         assert!(
-            actions.iter().any(|a| matches!(
-                a,
-                UpdateAction::SaveAdvertiseTrust(AdvertiseTrust::Ca)
-            )),
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::SaveAdvertiseTrust(AdvertiseTrust::Ca))),
             "expected SaveAdvertiseTrust(Ca) in actions; got: {actions:?}"
         );
     }
@@ -1138,7 +1137,11 @@ mod tests {
         // persist string so the saved file is always parseable back to the same
         // variant.
         use crate::app::state::AdvertiseTrust;
-        for variant in [AdvertiseTrust::Auto, AdvertiseTrust::Ca, AdvertiseTrust::Pin] {
+        for variant in [
+            AdvertiseTrust::Auto,
+            AdvertiseTrust::Ca,
+            AdvertiseTrust::Pin,
+        ] {
             let s = variant.persist_str();
             let back = AdvertiseTrust::from_persist_str(s);
             assert_eq!(
@@ -1552,10 +1555,7 @@ mod tests {
         assert!(pin_uri.contains("ro=0"), "ro: {pin_uri}");
         assert!(pin_uri.contains("n=My%20Server"), "label: {pin_uri}");
         assert!(pin_uri.contains("tm=pin"), "tm=pin: {pin_uri}");
-        assert!(
-            pin_uri.contains("fp=a1b2c3d4e5f6"),
-            "fp prefix: {pin_uri}"
-        );
+        assert!(pin_uri.contains("fp=a1b2c3d4e5f6"), "fp prefix: {pin_uri}");
 
         // Verify token round-trips correctly.
         let t_val = pin_uri
