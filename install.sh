@@ -249,6 +249,13 @@ main() {
         info "Latest version: ${version}"
     fi
 
+    # Tolerate a leading 'v' (parity with the release workflow), then validate
+    # before the string is used to build URLs / paths.
+    version="${version#v}"
+    if ! printf '%s' "$version" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+        error "Invalid version '${version}' — expected semver like 0.1.0."
+    fi
+
     # Check installed version
     local installed_version
     installed_version="$(get_installed_version)"
@@ -284,9 +291,36 @@ main() {
         error "Downloaded archive is empty. The release artifact may not exist for target ${target}."
     fi
 
-    # Extract suite
+    # Verify the published SHA-256 checksum before extracting/installing/running
+    # anything. Fail closed if the checksum file is missing or does not match.
+    info "Verifying checksum..."
+    local checksums_url="${GITHUB_RELEASES}/v${version}/checksums-sha256.txt"
+    local checksums_path="${TMPDIR_WORK}/checksums-sha256.txt"
+    if ! curl -fsSL -A "$USER_AGENT" --retry 2 --retry-delay 1 --output "$checksums_path" "$checksums_url"; then
+        error "Could not download checksums-sha256.txt for v${version}; refusing to install an unverified artifact."
+    fi
+    local expected_sum
+    expected_sum="$(awk -v f="$archive_name" '$2 == f { print $1 }' "$checksums_path")"
+    if [ -z "$expected_sum" ]; then
+        error "No checksum entry for ${archive_name} in checksums-sha256.txt."
+    fi
+    local actual_sum
+    if command -v sha256sum >/dev/null 2>&1; then
+        actual_sum="$(sha256sum "$archive_path" | awk '{print $1}')"
+    elif command -v shasum >/dev/null 2>&1; then
+        actual_sum="$(shasum -a 256 "$archive_path" | awk '{print $1}')"
+    else
+        error "Need 'sha256sum' or 'shasum' to verify the download. Please install one and retry."
+    fi
+    if [ "$actual_sum" != "$expected_sum" ]; then
+        error "Checksum mismatch for ${archive_name} (expected ${expected_sum}, got ${actual_sum}). Aborting."
+    fi
+    success "Checksum verified."
+
+    # Extract only the two expected members (defends against a crafted archive
+    # with extra/traversal entries; both binaries live at the archive root).
     info "Extracting archive..."
-    tar -xzf "$archive_path" -C "$TMPDIR_WORK"
+    tar -xzf "$archive_path" -C "$TMPDIR_WORK" muxrd muxrctl
 
     # Ensure install directory exists
     local install_dir="${DEFAULT_INSTALL_DIR}"

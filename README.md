@@ -24,9 +24,9 @@ curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.s
 This installs `muxrd` and `muxrctl` into `~/.local/bin` (override with
 `MUXR_INSTALL_DIR`). Pin a version with `… | bash -s -- --version 0.1.0`.
 Pre-built targets: `x86_64`/`aarch64` × `unknown-linux-gnu`/`apple-darwin`.
-Windows is unsupported (the server requires a Unix host). Each
-[release](https://github.com/f0x-it-llc/muxr-core/releases) also ships a
-`checksums-sha256.txt` for manual verification.
+Windows is unsupported (the server requires a Unix host). The installer
+verifies the downloaded archive against the release's published
+`checksums-sha256.txt` (SHA-256) and fails closed on any mismatch.
 
 ## Build
 

@@ -8,8 +8,10 @@ on:
         required: false
         type: string
 
+# Least privilege: read by default; only the jobs that push a commit/tag or
+# create the release get contents: write (set per-job below).
 permissions:
-  contents: write
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -19,6 +21,8 @@ jobs:
   version:
     name: Compute Version
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     outputs:
       version: ${{ steps.compute.outputs.version }}
       tag: ${{ steps.compute.outputs.tag }}
@@ -41,9 +45,17 @@ jobs:
 
       - name: Compute next version
         id: compute
+        env:
+          # Pass the dispatch input via env (not raw ${{ }} in the script) to
+          # avoid shell injection and to validate it before use.
+          VERSION_INPUT: ${{ inputs.version }}
         run: |
-          if [ -n "${{ inputs.version }}" ]; then
-            VERSION="${{ inputs.version }}"
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="${VERSION_INPUT#v}"   # tolerate a leading 'v'
+            if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+              echo "::error::Invalid version '$VERSION_INPUT' — expected semver like 0.2.0."
+              exit 1
+            fi
             TAG="v${VERSION}"
             echo "Using manual version: $TAG"
           else
@@ -89,7 +101,13 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add Cargo.toml Cargo.lock
-          git commit -m "chore(release): bump version to ${{ steps.compute.outputs.version }} [skip ci]"
+          # The very first release (computed v0.1.0 == current) and any same-
+          # version re-run produce no diff; don't let `git commit` abort the run.
+          if git diff --cached --quiet; then
+            echo "Version already at ${{ steps.compute.outputs.version }} — no bump commit needed; tagging current HEAD."
+          else
+            git commit -m "chore(release): bump version to ${{ steps.compute.outputs.version }} [skip ci]"
+          fi
 
       - name: Create and push tag
         run: |
@@ -222,6 +240,8 @@ jobs:
     name: Create GitHub Release
     needs: [version, build-linux, build-macos]
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout
