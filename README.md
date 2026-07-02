@@ -23,7 +23,9 @@ curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.s
 
 This installs `muxrd` and `muxrctl` into `~/.local/bin` (override with
 `MUXR_INSTALL_DIR`). Pin a version with `… | bash -s -- --version 0.1.0`.
-Pre-built targets: `x86_64`/`aarch64` × `unknown-linux-gnu`/`apple-darwin`.
+Pre-built targets: `x86_64-unknown-linux-gnu`, `aarch64-unknown-linux-gnu`, and
+`aarch64-apple-darwin` (Apple Silicon). **Intel Macs** (`x86_64-apple-darwin`)
+have no prebuilt binary — build from source with `cargo build --release`.
 Windows is unsupported (the server requires a Unix host). The installer
 verifies the downloaded archive against the release's published
 `checksums-sha256.txt` (SHA-256) and fails closed on any mismatch.
@@ -124,9 +126,10 @@ Releases are cut by the **Release** GitHub Actions workflow
    in the root `Cargo.toml`; both crates inherit it.
 2. **Bump + tag** — the workflow updates the workspace version, commits
    `chore(release): … [skip ci]`, and pushes a `vX.Y.Z` tag to `main`.
-3. **Build** — both binaries are compiled for all four targets (Linux
-   `x86_64`/`aarch64` on native runners, macOS `x86_64`/`aarch64`) and packaged
-   as one `muxr-core-v<ver>-<target>.tar.gz` suite archive per target.
+3. **Build** — both binaries are compiled for three targets on native runners
+   (Linux `x86_64`/`aarch64`, macOS `aarch64`) and packaged as one
+   `muxr-core-v<ver>-<target>.tar.gz` suite archive per target. Intel macOS
+   (`x86_64-apple-darwin`) is not built — see the Install section.
 4. **Publish** — a GitHub Release is created with the suite archives,
    `checksums-sha256.txt`, `install.sh`, and a git-cliff changelog.
 

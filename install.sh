@@ -230,6 +230,13 @@ main() {
     arch="$(detect_arch)"
     target="${arch}-${os}"
 
+    # No prebuilt Intel-macOS binary is published (zellij's OpenSSL dep can't be
+    # cross-compiled and free CI no longer offers native Intel runners). Guide
+    # those users to build from source instead of failing on a 404.
+    if [ "$target" = "x86_64-apple-darwin" ]; then
+        error "No prebuilt binary is published for Intel Macs (x86_64-apple-darwin). Build from source: 'git clone https://github.com/${REPO} && cd muxr-core && cargo build --release' — or run on Apple Silicon."
+    fi
+
     info "Detected platform: ${target}"
 
     # Resolve target version
