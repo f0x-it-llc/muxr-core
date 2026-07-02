@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+# Cancel in-progress runs when a new run is triggered on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: Check / ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    # Fail fast on a hung test/build instead of burning the 6h GitHub default.
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux + macOS only — muxrd is Unix-only (unconditional std::os::unix).
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install build dependencies (Linux)
+        # protoc: muxrd/build.rs compiles the proto via tonic-prost-build.
+        # cmake + clang: aws-lc-rs is force-compiled into the rustls graph.
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake clang
+
+      - name: Install build dependencies (macOS)
+        # cmake + clang come from Xcode; protoc does not.
+        if: runner.os == 'macOS'
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        # NOTE: pinned to a commit SHA for supply-chain immutability; the rustc
+        # version still tracks 'stable' at workflow runtime.
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+
+      - name: cargo fmt
+        run: cargo fmt --all -- --check
+
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+
+      - name: cargo test
+        run: cargo test --workspace
+        # Live-backend integration tests (herdr, zellij) are #[ignore]'d and do
+        # not run under a plain `cargo test`, so they do not block CI.
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings

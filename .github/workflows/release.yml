@@ -1,0 +1,282 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override (e.g. 0.2.0). Leave empty for auto-bump from conventional commits."
+        required: false
+        type: string
+
+# Least privilege: read by default; only the jobs that push a commit/tag or
+# create the release get contents: write (set per-job below).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ── Step 1: Compute version, bump, tag ──────────────────────────────
+  version:
+    name: Compute Version
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      version: ${{ steps.compute.outputs.version }}
+      tag: ${{ steps.compute.outputs.tag }}
+
+    steps:
+      - name: Checkout with full history
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: main
+          fetch-depth: 0
+          # Default GITHUB_TOKEN credentials are persisted so the bump commit +
+          # tag can be pushed back to main. Requires main to accept pushes from
+          # github-actions[bot] (no blocking branch ruleset). If main is
+          # protected, swap to a GitHub App token (see README "Releasing").
+
+      - name: Install git-cliff
+        uses: taiki-e/install-action@cf525cb33f51aca27cd6fa02034117ab963ff9f1 # v2.75.22
+        with:
+          tool: git-cliff
+
+      - name: Compute next version
+        id: compute
+        env:
+          # Pass the dispatch input via env (not raw ${{ }} in the script) to
+          # avoid shell injection and to validate it before use.
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          if [ -n "$VERSION_INPUT" ]; then
+            VERSION="${VERSION_INPUT#v}"   # tolerate a leading 'v'
+            if ! printf '%s' "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.]+)?$'; then
+              echo "::error::Invalid version '$VERSION_INPUT' — expected semver like 0.2.0."
+              exit 1
+            fi
+            TAG="v${VERSION}"
+            echo "Using manual version: $TAG"
+          else
+            # cliff.toml pins tag_pattern = "^v[0-9].*", so the non-semver
+            # `fonts-v1` tag is ignored when computing the bump.
+            TAG=$(git cliff --bumped-version 2>/dev/null || true)
+            if [ -z "$TAG" ]; then
+              echo "::error::No releasable conventional commits found since last tag."
+              exit 1
+            fi
+            # --match excludes `fonts-v1` from the last-release baseline too.
+            LAST=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || echo "none")
+            if [ "$TAG" = "$LAST" ]; then
+              echo "::error::No version bump needed ($TAG already tagged)."
+              exit 1
+            fi
+            VERSION="${TAG#v}"
+            echo "Auto-computed version: $TAG (was $LAST)"
+          fi
+
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        # NOTE: pinned to a commit SHA for supply-chain immutability; the rustc
+        # version still tracks 'stable' at workflow runtime.
+
+      - name: Update workspace version
+        run: |
+          VERSION="${{ steps.compute.outputs.version }}"
+          # Root Cargo.toml's only `^version = ` line lives under
+          # [workspace.package]; both crates inherit it via version.workspace.
+          sed -i 's/^version = ".*"/version = "'"$VERSION"'"/' Cargo.toml
+          grep -q "^version = \"$VERSION\"" Cargo.toml || { echo "::error::Failed to update version"; exit 1; }
+          echo "Updated workspace version to $VERSION"
+
+      - name: Update Cargo.lock
+        run: cargo generate-lockfile
+
+      - name: Commit version bump
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock
+          # The very first release (computed v0.1.0 == current) and any same-
+          # version re-run produce no diff; don't let `git commit` abort the run.
+          if git diff --cached --quiet; then
+            echo "Version already at ${{ steps.compute.outputs.version }} — no bump commit needed; tagging current HEAD."
+          else
+            git commit -m "chore(release): bump version to ${{ steps.compute.outputs.version }} [skip ci]"
+          fi
+
+      - name: Create and push tag
+        run: |
+          TAG="${{ steps.compute.outputs.tag }}"
+          # Remove a stale tag from a previous failed run, if any.
+          git tag -d "$TAG" 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+          git tag "$TAG"
+          git push origin HEAD:main "$TAG"
+
+  # ── Step 2a: Build Linux (native x86_64 + native aarch64) ───────────
+  build-linux:
+    name: Build Linux (${{ matrix.target }})
+    needs: [version]
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            runner: ubuntu-latest
+          - target: aarch64-unknown-linux-gnu
+            runner: ubuntu-24.04-arm
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install build dependencies
+        # protoc: muxrd/build.rs compiles proto/muxr.proto via tonic-prost-build.
+        # cmake + clang: aws-lc-rs is force-compiled into the rustls graph.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Build both binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binaries
+        run: |
+          strip target/${{ matrix.target }}/release/muxrd
+          strip target/${{ matrix.target }}/release/muxrctl
+
+      - name: Package suite archive
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          ARCHIVE="muxr-core-v${VERSION}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/muxrd dist/
+          cp target/${{ matrix.target }}/release/muxrctl dist/
+          tar -czf "$ARCHIVE" -C dist muxrd muxrctl
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: muxr-core-v${{ needs.version.outputs.version }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  # ── Step 2b: Build macOS (x86_64 + aarch64) ─────────────────────────
+  build-macos:
+    name: Build macOS (${{ matrix.target }})
+    needs: [version]
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+          - target: aarch64-apple-darwin
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+
+      - name: Install build dependencies
+        # cmake + clang ship with the Xcode toolchain; protoc does not.
+        run: brew install protobuf
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          shared-key: ${{ matrix.target }}
+
+      - name: Build both binaries
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Strip binaries
+        run: |
+          strip target/${{ matrix.target }}/release/muxrd
+          strip target/${{ matrix.target }}/release/muxrctl
+
+      - name: Package suite archive
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          ARCHIVE="muxr-core-v${VERSION}-${{ matrix.target }}.tar.gz"
+          mkdir -p dist
+          cp target/${{ matrix.target }}/release/muxrd dist/
+          cp target/${{ matrix.target }}/release/muxrctl dist/
+          tar -czf "$ARCHIVE" -C dist muxrd muxrctl
+          echo "ARCHIVE=$ARCHIVE" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: muxr-core-v${{ needs.version.outputs.version }}-${{ matrix.target }}
+          path: ${{ env.ARCHIVE }}
+          retention-days: 1
+
+  # ── Step 3: Create GitHub Release ───────────────────────────────────
+  release:
+    name: Create GitHub Release
+    needs: [version, build-linux, build-macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ needs.version.outputs.tag }}
+          fetch-depth: 0
+
+      - name: Generate release changelog
+        uses: orhun/git-cliff-action@f50e11560dce63f7c33227798f90b924471a88b5 # v4.8.0
+        id: changelog
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+        env:
+          OUTPUT: CHANGES.md
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: artifacts/
+          merge-multiple: true
+
+      - name: Generate SHA256 checksums
+        working-directory: artifacts/
+        run: sha256sum muxr-core-v*.tar.gz > checksums-sha256.txt
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          body_path: CHANGES.md
+          files: |
+            artifacts/muxr-core-v*.tar.gz
+            artifacts/checksums-sha256.txt
+            install.sh

@@ -10,17 +10,17 @@
 //! muxr://pair?v=2&h=<host>&p=<port>&t=<base64url>&ro=<0|1>&n=<pct-encoded>&tm=<pin|ca>[&fp=<hex>]
 //! ```
 //!
-//! - `v=2`     — URI version.  The emitter now writes v=2; v=1 URIs are still
-//!               accepted by the mobile parser for backwards compatibility.
-//! - `h`       — server host or IP.
-//! - `p`       — server port.
-//! - `t`       — base64url (no padding) of the plaintext auth token bytes.
-//! - `ro`      — `1` for read-only tokens, `0` for read-write.
-//! - `n`       — percent-encoded human label for the server (shown in the app).
-//! - `tm`      — trust mode: `pin` (fingerprint-pinned / self-signed) or `ca`
-//!               (system-CA trusted).
-//! - `fp`      — lowercase hex SHA-256 fingerprint of the server TLS cert DER;
-//!               **present only when `tm=pin`**, absent for `tm=ca`.
+//! - `v=2` — URI version.  The emitter now writes v=2; v=1 URIs are still
+//!   accepted by the mobile parser for backwards compatibility.
+//! - `h` — server host or IP.
+//! - `p` — server port.
+//! - `t` — base64url (no padding) of the plaintext auth token bytes.
+//! - `ro` — `1` for read-only tokens, `0` for read-write.
+//! - `n` — percent-encoded human label for the server (shown in the app).
+//! - `tm` — trust mode: `pin` (fingerprint-pinned / self-signed) or `ca`
+//!   (system-CA trusted).
+//! - `fp` — lowercase hex SHA-256 fingerprint of the server TLS cert DER;
+//!   **present only when `tm=pin`**, absent for `tm=ca`.
 //!
 //! ### Trust modes
 //!
@@ -42,12 +42,12 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 ///
 /// The caller (C2) is responsible for supplying the correct variant based on
 /// the server's cert source:
-/// - `Pin`   — self-signed / direct TLS; the 64-char lowercase hex SHA-256
-///             fingerprint of the server's DER cert **must** be supplied.
-///             Invariant: `fingerprint` is exactly 64 lowercase hex characters.
-/// - `Ca`    — CA-signed cert (Let's Encrypt, Cloudflare edge, etc.) or h2c
-///             (TLS terminated by an upstream proxy).  No fingerprint is
-///             included; the mobile client uses the system CA store.
+/// - `Pin` — self-signed / direct TLS; the 64-char lowercase hex SHA-256
+///   fingerprint of the server's DER cert **must** be supplied.
+///   Invariant: `fingerprint` is exactly 64 lowercase hex characters.
+/// - `Ca` — CA-signed cert (Let's Encrypt, Cloudflare edge, etc.) or h2c
+///   (TLS terminated by an upstream proxy).  No fingerprint is
+///   included; the mobile client uses the system CA store.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PairingTrust {
     /// Fingerprint-pinned trust (self-signed / LAN).

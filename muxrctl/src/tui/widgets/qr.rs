@@ -264,9 +264,7 @@ mod tests {
     /// QR is encoded exactly once in `new`; block_width and render both reuse it.
     #[test]
     fn qr_encoded_once_in_new() {
-        let w = QrWidget::new(
-            "muxr://pair?v=1&h=127.0.0.1&p=50051&fp=aabbcc&t=dGVzdA&ro=0&n=dev",
-        );
+        let w = QrWidget::new("muxr://pair?v=1&h=127.0.0.1&p=50051&fp=aabbcc&t=dGVzdA&ro=0&n=dev");
         // code must be Some for a valid payload
         assert!(w.code.is_some(), "QrCode should be encoded in new()");
         // block_width reads from the same stored code, not re-encoding

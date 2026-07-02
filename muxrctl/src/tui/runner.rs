@@ -42,8 +42,7 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
     // the operator's last-set value survives restarts.
     {
         let persisted = crate::server::load_advertise_trust();
-        state.cert.advertise_trust =
-            crate::app::state::AdvertiseTrust::from_persist_str(persisted);
+        state.cert.advertise_trust = crate::app::state::AdvertiseTrust::from_persist_str(persisted);
     }
 
     // Seed the initial dashboard load: lands on Dashboard via AppState::new but the
@@ -348,24 +347,22 @@ fn build_token_qr_task(
         AdvertiseTrust::Ca => PairingTrust::Ca,
 
         // Layer-2: operator forced Pin → fingerprint required.
-        AdvertiseTrust::Pin => {
-            match crate::server::current_cert_fingerprint() {
-                Ok(Some(fp)) => PairingTrust::Pin { fingerprint: fp },
-                Ok(None) => {
-                    return Message::TokenQrFailed {
-                        err: "No certificate yet — open the Cert screen and generate one first."
-                            .to_string(),
-                        seq,
-                    };
-                }
-                Err(e) => {
-                    return Message::TokenQrFailed {
-                        err: format!("cert fingerprint: {e}"),
-                        seq,
-                    };
-                }
+        AdvertiseTrust::Pin => match crate::server::current_cert_fingerprint() {
+            Ok(Some(fp)) => PairingTrust::Pin { fingerprint: fp },
+            Ok(None) => {
+                return Message::TokenQrFailed {
+                    err: "No certificate yet — open the Cert screen and generate one first."
+                        .to_string(),
+                    seq,
+                };
             }
-        }
+            Err(e) => {
+                return Message::TokenQrFailed {
+                    err: format!("cert fingerprint: {e}"),
+                    seq,
+                };
+            }
+        },
 
         // Layer-2 Auto: consult Layer-1 cert_mode via the shared pure helper.
         AdvertiseTrust::Auto => {

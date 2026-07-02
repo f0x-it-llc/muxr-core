@@ -317,6 +317,154 @@ pub fn check_h2c_bind_safety(
     }
 }
 
+/// Load or create the config file, then apply env + CLI overrides.
+///
+/// `bind_override` — set when the user passes `--bind` on the CLI.
+pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
+    let config_file = config_file_path()?;
+    let data_dir = data_dir()?;
+
+    // ── Read file (tolerant — missing file → defaults; parse error → warn) ──
+    let file_cfg: FileConfig = if config_file.exists() {
+        let raw = std::fs::read_to_string(&config_file)
+            .with_context(|| format!("read {}", config_file.display()))?;
+        toml::from_str(&raw).unwrap_or_else(|e| {
+            log::warn!(
+                "config: failed to parse {}: {e} — using defaults",
+                config_file.display()
+            );
+            FileConfig::default()
+        })
+    } else {
+        FileConfig::default()
+    };
+
+    // ── Precedence chain ─────────────────────────────────────────────────────
+
+    // bind_addr: CLI flag > ZELLIMSERVER_BIND env > config file > default
+    let bind_addr = bind_override
+        .map(|s| s.to_owned())
+        .or_else(|| std::env::var("ZELLIMSERVER_BIND").ok())
+        .or(file_cfg.bind_addr)
+        .unwrap_or_else(|| DEFAULT_BIND.to_owned());
+
+    // cert_dir: config file > default (data_dir)
+    let cert_dir = file_cfg
+        .cert_dir
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.clone());
+
+    // log_path: config file > default (data_dir/muxrd.log)
+    let log_path = file_cfg
+        .log_path
+        .map(PathBuf::from)
+        .unwrap_or_else(|| data_dir.join("muxrd.log"));
+
+    Ok(EffectiveConfig {
+        bind_addr,
+        cert_dir,
+        log_path,
+        config_file,
+    })
+}
+
+/// Persist `bind_addr` into the config file (creating it from the template if
+/// absent), preserving all other fields.
+///
+/// Used by `muxrctl`'s Config screen so users can update the bind address
+/// without manually editing TOML.  The write is done atomically: read the
+/// current config → update `bind_addr` → serialize → write to a temp file in
+/// the same directory → `chmod 0600` the temp file (Unix) → `rename` the temp
+/// file over the real config (POSIX-atomic on the same filesystem). This ensures
+/// no crash mid-write leaves a partial or world-readable file, and no other
+/// fields are silently lost.
+pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
+    // Ensure the file exists (idempotent; writes a template when absent).
+    let path = ensure_config_file()?;
+
+    // Read the current content, falling back to defaults on parse errors so a
+    // corrupted file doesn't block the update.
+    let file_cfg: FileConfig = if path.exists() {
+        let raw = std::fs::read_to_string(&path)
+            .with_context(|| format!("set_bind_addr: read {}", path.display()))?;
+        toml::from_str(&raw).unwrap_or_else(|e| {
+            log::warn!(
+                "config: set_bind_addr: failed to parse {}: {e} — overwriting with defaults + new bind_addr",
+                path.display()
+            );
+            FileConfig::default()
+        })
+    } else {
+        FileConfig::default()
+    };
+
+    // Update the bind_addr field and serialise.
+    let updated = FileConfig {
+        bind_addr: Some(bind_addr.to_owned()),
+        ..file_cfg
+    };
+    let toml_str = toml::to_string_pretty(&updated).context("set_bind_addr: serialize config")?;
+
+    // Write to a temporary file in the same directory as the target.
+    let parent = path
+        .parent()
+        .context("config file has no parent directory")?;
+    let temp_path = parent.join(".config.toml.tmp");
+    std::fs::write(&temp_path, &toml_str)
+        .with_context(|| format!("set_bind_addr: write temp file {}", temp_path.display()))?;
+
+    // Restrict permissions on the temp file before renaming (Unix).
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&temp_path, perms).with_context(|| {
+            format!(
+                "set_bind_addr: chmod 0600 temp file {}",
+                temp_path.display()
+            )
+        })?;
+    }
+
+    // Atomically rename temp file over the real config (POSIX-atomic on same filesystem).
+    std::fs::rename(&temp_path, &path).with_context(|| {
+        format!(
+            "set_bind_addr: rename {} to {}",
+            temp_path.display(),
+            path.display()
+        )
+    })?;
+
+    log::info!(
+        "config: set bind_addr = {bind_addr:?} in {}",
+        path.display()
+    );
+    Ok(())
+}
+
+/// Ensure the config file exists.  If it doesn't, write a commented template
+/// with the current defaults so the user can inspect and edit it.
+pub fn ensure_config_file() -> Result<PathBuf> {
+    let path = config_file_path()?;
+    if !path.exists() {
+        let data_dir = data_dir()?;
+        let template = format!(
+            "# muxrd configuration file\n\
+             # All fields are optional; missing fields use built-in defaults.\n\
+             #\n\
+             # bind_addr = \"{DEFAULT_BIND}\"\n\
+             # cert_dir  = \"{}\"\n\
+             # log_path  = \"{}\"\n",
+            data_dir.display(),
+            data_dir.join("muxrd.log").display(),
+        );
+        std::fs::write(&path, template)
+            .with_context(|| format!("write config file {}", path.display()))?;
+        log::info!("config: created template at {}", path.display());
+    }
+    Ok(path)
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -748,152 +896,4 @@ mod tests {
             );
         }
     }
-}
-
-/// Load or create the config file, then apply env + CLI overrides.
-///
-/// `bind_override` — set when the user passes `--bind` on the CLI.
-pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
-    let config_file = config_file_path()?;
-    let data_dir = data_dir()?;
-
-    // ── Read file (tolerant — missing file → defaults; parse error → warn) ──
-    let file_cfg: FileConfig = if config_file.exists() {
-        let raw = std::fs::read_to_string(&config_file)
-            .with_context(|| format!("read {}", config_file.display()))?;
-        toml::from_str(&raw).unwrap_or_else(|e| {
-            log::warn!(
-                "config: failed to parse {}: {e} — using defaults",
-                config_file.display()
-            );
-            FileConfig::default()
-        })
-    } else {
-        FileConfig::default()
-    };
-
-    // ── Precedence chain ─────────────────────────────────────────────────────
-
-    // bind_addr: CLI flag > ZELLIMSERVER_BIND env > config file > default
-    let bind_addr = bind_override
-        .map(|s| s.to_owned())
-        .or_else(|| std::env::var("ZELLIMSERVER_BIND").ok())
-        .or(file_cfg.bind_addr)
-        .unwrap_or_else(|| DEFAULT_BIND.to_owned());
-
-    // cert_dir: config file > default (data_dir)
-    let cert_dir = file_cfg
-        .cert_dir
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.clone());
-
-    // log_path: config file > default (data_dir/muxrd.log)
-    let log_path = file_cfg
-        .log_path
-        .map(PathBuf::from)
-        .unwrap_or_else(|| data_dir.join("muxrd.log"));
-
-    Ok(EffectiveConfig {
-        bind_addr,
-        cert_dir,
-        log_path,
-        config_file,
-    })
-}
-
-/// Persist `bind_addr` into the config file (creating it from the template if
-/// absent), preserving all other fields.
-///
-/// Used by `muxrctl`'s Config screen so users can update the bind address
-/// without manually editing TOML.  The write is done atomically: read the
-/// current config → update `bind_addr` → serialize → write to a temp file in
-/// the same directory → `chmod 0600` the temp file (Unix) → `rename` the temp
-/// file over the real config (POSIX-atomic on the same filesystem). This ensures
-/// no crash mid-write leaves a partial or world-readable file, and no other
-/// fields are silently lost.
-pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
-    // Ensure the file exists (idempotent; writes a template when absent).
-    let path = ensure_config_file()?;
-
-    // Read the current content, falling back to defaults on parse errors so a
-    // corrupted file doesn't block the update.
-    let file_cfg: FileConfig = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("set_bind_addr: read {}", path.display()))?;
-        toml::from_str(&raw).unwrap_or_else(|e| {
-            log::warn!(
-                "config: set_bind_addr: failed to parse {}: {e} — overwriting with defaults + new bind_addr",
-                path.display()
-            );
-            FileConfig::default()
-        })
-    } else {
-        FileConfig::default()
-    };
-
-    // Update the bind_addr field and serialise.
-    let updated = FileConfig {
-        bind_addr: Some(bind_addr.to_owned()),
-        ..file_cfg
-    };
-    let toml_str = toml::to_string_pretty(&updated).context("set_bind_addr: serialize config")?;
-
-    // Write to a temporary file in the same directory as the target.
-    let parent = path
-        .parent()
-        .context("config file has no parent directory")?;
-    let temp_path = parent.join(".config.toml.tmp");
-    std::fs::write(&temp_path, &toml_str)
-        .with_context(|| format!("set_bind_addr: write temp file {}", temp_path.display()))?;
-
-    // Restrict permissions on the temp file before renaming (Unix).
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&temp_path, perms).with_context(|| {
-            format!(
-                "set_bind_addr: chmod 0600 temp file {}",
-                temp_path.display()
-            )
-        })?;
-    }
-
-    // Atomically rename temp file over the real config (POSIX-atomic on same filesystem).
-    std::fs::rename(&temp_path, &path).with_context(|| {
-        format!(
-            "set_bind_addr: rename {} to {}",
-            temp_path.display(),
-            path.display()
-        )
-    })?;
-
-    log::info!(
-        "config: set bind_addr = {bind_addr:?} in {}",
-        path.display()
-    );
-    Ok(())
-}
-
-/// Ensure the config file exists.  If it doesn't, write a commented template
-/// with the current defaults so the user can inspect and edit it.
-pub fn ensure_config_file() -> Result<PathBuf> {
-    let path = config_file_path()?;
-    if !path.exists() {
-        let data_dir = data_dir()?;
-        let template = format!(
-            "# muxrd configuration file\n\
-             # All fields are optional; missing fields use built-in defaults.\n\
-             #\n\
-             # bind_addr = \"{DEFAULT_BIND}\"\n\
-             # cert_dir  = \"{}\"\n\
-             # log_path  = \"{}\"\n",
-            data_dir.display(),
-            data_dir.join("muxrd.log").display(),
-        );
-        std::fs::write(&path, template)
-            .with_context(|| format!("write config file {}", path.display()))?;
-        log::info!("config: created template at {}", path.display());
-    }
-    Ok(path)
 }

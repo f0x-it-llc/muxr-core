@@ -33,14 +33,14 @@ async fn main() -> Result<()> {
 
 fn parse_addr() -> String {
     let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|a| a == "--addr") {
-        if let Some(val) = args.get(pos + 1) {
-            // Ensure it has a scheme prefix for tonic
-            if val.starts_with("http") {
-                return val.clone();
-            }
-            return format!("http://{val}");
+    if let Some(pos) = args.iter().position(|a| a == "--addr")
+        && let Some(val) = args.get(pos + 1)
+    {
+        // Ensure it has a scheme prefix for tonic
+        if val.starts_with("http") {
+            return val.clone();
         }
+        return format!("http://{val}");
     }
     "http://[::1]:50051".to_owned()
 }
