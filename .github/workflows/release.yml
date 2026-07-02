@@ -124,6 +124,7 @@ jobs:
     needs: [version]
     runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
@@ -179,16 +180,23 @@ jobs:
           path: ${{ env.ARCHIVE }}
           retention-days: 1
 
-  # ── Step 2b: Build macOS (x86_64 + aarch64) ─────────────────────────
+  # ── Step 2b: Build macOS (native x86_64 + native aarch64) ───────────
+  # Each target builds NATIVELY on a matching-arch runner. Cross-compiling from
+  # the arm64 macos-latest to x86_64 fails: zellij (via isahc→curl-sys) drags in
+  # openssl-sys, and pkg-config cannot locate a target-arch OpenSSL when cross-
+  # compiling. Native builds find the runner's Homebrew OpenSSL directly.
   build-macos:
     name: Build macOS (${{ matrix.target }})
     needs: [version]
-    runs-on: macos-latest
+    runs-on: ${{ matrix.runner }}
     strategy:
+      fail-fast: false
       matrix:
         include:
           - target: x86_64-apple-darwin
+            runner: macos-13      # Intel — native x86_64
           - target: aarch64-apple-darwin
+            runner: macos-latest  # Apple Silicon — native aarch64
 
     steps:
       - name: Checkout
