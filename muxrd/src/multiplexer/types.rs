@@ -219,6 +219,18 @@ pub struct SpaceSnapshot {
 /// a pure stateless translation — a buffered `Log { tabs, panes }` variant would
 /// force the receiver to be query-state-aware, which it cannot be. The render
 /// thread keeps the tabs-then-panes pairing in P1.03.
+/// Structured mouse-event kind forwarded over the relay stream.
+///
+/// Backend-neutral (no zellij/herdr types): the zellij sender maps it to
+/// `Action::MouseEvent` (wheel flags), the herdr sender to
+/// `ClientInputEvent::Mouse { ClientMouseKind::Scroll* }`. Only wheel events
+/// exist today; press/drag variants can be added without breaking either wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MuxMouseKind {
+    WheelUp,
+    WheelDown,
+}
+
 #[derive(Debug, Clone)]
 pub enum MuxServerMsg {
     /// A render frame (ANSI viewport bytes).

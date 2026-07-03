@@ -25,8 +25,8 @@ use crate::ipc::{AttachHandle, AttachReceiver, AttachSender};
 use crate::{actions, ipc, query};
 
 use super::types::{
-    ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxServerMsg, PaneRef, PaneSnapshot,
-    ResizeDir, ResizeKind, ScrollDir, TabSnapshot,
+    ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
+    PaneSnapshot, ResizeDir, ResizeKind, ScrollDir, TabSnapshot,
 };
 use super::{DualHandle, MuxBackend, MuxReceiver, MuxSender};
 
@@ -372,6 +372,26 @@ impl MuxSender for ZellijMuxSender {
 
     fn send_input_chars(&mut self, text: &str) -> Result<()> {
         self.0.send_chars(text)
+    }
+
+    fn send_mouse(&mut self, kind: MuxMouseKind, col: u16, row: u16) -> Result<()> {
+        use zellij_utils::input::mouse::{MouseEvent, MouseEventType};
+        use zellij_utils::position::Position;
+        // Wheel notches are Press events with the wheel flag set and no
+        // Release following — the exact encoding the real zellij client
+        // produces (zellij-client input_handler.rs). Position is
+        // (line, column), zero-based. Sent as-self on the persistent relay
+        // connection, so the server routes it within THIS client's viewport
+        // (pane under position → app mouse-capture forwarding or scrollback),
+        // never a co-attached client's.
+        let mut event = MouseEvent::new();
+        event.event_type = MouseEventType::Press;
+        event.position = Position::new(row as i32, col);
+        match kind {
+            MuxMouseKind::WheelUp => event.wheel_up = true,
+            MuxMouseKind::WheelDown => event.wheel_down = true,
+        }
+        self.0.send_action_as_self(Action::MouseEvent { event })
     }
 
     fn send_input_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {

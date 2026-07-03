@@ -132,6 +132,10 @@ message VersionInfo {
   repeated BackendVersion backends           = 3;
   // Detected/usable backends.
   repeated Backend        available_backends = 4;
+  // Additive server capability flags. Known values:
+  //   "mouse-input" — ClientFrame.mouse is understood on AttachTerminal.
+  // Clients must ignore unknown values.
+  repeated string capabilities = 5;
 }
 
 message LoginRequest {
@@ -191,7 +195,29 @@ message ClientFrame {
     bytes input = 2;
     // Terminal resize event.
     Resize resize = 3;
+    // Structured mouse event, routed by the multiplexer to the pane/region
+    // under the coordinates (server capability "mouse-input").
+    MouseInput mouse = 4;
   }
+}
+
+// Mouse event kind. Only wheel events are sent today; the remaining values
+// are reserved so press/drag support can be added without a wire break.
+enum MouseKind {
+  MOUSE_KIND_WHEEL_UP   = 0;
+  MOUSE_KIND_WHEEL_DOWN = 1;
+}
+
+// Structured mouse event on the AttachTerminal stream. Coordinates are
+// ZERO-BASED cells in this relay client's grid — the same grid that
+// AttachReq/Resize rows+cols established and GetLayout reports. The
+// multiplexer resolves the pane under the position and either forwards the
+// event to the pane's application (if it captured the mouse) or scrolls the
+// pane itself.
+message MouseInput {
+  MouseKind kind = 1;
+  uint32 col     = 2;
+  uint32 row     = 3;
 }
 
 // Identifies the target session and initial terminal dimensions.

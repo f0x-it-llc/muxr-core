@@ -660,6 +660,14 @@ mod tests {
             self.note("query_layout");
             Ok(())
         }
+        fn send_mouse(
+            &mut self,
+            _kind: crate::multiplexer::MuxMouseKind,
+            _col: u16,
+            _row: u16,
+        ) -> anyhow::Result<()> {
+            Ok(())
+        }
         fn send_input_chars(&mut self, _text: &str) -> anyhow::Result<()> {
             self.note("send_input_chars");
             Ok(())
