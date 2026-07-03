@@ -456,6 +456,7 @@ pub async fn attach_relay(
         session_name,
         connection_id,
         read_only,
+        (rows, cols),
         token,
         client_guard,
         ctrl_rx,

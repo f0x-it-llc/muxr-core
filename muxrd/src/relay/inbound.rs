@@ -7,8 +7,8 @@ use tonic::Streaming;
 
 use tokio::sync::mpsc;
 
-use crate::multiplexer::{FullscreenHint, MuxBackend, MuxSender};
-use crate::proto::{ClientFrame, client_frame};
+use crate::multiplexer::{FullscreenHint, MuxBackend, MuxMouseKind, MuxSender};
+use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
 use super::reader::ShutdownGuard;
 use super::types::{
@@ -47,6 +47,9 @@ pub(crate) async fn inbound_loop(
     // each own a distinct slot (fixes the multi-client misroute bug).
     connection_id: String,
     read_only: bool,
+    // The grid this relay attached with (rows, cols) — updated by Resize
+    // frames; bounds inbound mouse coordinates to this client's own viewport.
+    attach_grid: (u16, u16),
     token: Option<String>,
     // Decrements the session's attached-client count when this task ends
     // (any exit path). Held only for its Drop; never read.
@@ -76,6 +79,8 @@ pub(crate) async fn inbound_loop(
     // Note: the floating fill-vs-hide decision is derived fully from live zellij
     // state (`focused_floating` + `floating_visible` from the ListPanes/ListTabs
     // query below) — there is no in-process fullscreen/fill tracker (M4 fix).
+
+    let (mut grid_rows, mut grid_cols) = attach_grid;
 
     let mut recheck = tokio::time::interval(TOKEN_RECHECK_INTERVAL);
     // The first tick fires immediately; skip re-validating right after the
@@ -330,8 +335,22 @@ pub(crate) async fn inbound_loop(
                             let cols = super::clamp_dim(r.cols, 80);
                             if let Err(e) = sender.send_resize(rows, cols) {
                                 log::warn!("relay inbound [{session}]: resize send failed: {e:#}");
+                            } else {
+                                // Track the new grid for mouse bound checks.
+                                grid_rows = rows;
+                                grid_cols = cols;
                             }
                         }
+                    }
+                    Some(client_frame::Kind::Mouse(m)) => {
+                        handle_mouse_frame(
+                            &mut *sender,
+                            &m,
+                            read_only,
+                            grid_rows,
+                            grid_cols,
+                            &session,
+                        );
                     }
                     Some(client_frame::Kind::Attach(_)) => {
                         log::warn!(
@@ -524,10 +543,53 @@ fn handle_query_layout(
     );
 }
 
+// ─── Mouse forwarding ────────────────────────────────────────────────────────
+
+/// Handle one inbound [`MouseInput`] frame:
+///
+/// 1. **Major A gate** — mouse events reach application ptys (a wheel can
+///    mutate app state, e.g. wheel-driven selection), so read-only tokens may
+///    observe but never inject. RO clients fall back to the `ScrollPane` RPC,
+///    which the server deliberately permits for read-only tokens.
+/// 2. **Viewport bound check** — coordinates must lie inside THIS relay's own
+///    grid (attach size, updated by Resize frames); anything outside is a
+///    client bug or abuse and is dropped with a warning.
+/// 3. Forward via [`MuxSender::send_mouse`] (as-self routing — the event lands
+///    in this rendering client's viewport, never a co-attached client's).
+fn handle_mouse_frame(
+    sender: &mut dyn MuxSender,
+    m: &MouseInput,
+    read_only: bool,
+    grid_rows: u16,
+    grid_cols: u16,
+    session: &str,
+) {
+    if read_only {
+        log::trace!("relay inbound [{session}]: dropping mouse frame (read-only token)");
+        return;
+    }
+    if m.col >= u32::from(grid_cols) || m.row >= u32::from(grid_rows) {
+        log::warn!(
+            "relay inbound [{session}]: dropping out-of-grid mouse frame \
+             (col={}, row={}) for {grid_rows}x{grid_cols} grid",
+            m.col,
+            m.row,
+        );
+        return;
+    }
+    let kind = match m.kind() {
+        MouseKind::WheelUp => MuxMouseKind::WheelUp,
+        MouseKind::WheelDown => MuxMouseKind::WheelDown,
+    };
+    if let Err(e) = sender.send_mouse(kind, m.col as u16, m.row as u16) {
+        log::warn!("relay inbound [{session}]: mouse send failed: {e:#}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multiplexer::{FullscreenHint, LayoutSnapshot, PaneRef, TabSnapshot};
+    use crate::multiplexer::{FullscreenHint, LayoutSnapshot, MuxMouseKind, PaneRef, TabSnapshot};
     use std::sync::{Arc, Mutex};
 
     /// A configurable [`MuxSender`] fake for the `QueryLayout` dispatch tests.
@@ -542,6 +604,21 @@ mod tests {
         sync: Arc<Mutex<Option<anyhow::Result<LayoutSnapshot>>>>,
         wire_fired: Arc<Mutex<bool>>,
         cloned: Arc<Mutex<bool>>,
+        /// Every `send_mouse` call, recorded for the mouse-frame gate tests.
+        mouse_events: Arc<Mutex<Vec<(MuxMouseKind, u16, u16)>>>,
+    }
+
+    impl FakeSender {
+        /// A minimal sender for tests that only care about `send_mouse`.
+        fn plain() -> Self {
+            FakeSender {
+                has_sync: false,
+                sync: Arc::new(Mutex::new(None)),
+                wire_fired: Arc::new(Mutex::new(false)),
+                cloned: Arc::new(Mutex::new(false)),
+                mouse_events: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
     }
 
     impl MuxSender for FakeSender {
@@ -570,6 +647,10 @@ mod tests {
         fn send_input_bytes(&mut self, _bytes: Vec<u8>) -> anyhow::Result<()> {
             Ok(())
         }
+        fn send_mouse(&mut self, kind: MuxMouseKind, col: u16, row: u16) -> anyhow::Result<()> {
+            self.mouse_events.lock().unwrap().push((kind, col, row));
+            Ok(())
+        }
         fn send_resize(&mut self, _rows: u16, _cols: u16) -> anyhow::Result<()> {
             Ok(())
         }
@@ -586,6 +667,7 @@ mod tests {
                 sync: self.sync.clone(),
                 wire_fired: self.wire_fired.clone(),
                 cloned: self.cloned.clone(),
+                mouse_events: self.mouse_events.clone(),
             })
         }
     }
@@ -619,6 +701,7 @@ mod tests {
             sync: Arc::new(Mutex::new(Some(Ok(a_snapshot())))),
             wire_fired: wire_fired.clone(),
             cloned: cloned.clone(),
+            mouse_events: Arc::new(Mutex::new(Vec::new())),
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (query_tx, query_rx) = std::sync::mpsc::channel::<InFlightQuery>();
@@ -659,6 +742,7 @@ mod tests {
             sync: Arc::new(Mutex::new(None)),
             wire_fired: wire_fired.clone(),
             cloned: Arc::new(Mutex::new(false)),
+            mouse_events: Arc::new(Mutex::new(Vec::new())),
         };
         let (reply_tx, mut reply_rx) =
             tokio::sync::oneshot::channel::<anyhow::Result<LayoutSnapshot>>();
@@ -685,5 +769,70 @@ mod tests {
             "reply stays pending — the render thread fulfills it from the Log pair"
         );
         drop(q); // keeps the moved reply alive until here
+    }
+
+    // ─── handle_mouse_frame gate tests ───────────────────────────────────────
+
+    #[test]
+    fn mouse_frame_forwards_within_grid() {
+        let mut sender = FakeSender::plain();
+        let events = sender.mouse_events.clone();
+        let m = MouseInput {
+            kind: MouseKind::WheelUp as i32,
+            col: 10,
+            row: 5,
+        };
+        handle_mouse_frame(&mut sender, &m, false, 24, 80, "s");
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[(MuxMouseKind::WheelUp, 10, 5)]
+        );
+    }
+
+    #[test]
+    fn mouse_frame_maps_wheel_down() {
+        let mut sender = FakeSender::plain();
+        let events = sender.mouse_events.clone();
+        let m = MouseInput {
+            kind: MouseKind::WheelDown as i32,
+            col: 0,
+            row: 0,
+        };
+        handle_mouse_frame(&mut sender, &m, false, 24, 80, "s");
+        assert_eq!(
+            events.lock().unwrap().as_slice(),
+            &[(MuxMouseKind::WheelDown, 0, 0)]
+        );
+    }
+
+    #[test]
+    fn mouse_frame_dropped_for_read_only_token() {
+        // Major A: wheel events reach app ptys → read-only must never inject.
+        let mut sender = FakeSender::plain();
+        let events = sender.mouse_events.clone();
+        let m = MouseInput {
+            kind: MouseKind::WheelUp as i32,
+            col: 1,
+            row: 1,
+        };
+        handle_mouse_frame(&mut sender, &m, true, 24, 80, "s");
+        assert!(events.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn mouse_frame_dropped_outside_grid() {
+        // col == grid_cols and row == grid_rows are both out of range
+        // (coordinates are zero-based).
+        let mut sender = FakeSender::plain();
+        let events = sender.mouse_events.clone();
+        for (col, row) in [(80u32, 0u32), (0, 24), (9999, 9999)] {
+            let m = MouseInput {
+                kind: MouseKind::WheelUp as i32,
+                col,
+                row,
+            };
+            handle_mouse_frame(&mut sender, &m, false, 24, 80, "s");
+        }
+        assert!(events.lock().unwrap().is_empty());
     }
 }

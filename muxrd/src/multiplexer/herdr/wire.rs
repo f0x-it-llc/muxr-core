@@ -235,7 +235,9 @@ pub enum ClientMessage {
     },
 
     /// Scrollback scroll in direct-attach mode.  Tag = 6.
-    /// muxrd does not send this variant; it is present only to keep tags aligned.
+    /// Sent by the relay's `send_mouse` (mouse-input capability): wheel events
+    /// scroll the attached pane's scrollback, or reach a mouse-capturing app
+    /// via the wheel source + position.
     AttachScroll {
         source: AttachScrollSource,
         direction: AttachScrollDirection,

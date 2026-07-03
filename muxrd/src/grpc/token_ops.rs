@@ -49,6 +49,11 @@ impl MuxrService {
             zellij_version,
             backends: backend_versions,
             available_backends,
+            // Additive capability flags (clients ignore unknown values).
+            // "mouse-input": ClientFrame.mouse is understood on AttachTerminal
+            // for every served backend (zellij Action::MouseEvent forwarding,
+            // herdr wire InputEvents).
+            capabilities: vec!["mouse-input".to_owned()],
         };
         log::debug!(
             "GetVersion → server={} zellij={:?} backends={} available={:?}",

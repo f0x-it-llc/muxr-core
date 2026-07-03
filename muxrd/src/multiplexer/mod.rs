@@ -39,8 +39,8 @@ pub mod types;
 mod zellij;
 
 pub use types::{
-    ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxServerMsg, PaneRef, PaneSnapshot,
-    ResizeDir, ResizeKind, ScrollDir, SpaceSnapshot, TabSnapshot,
+    ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
+    PaneSnapshot, ResizeDir, ResizeKind, ScrollDir, SpaceSnapshot, TabSnapshot,
 };
 pub use zellij::ZellijBackend;
 
@@ -410,6 +410,12 @@ pub trait MuxSender: Send {
 
     /// Send raw byte input (e.g. ESC sequences) to this client's focused pane.
     fn send_input_bytes(&mut self, bytes: Vec<u8>) -> anyhow::Result<()>;
+
+    /// Forward a structured mouse event at zero-based (`col`,`row`) in THIS
+    /// relay client's grid. The multiplexer resolves the pane under the
+    /// position and either forwards the event to the pane's application (if
+    /// it captured the mouse) or handles it itself (pane scrollback).
+    fn send_mouse(&mut self, kind: MuxMouseKind, col: u16, row: u16) -> anyhow::Result<()>;
 
     /// Notify the server of a new terminal size.
     fn send_resize(&mut self, rows: u16, cols: u16) -> anyhow::Result<()>;

@@ -52,15 +52,18 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 
-use crate::multiplexer::types::{FullscreenHint, LayoutSnapshot, MuxEvent, MuxServerMsg, PaneRef};
+use crate::multiplexer::types::{
+    FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
+};
 use crate::multiplexer::{DualHandle, MuxReceiver, MuxSender};
 
 use super::api::{PaneInfo, PaneZoomMode};
 use super::control::HerdrControl;
 use super::registry::HerdrPaneRegistry;
 use super::wire::{
-    ClientKeybindings, ClientLaunchMode, ClientMessage, FramingError, HERDR_PROTOCOL_VERSION,
-    RenderEncoding, ServerMessage, read_server_message, write_message,
+    AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode, ClientMessage,
+    FramingError, HERDR_PROTOCOL_VERSION, RenderEncoding, ServerMessage, read_server_message,
+    write_message,
 };
 
 /// Bound on the blocking handshake (`Hello`/`Welcome`/`AttachTerminal`) and on
@@ -404,6 +407,28 @@ impl MuxSender for HerdrMuxSender {
 
     fn send_input_bytes(&mut self, bytes: Vec<u8>) -> Result<()> {
         self.send(&ClientMessage::Input { data: bytes })
+    }
+
+    fn send_mouse(&mut self, kind: MuxMouseKind, col: u16, row: u16) -> Result<()> {
+        // Wheel events in direct-attach mode go over `AttachScroll` — herdr's
+        // dedicated attach-mode scroll message (scrollback scrolling, and the
+        // wheel source + position let herdr forward to a mouse-capturing app
+        // in the attached pane). `InputEvents` is NOT interpreted for
+        // attach-mode scrolling (verified live: accepted but ignored). This is
+        // the first use of the variant — it has been tag-stable in [`wire`]
+        // since the protocol was pinned (kept for discriminant alignment).
+        let direction = match kind {
+            MuxMouseKind::WheelUp => AttachScrollDirection::Up,
+            MuxMouseKind::WheelDown => AttachScrollDirection::Down,
+        };
+        self.send(&ClientMessage::AttachScroll {
+            source: AttachScrollSource::Wheel,
+            direction,
+            lines: 1,
+            column: Some(col),
+            row: Some(row),
+            modifiers: 0,
+        })
     }
 
     fn send_resize(&mut self, rows: u16, cols: u16) -> Result<()> {
