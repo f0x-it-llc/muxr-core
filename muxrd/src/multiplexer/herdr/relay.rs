@@ -68,6 +68,7 @@
 //! `session` name to a herdr `workspace_id` before calling.
 
 use std::io;
+use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -422,10 +423,19 @@ impl HerdrMuxSender {
 
         // 2. Best-effort Detach on the old connection (server cleans up the old
         //    terminal). Ignore write errors — the server may already be gone.
+        //    Then shut the socket down ourselves: herdr removes the client on
+        //    Detach but does NOT close the connection (its own CLI clients close
+        //    their side), so without this the reader's blocking `read` on the old
+        //    connection never sees EOF and the swap is never adopted (verified
+        //    live: sizes restored but frames froze; the shutdown reaches the
+        //    reader's dup'd fd because it acts on the socket, not the fd).
         {
             let mut write = self.lock_write();
             if let Err(e) = write_message(&mut *write, &ClientMessage::Detach) {
                 log::debug!("herdr reattach: Detach on old connection failed (ignored): {e}");
+            }
+            if let Err(e) = write.shutdown(Shutdown::Both) {
+                log::debug!("herdr reattach: old connection shutdown failed (ignored): {e}");
             }
         }
 
@@ -591,7 +601,14 @@ impl MuxSender for HerdrMuxSender {
     }
 
     fn send_client_exited(&mut self) -> Result<()> {
-        self.send(&ClientMessage::Detach)
+        // Detach, then close the socket ourselves — herdr does not close a
+        // Detached client's connection, so without the shutdown the relay's
+        // blocking reader thread would never see EOF at teardown.
+        let sent = self.send(&ClientMessage::Detach);
+        if let Err(e) = self.lock_write().shutdown(Shutdown::Both) {
+            log::debug!("herdr client-exit: connection shutdown failed (ignored): {e}");
+        }
+        sent
     }
 
     fn box_clone(&self) -> Box<dyn MuxSender> {
@@ -1188,6 +1205,65 @@ mod tests {
             "conn2 must attach term-B with takeover, got {attach2:?}"
         );
 
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Live-herdr regression: herdr does NOT close a Detached client's socket
+    /// (its own CLI clients close their side), so the sender's post-Detach
+    /// `shutdown` is what unblocks the reader. A reader blocked on conn1 must
+    /// still adopt conn2 and deliver its frame even though the SERVER never
+    /// closes conn1 (verified live: without the shutdown, pane sizes restored
+    /// but frames froze after the first switch).
+    #[test]
+    fn reattach_unblocks_reader_when_server_keeps_old_socket_open() {
+        let sock = unique_socket_path("keepopen");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut c1, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c1);
+            let (mut c2, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c2);
+            c2.write_all(&frame_server_message(&term_frame(2))).unwrap();
+            c2.flush().unwrap();
+            // Keep BOTH server ends open until the test ends — herdr's behavior.
+            (c1, c2)
+        });
+
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let (read1, write1) = split_wire(conn1).unwrap();
+
+        let swap_pending = Arc::new(AtomicBool::new(false));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::clone(&swap_pending),
+        };
+        let mut sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(write1)),
+            control: test_control(),
+            workspace_id: "ws-1".into(),
+            current_terminal_id: "term-A".into(),
+            swap_pending,
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: sock.clone(),
+        };
+
+        // Reader blocked on conn1 in a background thread, as in the real relay.
+        let reader = std::thread::spawn(move || receiver.recv());
+
+        sender.reattach("term-B".into()).unwrap();
+
+        let msg = reader.join().unwrap();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "reader must adopt conn2 and return its frame, got {msg:?}"
+        );
+
+        let _ = server.join();
         let _ = std::fs::remove_file(&sock);
     }
 
