@@ -795,7 +795,10 @@ mod tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        std::env::temp_dir().join(format!("mxr_hr_{tag}_{}_{nanos}_{n}.sock", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "mxr_hr_{tag}_{}_{nanos}_{n}.sock",
+            std::process::id()
+        ))
     }
 
     /// Length-prefix + bincode-encode a [`ServerMessage`] as a wire frame.
@@ -1177,7 +1180,14 @@ mod tests {
             "conn1 must have attached term-A, got {attach1:?}"
         );
         assert!(
-            matches!(resize, ClientMessage::Resize { rows: 50, cols: 200, .. }),
+            matches!(
+                resize,
+                ClientMessage::Resize {
+                    rows: 50,
+                    cols: 200,
+                    ..
+                }
+            ),
             "conn1 must carry the resize, got {resize:?}"
         );
         assert!(
@@ -1282,7 +1292,8 @@ mod tests {
         };
 
         // Frame 1 on conn1.
-        srv1.write_all(&frame_server_message(&term_frame(1))).unwrap();
+        srv1.write_all(&frame_server_message(&term_frame(1)))
+            .unwrap();
         srv1.flush().unwrap();
         assert!(matches!(receiver.recv(), Some(MuxServerMsg::Render(_))));
 
@@ -1291,7 +1302,8 @@ mod tests {
         let (recv_read2, mut srv2) = UnixStream::pair().unwrap();
         swap_pending.store(true, Ordering::SeqCst);
         swap_tx.send(Some(recv_read2)).unwrap();
-        srv2.write_all(&frame_server_message(&term_frame(2))).unwrap();
+        srv2.write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
         srv2.flush().unwrap();
         drop(srv1);
 

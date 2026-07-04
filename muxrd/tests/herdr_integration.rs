@@ -291,8 +291,8 @@ fn smoke_switch_restores_pane_sizes() {
         pids.sort_unstable();
         pids.iter()
             .map(|pid| {
-                let pts = std::fs::read_link(format!("/proc/{pid}/fd/0"))
-                    .expect("readlink pane pty");
+                let pts =
+                    std::fs::read_link(format!("/proc/{pid}/fd/0")).expect("readlink pane pty");
                 let out = std::process::Command::new("stty")
                     .args(["-F", pts.to_str().unwrap(), "size"])
                     .output()
@@ -386,12 +386,14 @@ fn smoke_switch_restores_pane_sizes() {
             idx + 1
         );
         assert_eq!(
-            now[idx], SMALL,
+            now[idx],
+            SMALL,
             "newly focused pane (tab {}) should be at the small size",
             idx + 1
         );
         assert_eq!(
-            now[prev_idx], baseline[prev_idx],
+            now[prev_idx],
+            baseline[prev_idx],
             "pane LEFT behind (tab {}) must be restored to desktop size at switch time \
              — the resize-lock leak is back",
             prev_idx + 1
