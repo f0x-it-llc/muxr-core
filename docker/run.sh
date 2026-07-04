@@ -8,6 +8,10 @@
 #   --host <IP>     Publish the gRPC + SSH ports on this host interface.
 #                   Default: 127.0.0.1 (loopback — nothing exposed on the network).
 #   --host=<IP>     Same, equals-sign form.
+#   --port <N>      Host port to publish gRPC on. Default: 50051. Use this when
+#                   50051 is already taken (e.g. a production muxrd on the same
+#                   host). Equals-sign form accepted (--port=50052).
+#   --ssh-port <N>  Host port to publish the rig's SSH on. Default: 2222.
 #   --herdr         Run the herdr-backend rig instead of the default zellij rig
 #                   (downloads a pinned, unmodified upstream herdr binary; muxrd
 #                   drives it via `--backend herdr`). Run ONE rig at a time.
@@ -22,6 +26,9 @@
 #
 #   # herdr backend rig (loopback):
 #   ./docker/run.sh --herdr
+#
+#   # herdr rig on an alternate gRPC port (50051 busy with the prod muxrd):
+#   ./docker/run.sh --herdr --port 50052 --host 100.x.y.z
 #
 #   # BOTH backends at once, exposed on the LAN for on-device testing:
 #   ./docker/run.sh --both --host 192.168.1.50
@@ -62,6 +69,24 @@ while [[ $# -gt 0 ]]; do
       BIND_ADDR="${1:?--host requires an IP/hostname argument}"
       shift
       ;;
+    --port=*)
+      GRPC_PORT="${1#--port=}"
+      shift
+      ;;
+    --port)
+      shift
+      GRPC_PORT="${1:?--port requires a port number argument}"
+      shift
+      ;;
+    --ssh-port=*)
+      SSH_PORT="${1#--ssh-port=}"
+      shift
+      ;;
+    --ssh-port)
+      shift
+      SSH_PORT="${1:?--ssh-port requires a port number argument}"
+      shift
+      ;;
     --herdr)
       HERDR=1
       shift
@@ -91,6 +116,9 @@ if [[ "${HERDR}" -eq 1 && "${BOTH}" -eq 1 ]]; then
 fi
 
 export BIND_ADDR
+# Published host ports — compose.yaml reads these (defaults 50051 / 2222).
+[[ -n "${GRPC_PORT:-}" ]] && export GRPC_PORT
+[[ -n "${SSH_PORT:-}" ]] && export SSH_PORT
 
 # Use sudo ONLY if the current user can't reach the Docker daemon directly
 # (i.e. not in the `docker` group and not rootless). When `docker info` already
