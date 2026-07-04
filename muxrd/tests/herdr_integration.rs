@@ -242,3 +242,175 @@ fn smoke_open_attach_render_input() {
     sender.send_client_exited().ok();
     println!("[herdr smoke] client exited; test complete");
 }
+
+// ─── smoke_switch_restores_pane_sizes (resize-lock leak regression) ───────────
+
+/// End-to-end regression for the herdr `direct_attach_resize_locks` leak
+/// (workflow/plans/bug/herdr-pane-resize-leak/): a small muxrd attach that
+/// navigates across tabs must leave every pane it LEAVES restored to the
+/// desktop layout size — at switch time, not merely at detach — and after
+/// teardown ALL panes must be back at desktop size.
+///
+/// Drives the REAL release-then-reconnect paths: `open_attach` (20×40) →
+/// `MuxSender::go_to_tab` across every tab → teardown. Pane PTY sizes are
+/// measured via `stty -F /dev/pts/N size` on the pane shells (children of the
+/// herdr session server, in spawn order == tab order).
+///
+/// # Harness (isolated herdr session + REQUIRED attached desktop client)
+/// ```text
+/// tmux new-session -d -s e2e-desk -x 200 -y 50 'herdr --session muxrd-e2e'
+/// herdr --session muxrd-e2e tab create && herdr --session muxrd-e2e tab create
+/// HERDR_SOCKET_PATH=$HOME/.config/herdr/sessions/muxrd-e2e/herdr.sock \
+/// HERDR_E2E_SERVER_PID=<pid of that session's `herdr server`> \
+///   cargo test -p muxrd --test herdr_integration smoke_switch_restores_pane_sizes -- --ignored --nocapture
+/// ```
+/// The desktop client must stay attached: herdr re-imposes layout sizes during
+/// its render/layout pass, which only runs while a full client is connected.
+#[test]
+#[ignore = "requires a live herdr session with an attached desktop client (set HERDR_SOCKET_PATH + HERDR_E2E_SERVER_PID)"]
+fn smoke_switch_restores_pane_sizes() {
+    const SMALL: (u16, u16) = (20, 40); // rows, cols
+
+    let server_pid: u32 = std::env::var("HERDR_E2E_SERVER_PID")
+        .expect("set HERDR_E2E_SERVER_PID to the herdr session server pid")
+        .trim()
+        .parse()
+        .expect("HERDR_E2E_SERVER_PID must be a pid");
+
+    /// `(rows, cols)` of every pane shell PTY under the session server, in
+    /// spawn (pid) order — one shell per pane, one pane per tab in the harness.
+    fn pane_sizes(server_pid: u32) -> Vec<(u16, u16)> {
+        let out = std::process::Command::new("ps")
+            .args(["--ppid", &server_pid.to_string(), "-o", "pid="])
+            .output()
+            .expect("ps failed");
+        let mut pids: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+            .split_whitespace()
+            .filter_map(|p| p.parse().ok())
+            .collect();
+        pids.sort_unstable();
+        pids.iter()
+            .map(|pid| {
+                let pts =
+                    std::fs::read_link(format!("/proc/{pid}/fd/0")).expect("readlink pane pty");
+                let out = std::process::Command::new("stty")
+                    .args(["-F", pts.to_str().unwrap(), "size"])
+                    .output()
+                    .expect("stty failed");
+                let s = String::from_utf8_lossy(&out.stdout);
+                let mut it = s.split_whitespace().filter_map(|n| n.parse().ok());
+                (it.next().expect("rows"), it.next().expect("cols"))
+            })
+            .collect()
+    }
+
+    let b = backend();
+    let sessions = b.list_sessions().expect("list_sessions() failed");
+    assert!(!sessions.is_empty(), "harness session not found");
+    let (session_name, _) = &sessions[0];
+
+    let baseline = pane_sizes(server_pid);
+    assert!(
+        baseline.len() >= 3,
+        "harness must create ≥3 tabs (one pane each); found {} pane shell(s)",
+        baseline.len()
+    );
+    assert!(
+        !baseline.contains(&SMALL),
+        "baseline already contains the small size — stale state from a prior run? {baseline:?}"
+    );
+    println!("[e2e] baseline: {baseline:?}");
+
+    let handle = b
+        .open_attach(session_name, SMALL.0, SMALL.1, false)
+        .expect("open_attach() failed");
+    let (mut sender, mut receiver) = handle.split();
+    // Drain frames on a background thread (so the wire socket never backs up),
+    // counting Render frames — frames must KEEP FLOWING after every switch
+    // (regression: herdr leaves Detached sockets open; without the sender-side
+    // shutdown the reader never adopted the swapped connection and froze).
+    let frames = std::sync::Arc::new(AtomicU64::new(0));
+    let frames_in_drain = std::sync::Arc::clone(&frames);
+    let drain = std::thread::spawn(move || {
+        while let Some(msg) = receiver.recv() {
+            if matches!(msg, MuxServerMsg::Render(_)) {
+                frames_in_drain.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+    });
+    let frames_grow_past = |mark: u64| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(4);
+        while std::time::Instant::now() < deadline {
+            if frames.load(Ordering::Relaxed) > mark {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        false
+    };
+
+    // Populate the tab registry + learn the tab ids (position-ordered).
+    let layout = sender
+        .query_layout_result()
+        .expect("herdr answers layout out-of-band")
+        .expect("query_layout_result() failed");
+    let mut tabs: Vec<_> = layout.tabs.iter().map(|t| (t.position, t.tab_id)).collect();
+    tabs.sort_unstable();
+    println!("[e2e] tabs (position, id): {tabs:?}");
+
+    let settle = || std::thread::sleep(Duration::from_millis(1500));
+    settle();
+    let after_attach = pane_sizes(server_pid);
+    println!("[e2e] after attach:  {after_attach:?}");
+    assert_eq!(
+        after_attach[0], SMALL,
+        "attached pane (tab 1) should be at the small client size"
+    );
+
+    // Walk every tab; after each switch the pane we LEFT must be restored.
+    let mut prev_idx = 0usize;
+    for (idx, (_pos, tab_id)) in tabs.iter().enumerate().skip(1) {
+        let frame_mark = frames.load(Ordering::Relaxed);
+        sender.go_to_tab(*tab_id).expect("go_to_tab() failed");
+        settle();
+        let now = pane_sizes(server_pid);
+        println!(
+            "[e2e] on tab {}:     {now:?}  (frames: {})",
+            idx + 1,
+            frames.load(Ordering::Relaxed)
+        );
+        assert!(
+            frames_grow_past(frame_mark),
+            "frames must keep flowing after switching to tab {} — reader failed to \
+             adopt the new connection",
+            idx + 1
+        );
+        assert_eq!(
+            now[idx],
+            SMALL,
+            "newly focused pane (tab {}) should be at the small size",
+            idx + 1
+        );
+        assert_eq!(
+            now[prev_idx],
+            baseline[prev_idx],
+            "pane LEFT behind (tab {}) must be restored to desktop size at switch time \
+             — the resize-lock leak is back",
+            prev_idx + 1
+        );
+        prev_idx = idx;
+    }
+
+    // Teardown: graceful detach; every pane must return to desktop size.
+    sender.send_client_exited().ok();
+    drop(sender);
+    drain.join().ok();
+    settle();
+    let after_detach = pane_sizes(server_pid);
+    println!("[e2e] after detach:  {after_detach:?}");
+    assert_eq!(
+        after_detach, baseline,
+        "all panes must be back at desktop size after the mobile client detaches"
+    );
+    println!("[e2e] PASS — no pane left stuck at the small size");
+}

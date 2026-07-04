@@ -114,7 +114,22 @@ pub(crate) async fn inbound_loop(
                     // switch that never happened). B-FOCUS state is only updated
                     // on the RW path below, after the action is actually sent.
                     if !read_only {
-                        if let Err(e) = sender.go_to_tab(tab_id) {
+                        // Blocking control op (herdr: JSON-API resolution + a full
+                        // release-then-reconnect handshake) → blocking pool, per
+                        // the MuxSender contract. See run_sender_op.
+                        let (returned, res) =
+                            run_sender_op(sender, move |s| s.go_to_tab(tab_id)).await;
+                        match returned {
+                            Some(s) => sender = s,
+                            None => {
+                                log::error!(
+                                    "relay inbound [{session}]: SwitchTab op panicked — \
+                                     tearing down stream"
+                                );
+                                break;
+                            }
+                        }
+                        if let Err(e) = res {
                             log::warn!("relay inbound [{session}]: SwitchTab send failed: {e:#}");
                         } else {
                             // Update relay view state: active tab is now tab_id.
@@ -134,13 +149,29 @@ pub(crate) async fn inbound_loop(
                         log::trace!(
                             "relay inbound [{session}]: dropping FocusPane (read-only token)"
                         );
-                    } else if let Err(e) = sender.focus_pane(pane) {
-                        log::warn!("relay inbound [{session}]: FocusPane send failed: {e:#}");
                     } else {
-                        // B-FOCUS: track focused pane for this relay client.
-                        // Key by connection_id so concurrent relays each update their own slot.
-                        if let Some(mut entry) = view_state.get_mut(&connection_id) {
-                            entry.state.focused_pane = Some(pane);
+                        // Blocking control op (herdr: pane-registry resolution +
+                        // release-then-reconnect) → blocking pool.
+                        let (returned, res) =
+                            run_sender_op(sender, move |s| s.focus_pane(pane)).await;
+                        match returned {
+                            Some(s) => sender = s,
+                            None => {
+                                log::error!(
+                                    "relay inbound [{session}]: FocusPane op panicked — \
+                                     tearing down stream"
+                                );
+                                break;
+                            }
+                        }
+                        if let Err(e) = res {
+                            log::warn!("relay inbound [{session}]: FocusPane send failed: {e:#}");
+                        } else {
+                            // B-FOCUS: track focused pane for this relay client.
+                            // Key by connection_id so concurrent relays each update their own slot.
+                            if let Some(mut entry) = view_state.get_mut(&connection_id) {
+                                entry.state.focused_pane = Some(pane);
+                            }
                         }
                     }
                 }
@@ -160,7 +191,24 @@ pub(crate) async fn inbound_loop(
                             "read-only token: SwitchSpace is not allowed"
                         )));
                     } else {
-                        let result = sender.switch_space(&workspace_id);
+                        // Blocking control op (herdr: focused-pane resolution +
+                        // release-then-reconnect) → blocking pool.
+                        let ws = workspace_id.clone();
+                        let (returned, result) =
+                            run_sender_op(sender, move |s| s.switch_space(&ws)).await;
+                        match returned {
+                            Some(s) => sender = s,
+                            None => {
+                                log::error!(
+                                    "relay inbound [{session}]: SwitchSpace op panicked — \
+                                     tearing down stream"
+                                );
+                                let _ = reply.send(Err(anyhow::anyhow!(
+                                    "SwitchSpace op panicked; stream torn down"
+                                )));
+                                break;
+                            }
+                        }
                         match &result {
                             Ok(()) => {
                                 // New space → this relay's tracked active tab and
@@ -427,6 +475,43 @@ async fn revalidate_token(token: Option<&str>, session: &str) -> bool {
     }
 }
 
+// ─── Blocking sender control ops ─────────────────────────────────────────────
+
+/// Run one blocking [`MuxSender`] control op on the blocking pool, moving the
+/// boxed sender in and out (the `MuxSender` contract: methods are blocking and
+/// "callers … run these on `spawn_blocking`"). On herdr a tab/pane/space switch
+/// performs a JSON-API resolution plus a full release-then-reconnect wire
+/// handshake — up to several `WIRE_TIMEOUT`-bounded steps that must not stall
+/// the inbound `select!` loop. No outer timeout: every step inside the op is
+/// individually bounded (control per-call timeout, wire read/write timeouts),
+/// and abandoning the task on a timeout would lose the sender anyway.
+///
+/// Returns `(None, Err(..))` when the op **panicked** (`JoinError`) — the
+/// sender is gone and the caller must tear the stream down (the client-side
+/// auto-reattach flow recovers).
+async fn run_sender_op<T, F>(
+    sender: Box<dyn MuxSender>,
+    op: F,
+) -> (Option<Box<dyn MuxSender>>, anyhow::Result<T>)
+where
+    T: Send + 'static,
+    F: FnOnce(&mut dyn MuxSender) -> anyhow::Result<T> + Send + 'static,
+{
+    match tokio::task::spawn_blocking(move || {
+        let mut s = sender;
+        let r = op(&mut *s);
+        (s, r)
+    })
+    .await
+    {
+        Ok((s, r)) => (Some(s), r),
+        Err(join_err) => (
+            None,
+            Err(anyhow::anyhow!("sender control op panicked: {join_err}")),
+        ),
+    }
+}
+
 // ─── Input forwarding ────────────────────────────────────────────────────────
 
 /// Forward raw input bytes to the focused pane.
@@ -606,6 +691,10 @@ mod tests {
         cloned: Arc<Mutex<bool>>,
         /// Every `send_mouse` call, recorded for the mouse-frame gate tests.
         mouse_events: Arc<Mutex<Vec<(MuxMouseKind, u16, u16)>>>,
+        /// Every `go_to_tab` call, recorded for the `run_sender_op` tests.
+        tab_switches: Arc<Mutex<Vec<u64>>>,
+        /// When set, `go_to_tab` panics — exercises `run_sender_op`'s JoinError path.
+        panic_on_tab: bool,
     }
 
     impl FakeSender {
@@ -617,6 +706,8 @@ mod tests {
                 wire_fired: Arc::new(Mutex::new(false)),
                 cloned: Arc::new(Mutex::new(false)),
                 mouse_events: Arc::new(Mutex::new(Vec::new())),
+                tab_switches: Arc::new(Mutex::new(Vec::new())),
+                panic_on_tab: false,
             }
         }
     }
@@ -632,7 +723,11 @@ mod tests {
             *self.wire_fired.lock().unwrap() = true;
             Ok(())
         }
-        fn go_to_tab(&mut self, _tab_id: u64) -> anyhow::Result<()> {
+        fn go_to_tab(&mut self, tab_id: u64) -> anyhow::Result<()> {
+            if self.panic_on_tab {
+                panic!("test: go_to_tab panicked");
+            }
+            self.tab_switches.lock().unwrap().push(tab_id);
             Ok(())
         }
         fn focus_pane(&mut self, _pane: PaneRef) -> anyhow::Result<()> {
@@ -668,6 +763,8 @@ mod tests {
                 wire_fired: self.wire_fired.clone(),
                 cloned: self.cloned.clone(),
                 mouse_events: self.mouse_events.clone(),
+                tab_switches: self.tab_switches.clone(),
+                panic_on_tab: self.panic_on_tab,
             })
         }
     }
@@ -702,6 +799,8 @@ mod tests {
             wire_fired: wire_fired.clone(),
             cloned: cloned.clone(),
             mouse_events: Arc::new(Mutex::new(Vec::new())),
+            tab_switches: Arc::new(Mutex::new(Vec::new())),
+            panic_on_tab: false,
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (query_tx, query_rx) = std::sync::mpsc::channel::<InFlightQuery>();
@@ -743,6 +842,8 @@ mod tests {
             wire_fired: wire_fired.clone(),
             cloned: Arc::new(Mutex::new(false)),
             mouse_events: Arc::new(Mutex::new(Vec::new())),
+            tab_switches: Arc::new(Mutex::new(Vec::new())),
+            panic_on_tab: false,
         };
         let (reply_tx, mut reply_rx) =
             tokio::sync::oneshot::channel::<anyhow::Result<LayoutSnapshot>>();
@@ -834,5 +935,36 @@ mod tests {
             handle_mouse_frame(&mut sender, &m, false, 24, 80, "s");
         }
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    // ── run_sender_op (blocking-pool control ops) ───────────────────────────
+
+    /// Happy path: the op runs on the blocking pool, its effect is applied, the
+    /// sender comes back usable, and the result is surfaced.
+    #[tokio::test]
+    async fn run_sender_op_returns_sender_and_result() {
+        let fake = FakeSender::plain();
+        let tabs = fake.tab_switches.clone();
+
+        let (returned, res) = run_sender_op(Box::new(fake), |s| s.go_to_tab(7)).await;
+        assert!(res.is_ok(), "op result must be surfaced: {res:?}");
+
+        // The sender must come back and remain usable for the next control op.
+        let mut sender = returned.expect("sender must be returned on success");
+        sender.go_to_tab(9).unwrap();
+        assert_eq!(*tabs.lock().unwrap(), vec![7, 9]);
+    }
+
+    /// Panic path: a panicking op (JoinError) loses the sender — `(None, Err)`
+    /// — which is exactly what the SwitchTab/FocusPane/SwitchSpace arms key
+    /// their tear-down branch on.
+    #[tokio::test]
+    async fn run_sender_op_panicking_op_returns_none_and_err() {
+        let mut fake = FakeSender::plain();
+        fake.panic_on_tab = true;
+
+        let (returned, res) = run_sender_op(Box::new(fake), |s| s.go_to_tab(1)).await;
+        assert!(returned.is_none(), "a panicked op must lose the sender");
+        assert!(res.is_err(), "a panicked op must surface an error");
     }
 }
