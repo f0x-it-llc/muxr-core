@@ -691,6 +691,10 @@ mod tests {
         cloned: Arc<Mutex<bool>>,
         /// Every `send_mouse` call, recorded for the mouse-frame gate tests.
         mouse_events: Arc<Mutex<Vec<(MuxMouseKind, u16, u16)>>>,
+        /// Every `go_to_tab` call, recorded for the `run_sender_op` tests.
+        tab_switches: Arc<Mutex<Vec<u64>>>,
+        /// When set, `go_to_tab` panics — exercises `run_sender_op`'s JoinError path.
+        panic_on_tab: bool,
     }
 
     impl FakeSender {
@@ -702,6 +706,8 @@ mod tests {
                 wire_fired: Arc::new(Mutex::new(false)),
                 cloned: Arc::new(Mutex::new(false)),
                 mouse_events: Arc::new(Mutex::new(Vec::new())),
+                tab_switches: Arc::new(Mutex::new(Vec::new())),
+                panic_on_tab: false,
             }
         }
     }
@@ -717,7 +723,11 @@ mod tests {
             *self.wire_fired.lock().unwrap() = true;
             Ok(())
         }
-        fn go_to_tab(&mut self, _tab_id: u64) -> anyhow::Result<()> {
+        fn go_to_tab(&mut self, tab_id: u64) -> anyhow::Result<()> {
+            if self.panic_on_tab {
+                panic!("test: go_to_tab panicked");
+            }
+            self.tab_switches.lock().unwrap().push(tab_id);
             Ok(())
         }
         fn focus_pane(&mut self, _pane: PaneRef) -> anyhow::Result<()> {
@@ -753,6 +763,8 @@ mod tests {
                 wire_fired: self.wire_fired.clone(),
                 cloned: self.cloned.clone(),
                 mouse_events: self.mouse_events.clone(),
+                tab_switches: self.tab_switches.clone(),
+                panic_on_tab: self.panic_on_tab,
             })
         }
     }
@@ -787,6 +799,8 @@ mod tests {
             wire_fired: wire_fired.clone(),
             cloned: cloned.clone(),
             mouse_events: Arc::new(Mutex::new(Vec::new())),
+            tab_switches: Arc::new(Mutex::new(Vec::new())),
+            panic_on_tab: false,
         };
         let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         let (query_tx, query_rx) = std::sync::mpsc::channel::<InFlightQuery>();
@@ -828,6 +842,8 @@ mod tests {
             wire_fired: wire_fired.clone(),
             cloned: Arc::new(Mutex::new(false)),
             mouse_events: Arc::new(Mutex::new(Vec::new())),
+            tab_switches: Arc::new(Mutex::new(Vec::new())),
+            panic_on_tab: false,
         };
         let (reply_tx, mut reply_rx) =
             tokio::sync::oneshot::channel::<anyhow::Result<LayoutSnapshot>>();
@@ -919,5 +935,36 @@ mod tests {
             handle_mouse_frame(&mut sender, &m, false, 24, 80, "s");
         }
         assert!(events.lock().unwrap().is_empty());
+    }
+
+    // ── run_sender_op (blocking-pool control ops) ───────────────────────────
+
+    /// Happy path: the op runs on the blocking pool, its effect is applied, the
+    /// sender comes back usable, and the result is surfaced.
+    #[tokio::test]
+    async fn run_sender_op_returns_sender_and_result() {
+        let fake = FakeSender::plain();
+        let tabs = fake.tab_switches.clone();
+
+        let (returned, res) = run_sender_op(Box::new(fake), |s| s.go_to_tab(7)).await;
+        assert!(res.is_ok(), "op result must be surfaced: {res:?}");
+
+        // The sender must come back and remain usable for the next control op.
+        let mut sender = returned.expect("sender must be returned on success");
+        sender.go_to_tab(9).unwrap();
+        assert_eq!(*tabs.lock().unwrap(), vec![7, 9]);
+    }
+
+    /// Panic path: a panicking op (JoinError) loses the sender — `(None, Err)`
+    /// — which is exactly what the SwitchTab/FocusPane/SwitchSpace arms key
+    /// their tear-down branch on.
+    #[tokio::test]
+    async fn run_sender_op_panicking_op_returns_none_and_err() {
+        let mut fake = FakeSender::plain();
+        fake.panic_on_tab = true;
+
+        let (returned, res) = run_sender_op(Box::new(fake), |s| s.go_to_tab(1)).await;
+        assert!(returned.is_none(), "a panicked op must lose the sender");
+        assert!(res.is_err(), "a panicked op must surface an error");
     }
 }
