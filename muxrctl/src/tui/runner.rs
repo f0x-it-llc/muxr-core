@@ -155,15 +155,30 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
                     let _ = tx.blocking_send(msg);
                 });
             }
-            UpdateAction::CreateToken { name, read_only } => {
+            UpdateAction::CreateToken {
+                name,
+                read_only,
+                expiry_secs,
+            } => {
                 let tx = tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let msg = match crate::server::tokens::create(name, read_only) {
-                        Ok((token, name)) => Message::TokenCreated {
-                            token,
-                            name,
-                            read_only,
-                        },
+                        Ok((token, name)) => {
+                            // Record the opt-in muxr-side expiry keyed by the token
+                            // hash. A failure here is non-fatal — the token is still
+                            // usable, just without the time box — so surface it as a
+                            // status note rather than failing the create.
+                            if let Some(ttl) = expiry_secs
+                                && let Err(e) = muxrd::token_expiry::set_expiry_in(&token, ttl)
+                            {
+                                log::warn!("failed to record token expiry: {e:#}");
+                            }
+                            Message::TokenCreated {
+                                token,
+                                name,
+                                read_only,
+                            }
+                        }
                         Err(e) => Message::ActionFailed(format!("create token failed: {e}")),
                     };
                     let _ = tx.blocking_send(msg);

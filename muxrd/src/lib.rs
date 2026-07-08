@@ -24,8 +24,10 @@ pub mod grpc;
 pub mod ipc;
 pub mod multiplexer;
 pub mod query;
+pub mod ratelimit;
 pub mod relay;
 pub mod tls;
+pub mod token_expiry;
 
 /// Generated protobuf + tonic types for `muxr.v1`.
 ///

@@ -10,7 +10,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use super::action::UpdateAction;
 use super::message::Message;
 use super::state::{
-    AppState, ConfigField, QrOverlay, QrOverlayPhase, San, Screen, TokensFormPhase,
+    AppState, ConfigField, QrOverlay, QrOverlayPhase, San, Screen, TokenExpiryChoice,
+    TokensFormPhase,
 };
 
 /// Apply a [`Message`] to the [`AppState`], returning any side effects.
@@ -603,6 +604,7 @@ fn handle_tokens_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
                 state.tokens.form_phase = TokensFormPhase::Creating;
                 state.tokens.form_name = String::new();
                 state.tokens.form_read_only = false;
+                state.tokens.form_expiry = TokenExpiryChoice::default();
                 Vec::new()
             }
             KeyCode::Char('d') | KeyCode::Char('x') => {
@@ -675,11 +677,13 @@ fn handle_tokens_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
                     let name = state.tokens.form_name.trim().to_string();
                     let name_opt = if name.is_empty() { None } else { Some(name) };
                     let read_only = state.tokens.form_read_only;
+                    let expiry_secs = state.tokens.form_expiry.ttl_secs();
                     state.tokens.loading = true;
                     state.tokens.status = "Creating token…".to_string();
                     vec![UpdateAction::CreateToken {
                         name: name_opt,
                         read_only,
+                        expiry_secs,
                     }]
                 } else {
                     Vec::new()
@@ -689,6 +693,11 @@ fn handle_tokens_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
             // literal character in the name field).
             KeyCode::Char(' ') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 state.tokens.form_read_only = !state.tokens.form_read_only;
+                Vec::new()
+            }
+            // Ctrl-E cycles the expiry choice (never → 30m → 1h → 24h → 7d → …).
+            KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                state.tokens.form_expiry = state.tokens.form_expiry.next();
                 Vec::new()
             }
             KeyCode::Backspace => {
@@ -1290,6 +1299,35 @@ mod tests {
             Message::Key(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::CONTROL)),
         );
         assert!(state.tokens.form_read_only);
+    }
+
+    #[test]
+    fn tokens_ctrl_e_cycles_expiry_in_creating() {
+        use crate::app::state::{TokenExpiryChoice, TokensFormPhase};
+        let mut state = AppState::new();
+        state.screen = Screen::Tokens;
+        state.tokens.form_phase = TokensFormPhase::Creating;
+        assert_eq!(state.tokens.form_expiry, TokenExpiryChoice::Never);
+        let ctrl_e = || Message::Key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL));
+        update(&mut state, ctrl_e());
+        assert_eq!(state.tokens.form_expiry, TokenExpiryChoice::ThirtyMinutes);
+        // Cycle all the way around back to Never.
+        for _ in 0..4 {
+            update(&mut state, ctrl_e());
+        }
+        assert_eq!(state.tokens.form_expiry, TokenExpiryChoice::Never);
+    }
+
+    #[test]
+    fn tokens_open_create_form_resets_expiry() {
+        use crate::app::state::{TokenExpiryChoice, TokensFormPhase};
+        let mut state = AppState::new();
+        state.screen = Screen::Tokens;
+        state.tokens.form_expiry = TokenExpiryChoice::SevenDays;
+        // Pressing `c` from Browsing opens a fresh form with expiry reset.
+        update(&mut state, Message::Key(key(KeyCode::Char('c'))));
+        assert_eq!(state.tokens.form_phase, TokensFormPhase::Creating);
+        assert_eq!(state.tokens.form_expiry, TokenExpiryChoice::Never);
     }
 
     #[test]

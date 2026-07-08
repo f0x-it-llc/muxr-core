@@ -11,6 +11,7 @@
 //! # Key bindings (Creating mode)
 //! - Type to set the optional token name.
 //! - `Ctrl-Space`: toggle read-only.
+//! - `Ctrl-E`: cycle the expiry (never → 30m → 1h → 24h → 7d).
 //! - `Enter`: submit (`c`, `q`, Space etc. are literal name characters).
 //! - `Esc`: cancel.
 
@@ -42,7 +43,7 @@ pub fn render(frame: &mut Frame, state: &AppState, area: Rect) {
         0
     };
     let form_height: u16 = if state.tokens.form_phase == TokensFormPhase::Creating {
-        4
+        5
     } else {
         0
     };
@@ -175,6 +176,13 @@ fn render_create_form(frame: &mut Frame, state: &AppState, area: Rect) {
         Span::styled("read-write [Ctrl-Space to toggle]", styles::status_ok())
     };
 
+    let expiry = state.tokens.form_expiry;
+    let expiry_style = if expiry.ttl_secs().is_some() {
+        styles::status_warn()
+    } else {
+        styles::muted()
+    };
+
     let lines = vec![
         Line::from(vec![
             Span::styled("  Name (optional): ", styles::muted()),
@@ -182,6 +190,11 @@ fn render_create_form(frame: &mut Frame, state: &AppState, area: Rect) {
             Span::styled("▎", styles::accent()), // cursor indicator
         ]),
         Line::from(vec![Span::raw("  "), ro_indicator]),
+        Line::from(vec![
+            Span::styled("  Expires: ", styles::muted()),
+            Span::styled(expiry.label(), expiry_style),
+            Span::styled("  [Ctrl-E to cycle]", styles::muted()),
+        ]),
     ];
 
     frame.render_widget(
@@ -232,6 +245,8 @@ fn render_hints(frame: &mut Frame, phase: TokensFormPhase, area: Rect) {
             Span::styled(" create  ", styles::muted()),
             Span::styled("Ctrl-Space", styles::accent()),
             Span::styled(" toggle ro  ", styles::muted()),
+            Span::styled("Ctrl-E", styles::accent()),
+            Span::styled(" expiry  ", styles::muted()),
             Span::styled("Esc", styles::accent()),
             Span::styled(" cancel", styles::muted()),
         ]),

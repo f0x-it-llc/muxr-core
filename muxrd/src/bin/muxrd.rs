@@ -37,6 +37,7 @@ use muxrd::grpc::MuxrService;
 use muxrd::multiplexer::detect;
 use muxrd::multiplexer::{BackendSet, HerdrBackend, MuxBackend, ZellijBackend};
 use muxrd::proto::muxr_server::MuxrServer;
+use muxrd::ratelimit::RateLimitLayer;
 use muxrd::tls::SanEntry;
 use tonic::transport::{Identity, Server, ServerTlsConfig};
 
@@ -283,14 +284,35 @@ async fn cmd_init(bind_override: Option<&str>, args: InitArgs) -> Result<()> {
 fn cmd_create_token(args: muxrd::cli::CreateTokenArgs) -> Result<()> {
     use zellij_utils::web_authentication_tokens::create_token;
 
+    // Resolve any expiry BEFORE minting so a bad --expires-in fails cleanly.
+    let expires_at = match args.expires_in.as_deref() {
+        Some(spec) => muxrd::token_expiry::parse_expires_in(spec)?,
+        None => None,
+    };
+
     // create_token returns (plaintext_token, name).
     let (token, actual_name) =
         create_token(args.name.clone(), args.read_only).context("failed to create token")?;
+
+    // Record the opt-in muxr-side expiry keyed by the token's hash.
+    if let Some(exp) = expires_at {
+        muxrd::token_expiry::set_expiry(&token, exp).context("failed to record token expiry")?;
+    }
 
     println!("Token created successfully.");
     println!();
     println!("  Name      : {actual_name}");
     println!("  Read-only : {}", args.read_only);
+    println!(
+        "  Expires   : {}",
+        match expires_at {
+            Some(exp) => format!(
+                "in {} (epoch {exp})",
+                args.expires_in.as_deref().unwrap_or("")
+            ),
+            None => "never".to_string(),
+        }
+    );
     println!();
     println!("  TOKEN: {token}");
     println!();
@@ -688,7 +710,13 @@ async fn serve(
     if let Some(tls) = maybe_tls {
         builder = builder.tls_config(tls).context("failed to configure TLS")?;
     }
+
+    // Per-IP rate limiting is added FIRST so it is the OUTERMOST middleware
+    // (tonic applies the first-added layer outermost). It sheds request floods
+    // before the BearerAuthLayer's token-DB work runs. The layer is a no-op when
+    // disabled via ZELLIMSERVER_RATE_LIMIT_DISABLE.
     builder
+        .layer(RateLimitLayer::from_env())
         .layer(BearerAuthLayer)
         .add_service(MuxrServer::new(service))
         .serve_with_shutdown(addr, async move {

@@ -12,6 +12,16 @@ use super::MuxrService;
 use super::SERVER_VERSION;
 use super::helpers::{self, reject_if_read_only};
 
+/// Failure modes of the blocking `Login` work, kept distinct so the RPC can
+/// return a specific message for an expired pairing token versus a generic
+/// "invalid auth token" for everything else (no internal detail leaked).
+enum LoginErr {
+    /// The auth token carried an opt-in muxr-side expiry that has passed.
+    Expired,
+    /// The token was rejected by the zellij token DB (or a DB error occurred).
+    Invalid(anyhow::Error),
+}
+
 impl MuxrService {
     // ── GetVersion ──────────────────────────────────────────────────────────
 
@@ -74,18 +84,49 @@ impl MuxrService {
         let req = request.into_inner();
         log::info!("Login attempt (remember_me={})", req.remember_me);
 
-        let session_token =
-            create_session_token(&req.auth_token, req.remember_me).map_err(|e| {
-                log::info!("Login rejected: {e}");
-                Status::unauthenticated(format!("invalid auth token: {e}"))
-            })?;
+        // `create_session_token` (and the read-only check below) are disk-backed
+        // token-DB + hashing operations. `Login` is a PUBLIC, unauthenticated RPC,
+        // so running them directly on the async runtime would let an unauthenticated
+        // flood of Login requests stall runtime workers (and every live terminal
+        // stream). Offload to a blocking pool, mirroring create_token_impl.
+        let auth_token = req.auth_token;
+        let remember_me = req.remember_me;
+        let outcome = tokio::task::spawn_blocking(move || {
+            // Opt-in muxr-side expiry (see token_expiry): a time-boxed pairing
+            // token is refused once its deadline passes, before a session is
+            // minted. Tokens with no recorded expiry are long-lived (unaffected).
+            if crate::token_expiry::is_expired(&auth_token) {
+                return Err(LoginErr::Expired);
+            }
+            let session_token = create_session_token(&auth_token, remember_me)
+                .map_err(|e| LoginErr::Invalid(e.into()))?;
+            // Surface the read-only scope so the client can disable mutating
+            // controls up-front. Enforcement stays server-side (fail-closed in the
+            // auth layer); this is advisory, but default to read-only on error so a
+            // client never believes it has write access it lacks.
+            let is_read_only =
+                zellij_utils::web_authentication_tokens::is_session_token_read_only(&session_token)
+                    .unwrap_or(true);
+            Ok((session_token, is_read_only))
+        })
+        .await
+        .map_err(|e| Status::internal(format!("Login task panicked: {e}")))?;
 
-        // Surface the read-only scope of the issued session so the client can
-        // disable mutating controls up-front. Enforcement stays server-side;
-        // this is advisory. Reuse the same DB-backed check the auth layer uses.
-        let is_read_only =
-            zellij_utils::web_authentication_tokens::is_session_token_read_only(&session_token)
-                .unwrap_or(false);
+        let (session_token, is_read_only) = match outcome {
+            Ok(v) => v,
+            Err(LoginErr::Expired) => {
+                log::info!("Login rejected: pairing token expired");
+                return Err(Status::unauthenticated(
+                    "pairing token expired — request a fresh pairing QR",
+                ));
+            }
+            Err(LoginErr::Invalid(e)) => {
+                // Log the detailed cause server-side, but return a generic message
+                // so an unauthenticated caller learns nothing about internal state.
+                log::info!("Login rejected: {e:#}");
+                return Err(Status::unauthenticated("invalid auth token"));
+            }
+        };
 
         log::info!("Login succeeded — issued session token (read_only={is_read_only})");
         Ok(Response::new(LoginResponse {

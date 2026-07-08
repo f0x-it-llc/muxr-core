@@ -179,6 +179,40 @@ pub fn validate_layout_name(layout: &str) -> Result<(), Status> {
     Ok(())
 }
 
+/// Maximum byte length for a client-supplied tab/pane display name.
+pub(super) const MAX_DISPLAY_NAME_LEN: usize = 128;
+
+/// Validate a client-supplied tab/pane display **name** before it is forwarded
+/// to the backend over IPC.
+///
+/// Tab/pane names are display strings, but a co-attached *desktop* zellij client
+/// renders them into its own tab-bar, so an unfiltered name could smuggle ANSI
+/// escape sequences into that terminal (cross-client terminal injection). We also
+/// bound the length so a client cannot push a multi-megabyte name through the
+/// session IPC channel.
+///
+/// Rejects the empty string, anything over [`MAX_DISPLAY_NAME_LEN`] bytes, and
+/// any Unicode control character (ESC / NUL / newline / …). Printable Unicode is
+/// allowed — this is an abuse/injection bound, not a strict allowlist.
+pub(super) fn validate_display_name(name: &str, kind: &str) -> Result<(), Status> {
+    if name.is_empty() {
+        return Err(Status::invalid_argument(format!(
+            "{kind} name must not be empty"
+        )));
+    }
+    if name.len() > MAX_DISPLAY_NAME_LEN {
+        return Err(Status::invalid_argument(format!(
+            "{kind} name too long (max {MAX_DISPLAY_NAME_LEN} bytes)"
+        )));
+    }
+    if name.chars().any(char::is_control) {
+        return Err(Status::invalid_argument(format!(
+            "invalid {kind} name: control characters (ANSI escapes, newlines, NUL) are not allowed"
+        )));
+    }
+    Ok(())
+}
+
 /// Run a blocking action helper on the blocking pool and map its result into a
 /// proto [`ProtoAck`].  A `LogError` ack (`ok == false`) is surfaced as an `Ok`
 /// response with `ok=false` + `error` populated (it's a logical failure, not a
@@ -306,6 +340,24 @@ mod tests {
             },
         );
         (registry, rx)
+    }
+
+    // ─── validate_display_name tests ─────────────────────────────────────────
+
+    #[test]
+    fn display_name_accepts_printable_and_rejects_abuse() {
+        // Printable names (incl. spaces/unicode) are allowed.
+        assert!(validate_display_name("editor", "tab").is_ok());
+        assert!(validate_display_name("my pane 2 ✦", "pane").is_ok());
+        // Empty is rejected.
+        assert!(validate_display_name("", "tab").is_err());
+        // ANSI escape / control chars are rejected (cross-client injection guard).
+        assert!(validate_display_name("evil\x1b[2Jtab", "tab").is_err());
+        assert!(validate_display_name("line\nbreak", "tab").is_err());
+        assert!(validate_display_name("nul\0byte", "pane").is_err());
+        // Over-length is rejected.
+        let too_long = "a".repeat(MAX_DISPLAY_NAME_LEN + 1);
+        assert!(validate_display_name(&too_long, "tab").is_err());
     }
 
     #[test]

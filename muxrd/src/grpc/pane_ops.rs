@@ -10,7 +10,9 @@ use crate::proto::{
 };
 
 use super::MuxrService;
-use super::helpers::{pane_ref, reject_if_read_only, run_action, short_conn, try_route_control};
+use super::helpers::{
+    pane_ref, reject_if_read_only, run_action, short_conn, try_route_control, validate_display_name,
+};
 
 /// Upper bound on a single `WriteToPane` payload (1 MiB).  Guards against a
 /// client pushing an unbounded write into the session IPC channel.
@@ -110,6 +112,7 @@ impl MuxrService {
         let pane_name = if req.pane_name.is_empty() {
             None
         } else {
+            validate_display_name(&req.pane_name, "pane")?;
             Some(req.pane_name)
         };
         log::info!("NewPane: session='{session}' floating={floating} name={pane_name:?}");
@@ -132,6 +135,11 @@ impl MuxrService {
         let pane = pane_ref(&target);
         let (backend, session) = self.resolve_session(&target.session)?;
         let name = req.name;
+        // An empty name is allowed here (resets the pane to its default title);
+        // only bound/sanitise a non-empty client string.
+        if !name.is_empty() {
+            validate_display_name(&name, "pane")?;
+        }
         log::info!("RenamePane: session='{session}' pane={pane:?} name='{name}'");
         run_action("RenamePane", move || {
             backend.rename_pane(&session, pane, name)
