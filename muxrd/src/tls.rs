@@ -21,7 +21,7 @@
 //!
 //! The cert always covers `127.0.0.1` and `localhost` (built-in).  Additional
 //! SANs can be requested via [`SanEntry`] (parsed from `--san` CLI flags or the
-//! `ZELLIMSERVER_SAN` environment variable, comma-separated).  If the on-disk
+//! `MUXRD_SAN` environment variable, comma-separated).  If the on-disk
 //! cert does not cover all requested extra SANs it is regenerated.
 //!
 //! ## Usage
@@ -46,7 +46,7 @@ use tonic::transport::Identity;
 
 /// A Subject Alternative Name entry for the self-signed certificate.
 ///
-/// Parsed from CLI `--san` values or the `ZELLIMSERVER_SAN` environment
+/// Parsed from CLI `--san` values or the `MUXRD_SAN` environment
 /// variable (comma-separated).  Each value is tried as an IP address first;
 /// on parse failure it is treated as a DNS name.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -68,11 +68,11 @@ impl SanEntry {
         }
     }
 
-    /// Parse the `ZELLIMSERVER_SAN` environment variable (comma-separated list).
+    /// Parse the `MUXRD_SAN` environment variable (comma-separated list).
     ///
     /// Returns an empty vec when the env var is absent or empty.
     pub fn from_env() -> Vec<Self> {
-        std::env::var("ZELLIMSERVER_SAN")
+        std::env::var("MUXRD_SAN")
             .unwrap_or_default()
             .split(',')
             .map(str::trim)

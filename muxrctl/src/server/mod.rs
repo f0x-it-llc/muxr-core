@@ -229,7 +229,7 @@ pub fn effective_config() -> Result<EffectiveConfig> {
     muxrd::config::resolve(None).context("effective_config: failed to resolve config")
 }
 
-/// Extra advertise SANs requested via the `ZELLIMSERVER_SAN` env var
+/// Extra advertise SANs requested via the `MUXRD_SAN` env var
 /// (comma-separated), returned as plain strings.
 ///
 /// The TUI Cert path merges these into the generated cert's SANs so a

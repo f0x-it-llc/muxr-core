@@ -10,8 +10,8 @@
 //!   status         — report whether a server is running (control socket)
 //!   stop           — stop a running server (control socket / SIGTERM fallback)
 //!
-//! Precedence: CLI --bind > ZELLIMSERVER_BIND env > config file > defaults.
-//! SAN precedence: CLI --san values merged with ZELLIMSERVER_SAN env (comma-separated).
+//! Precedence: CLI --bind > MUXRD_BIND env > config file > defaults.
+//! SAN precedence: CLI --san values merged with MUXRD_SAN env (comma-separated).
 //!
 //! ## Daemonization (fork-before-runtime)
 //!
@@ -97,13 +97,13 @@ fn pidfile_path() -> Result<PathBuf> {
 /// Env var that bypasses the zellij version-mismatch check (review Major F).
 /// Referenced in error messages; the actual skip logic lives in
 /// `muxrd::multiplexer::detect::probe_zellij`.
-const SKIP_VERSION_CHECK_ENV: &str = "ZELLIMSERVER_SKIP_VERSION_CHECK";
+const SKIP_VERSION_CHECK_ENV: &str = "MUXRD_SKIP_VERSION_CHECK";
 
 /// Refuse to start when the **installed** `zellij` binary's version differs from
 /// the zellij crate this server was compiled against.
 ///
 /// Delegates the actual probe (binary discovery, `zellij --version` run,
-/// version comparison, and `ZELLIMSERVER_SKIP_VERSION_CHECK` handling) to
+/// version comparison, and `MUXRD_SKIP_VERSION_CHECK` handling) to
 /// [`detect::probe_zellij`] so the startup check and backend auto-detection
 /// share a single implementation.
 ///
@@ -126,7 +126,7 @@ fn check_zellij_version() -> Result<PathBuf> {
     muxrd::actions::which_zellij().context("locate zellij binary (post version-check)")
 }
 
-/// Collect extra SANs from CLI `--san` values and the `ZELLIMSERVER_SAN` env var.
+/// Collect extra SANs from CLI `--san` values and the `MUXRD_SAN` env var.
 ///
 /// The env var supplements (does not replace) CLI flags.  Deduplication is not
 /// performed; duplicates in `rcgen`'s SAN list are harmless.
@@ -267,7 +267,7 @@ async fn cmd_init(bind_override: Option<&str>, args: InitArgs) -> Result<()> {
 
     // Print the effective bind address.
     let is_default = bind_override.is_none()
-        && std::env::var("ZELLIMSERVER_BIND").is_err()
+        && std::env::var("MUXRD_BIND").is_err()
         && cfg.bind_addr == config::DEFAULT_BIND;
     if is_default {
         println!("Bind     : {} (default)", cfg.bind_addr);
@@ -500,7 +500,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
 
     // Resolve the h2c non-loopback acknowledgement (CLI flag OR env var).
     let h2c_allow_public = args.h2c_allow_public || {
-        std::env::var("ZELLIMSERVER_H2C_ALLOW_PUBLIC")
+        std::env::var("MUXRD_H2C_ALLOW_PUBLIC")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0")
     };
@@ -714,7 +714,7 @@ async fn serve(
     // Per-IP rate limiting is added FIRST so it is the OUTERMOST middleware
     // (tonic applies the first-added layer outermost). It sheds request floods
     // before the BearerAuthLayer's token-DB work runs. The layer is a no-op when
-    // disabled via ZELLIMSERVER_RATE_LIMIT_DISABLE.
+    // disabled via MUXRD_RATE_LIMIT_DISABLE.
     builder
         .layer(RateLimitLayer::from_env())
         .layer(BearerAuthLayer)

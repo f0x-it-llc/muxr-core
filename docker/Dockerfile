@@ -143,13 +143,13 @@ RUN chmod +x /usr/local/bin/muxrd /usr/local/bin/muxrctl
 
 # Bind on all interfaces by default so the gRPC server is reachable through the
 # published port. The Docker port mapping (compose) still gates host exposure;
-# override per-run via muxrctl's Configure screen or ZELLIMSERVER_BIND.
+# override per-run via muxrctl's Configure screen or MUXRD_BIND.
 #
-# ZELLIMSERVER_SAN — comma-separated extra SANs to include in the self-signed
+# MUXRD_SAN — comma-separated extra SANs to include in the self-signed
 # TLS cert (e.g. a tailnet or LAN IP that is not a local interface inside the
 # container). Set at runtime via compose.yaml or `docker run -e`; do NOT
 # hard-code a SAN in the image, since the IP depends on the deployment site.
-ENV ZELLIMSERVER_BIND=0.0.0.0:50051
+ENV MUXRD_BIND=0.0.0.0:50051
 
 # Multiplexer backend the rig drives. The default `runtime` image is zellij-only;
 # the `runtime-herdr` stage overrides this to `herdr`. The entrypoint branches on it.

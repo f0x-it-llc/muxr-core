@@ -10,14 +10,14 @@
 #   The container binds 0.0.0.0 internally; BIND_ADDR selects which host
 #   interface the ports are published on. Inside the container the tailnet IP
 #   is not a local interface (it's a host-side NAT), so the server cannot
-#   discover it automatically. ZELLIMSERVER_SAN injects it into the TLS cert
+#   discover it automatically. MUXRD_SAN injects it into the TLS cert
 #   SAN so clients connecting on that IP get a valid cert. By default
-#   ZELLIMSERVER_SAN falls back to BIND_ADDR, so just setting BIND_ADDR is
+#   MUXRD_SAN falls back to BIND_ADDR, so just setting BIND_ADDR is
 #   enough for the common case:
 #
 #   BIND_ADDR=100.x.y.z docker compose -f docker/compose.yaml up --build
 #
-#   Override ZELLIMSERVER_SAN explicitly if the cert must cover a different
+#   Override MUXRD_SAN explicitly if the cert must cover a different
 #   or additional address (comma-separated list accepted).
 #
 # Or use the helper wrapper:
@@ -55,7 +55,7 @@ services:
       # publish), so the server cannot auto-discover it. This falls back to
       # BIND_ADDR so that `BIND_ADDR=<ip> docker compose up` is all that's
       # needed. Stays empty when the default loopback is used — safe/unchanged.
-      ZELLIMSERVER_SAN: "${ZELLIMSERVER_SAN:-${BIND_ADDR:-}}"
+      MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
     volumes:
       # Persist token DB, cert, session state, and zellij config across restarts.
       # muxrd data lives under zellij's XDG share dir.
@@ -89,7 +89,7 @@ services:
     environment:
       BACKEND: herdr
       SESSION: "${SESSION:-herdr-dev}"
-      ZELLIMSERVER_SAN: "${ZELLIMSERVER_SAN:-${BIND_ADDR:-}}"
+      MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
     volumes:
       # muxrd's token DB + cert still live under the XDG share dir; herdr keeps its
       # own workspace/session state under ~/.config/herdr. Separate volumes from the
@@ -126,7 +126,7 @@ services:
     environment:
       BACKEND: both
       SESSION: "${SESSION:-backend-dev}"
-      ZELLIMSERVER_SAN: "${ZELLIMSERVER_SAN:-${BIND_ADDR:-}}"
+      MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
     volumes:
       # Dedicated volumes so the multi-backend rig doesn't share credential/session
       # state with the zellij-only or herdr-only rigs. muxrd's token DB + cert live

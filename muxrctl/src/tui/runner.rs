@@ -340,7 +340,7 @@ fn build_token_qr_task(
     };
 
     // 4a. Pick the advertise host (prefer the configured bind IP, then an explicit
-    //    ZELLIMSERVER_SAN advertise address, then a discovered interface IP).
+    //    MUXRD_SAN advertise address, then a discovered interface IP).
     let advertise_host = choose_advertise_host(&bind_host, &crate::server::env_extra_sans());
 
     // 4b. Resolve the pairing trust.
@@ -495,7 +495,7 @@ pub(crate) fn resolve_auto_trust(cert_mode: Option<muxrd::config::CertMode>) -> 
 /// 1. The configured bind host, when it is a concrete reachable address (not
 ///    loopback, not the unspecified `0.0.0.0` / `::` wildcard) — the user bound
 ///    to a specific address deliberately.
-/// 2. An explicit advertise SAN from `ZELLIMSERVER_SAN` (`advertise_sans`) — the
+/// 2. An explicit advertise SAN from `MUXRD_SAN` (`advertise_sans`) — the
 ///    operator's externally-reachable address. This is essential in a container
 ///    bound to `0.0.0.0`, where the externally-reachable IP (e.g. a tailnet IP
 ///    reached via host-side NAT) is NOT a local interface and so would never be
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn wildcard_bind_prefers_advertise_san_over_reachable() {
-        // The tailnet/container case: bind 0.0.0.0, ZELLIMSERVER_SAN advertises the
+        // The tailnet/container case: bind 0.0.0.0, MUXRD_SAN advertises the
         // externally-reachable IP. The pairing QR host must be that advertise IP —
         // NOT a discovered container-internal interface IP — so the phone can dial
         // it. An unspecified/loopback advertise entry is skipped.

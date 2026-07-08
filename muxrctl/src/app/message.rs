@@ -22,7 +22,7 @@ pub struct ConfigSnapshot {
     pub cert_dir: String,
     /// Non-loopback IPv4 addresses the mobile client could reach.
     pub reachable_ips: Vec<std::net::Ipv4Addr>,
-    /// Extra advertise SANs from the `ZELLIMSERVER_SAN` env var (comma-separated).
+    /// Extra advertise SANs from the `MUXRD_SAN` env var (comma-separated).
     ///
     /// Needed because an externally-advertised address (e.g. a tailnet IP that
     /// is a host-side NAT publish, not a local interface inside a container) is

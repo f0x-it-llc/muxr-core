@@ -9,7 +9,7 @@
 //!   - `validate_layout_name`: accept/reject cases
 //!   - `pane_id_from_target`: Terminal / Plugin mapping
 //!   - control `read_msg`: oversized-length rejection + round-trip
-//!   - config bind-addr precedence: flag > ZELLIMSERVER_BIND env > default
+//!   - config bind-addr precedence: flag > MUXRD_BIND env > default
 //!   - `parse_zellij_version`: version string parsing
 //!   - `SanEntry::parse`: IP and DNS parsing
 //!   - `SanEntry::from_env`: env var parsing
@@ -305,7 +305,7 @@ fn san_entry_from_env_empty_when_unset() {
     // SAFETY: these tests are single-threaded (cargo test runs unit tests
     // in the same process but env manipulation is safe in single-threaded context).
     unsafe {
-        std::env::remove_var("ZELLIMSERVER_SAN");
+        std::env::remove_var("MUXRD_SAN");
     }
     let result = muxrd::tls::SanEntry::from_env();
     assert!(result.is_empty());
@@ -315,12 +315,12 @@ fn san_entry_from_env_empty_when_unset() {
 fn san_entry_from_env_parses_comma_list() {
     use muxrd::tls::SanEntry;
     unsafe {
-        std::env::set_var("ZELLIMSERVER_SAN", "10.0.0.1,myhost.local");
+        std::env::set_var("MUXRD_SAN", "10.0.0.1,myhost.local");
     }
     let result = SanEntry::from_env();
     // Clean up before asserting to avoid poisoning other tests.
     unsafe {
-        std::env::remove_var("ZELLIMSERVER_SAN");
+        std::env::remove_var("MUXRD_SAN");
     }
     assert_eq!(result.len(), 2);
     assert!(matches!(result[0], SanEntry::Ip(_)));
