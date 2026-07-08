@@ -5,7 +5,9 @@ use tonic::{Request, Response, Status};
 use crate::proto::{ActionAck as ProtoAck, NewTabReq, RenameTabReq, TabTarget};
 
 use super::MuxrService;
-use super::helpers::{reject_if_read_only, run_action, short_conn, try_route_control};
+use super::helpers::{
+    reject_if_read_only, run_action, short_conn, try_route_control, validate_display_name,
+};
 
 impl MuxrService {
     // ── Tab ops (D2) ──────────────────────────────────────────────────────────
@@ -21,6 +23,7 @@ impl MuxrService {
         let tab_name = if req.tab_name.is_empty() {
             None
         } else {
+            validate_display_name(&req.tab_name, "tab")?;
             Some(req.tab_name)
         };
         log::info!("NewTab: session='{session}' name={tab_name:?}");
@@ -86,9 +89,7 @@ impl MuxrService {
         let (backend, session) = self.resolve_session(&req.session)?;
         let tab_id = req.tab_id;
         let name = req.name;
-        if name.is_empty() {
-            return Err(Status::invalid_argument("tab name must not be empty"));
-        }
+        validate_display_name(&name, "tab")?;
         log::info!("RenameTab: session='{session}' tab_id={tab_id} name='{name}'");
         run_action("RenameTab", move || {
             backend.rename_tab(&session, tab_id, name)

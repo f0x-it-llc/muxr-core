@@ -473,19 +473,43 @@ pub async fn attach_relay(
 
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
+/// Upper bound on a single terminal dimension (rows or cols).
+///
+/// The backend allocates a viewport grid proportional to `rows × cols`, so an
+/// unbounded dimension from a client is a memory-amplification DoS: an attach or
+/// resize of `65535 × 65535` would ask the backend to allocate ~4.3 billion
+/// cells and OOM the host, taking down every session on a self-hosted server.
+/// `1024` comfortably exceeds any real device viewport while capping the worst
+/// case at ~1M cells.
+pub(crate) const MAX_TERMINAL_DIM: u16 = 1024;
+
 /// Clamp a proto `uint32` dimension into a sane `u16`, falling back to
-/// `default` when zero/unset.
+/// `default` when zero/unset and capping at [`MAX_TERMINAL_DIM`] so a
+/// client-controlled dimension cannot drive an unbounded backend allocation.
 pub(crate) fn clamp_dim(v: u32, default: u16) -> u16 {
     if v == 0 {
         default
     } else {
-        v.min(u16::MAX as u32) as u16
+        v.min(MAX_TERMINAL_DIM as u32) as u16
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn clamp_dim_caps_at_max_terminal_dim() {
+        // Zero → default.
+        assert_eq!(clamp_dim(0, 24), 24);
+        // Normal value passes through.
+        assert_eq!(clamp_dim(80, 24), 80);
+        // Oversized client value is capped, not forwarded (memory-DoS guard).
+        assert_eq!(clamp_dim(65535, 80), MAX_TERMINAL_DIM);
+        assert_eq!(clamp_dim(u32::MAX, 80), MAX_TERMINAL_DIM);
+        // Exactly at the cap is preserved.
+        assert_eq!(clamp_dim(MAX_TERMINAL_DIM as u32, 24), MAX_TERMINAL_DIM);
+    }
 
     #[test]
     fn connection_id_is_32_char_lowercase_hex() {

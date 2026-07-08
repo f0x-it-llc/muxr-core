@@ -40,13 +40,16 @@ pub enum UpdateAction {
     /// List all tokens and post `Message::TokensLoaded`.
     LoadTokens,
 
-    /// Create a new token (with optional name and read-only flag).
+    /// Create a new token (with optional name, read-only flag, and expiry).
     ///
     /// Posts `Message::TokenCreated { token, name }` on success, then
     /// `Message::TokensChanged` to trigger a refresh.
     CreateToken {
         name: Option<String>,
         read_only: bool,
+        /// Time-to-live in seconds; `None` means the token never expires. When
+        /// set, the runner records a muxr-side expiry keyed by the token hash.
+        expiry_secs: Option<i64>,
     },
 
     /// Revoke the token with the given name.

@@ -273,6 +273,61 @@ pub enum TokensFormPhase {
     Creating,
 }
 
+/// Expiry choice in the token create form, cycled with `Ctrl-E`.
+///
+/// `Never` is the historical long-lived behaviour; the others time-box the
+/// token so it can only be used to pair (call `Login`) within the window. Expiry
+/// is enforced server-side by `muxrd::token_expiry`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TokenExpiryChoice {
+    /// Long-lived token — never expires (default).
+    #[default]
+    Never,
+    /// Expires 30 minutes after creation.
+    ThirtyMinutes,
+    /// Expires 1 hour after creation.
+    OneHour,
+    /// Expires 24 hours after creation.
+    OneDay,
+    /// Expires 7 days after creation.
+    SevenDays,
+}
+
+impl TokenExpiryChoice {
+    /// Advance to the next choice (wraps), for the create-form cycle key.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Never => Self::ThirtyMinutes,
+            Self::ThirtyMinutes => Self::OneHour,
+            Self::OneHour => Self::OneDay,
+            Self::OneDay => Self::SevenDays,
+            Self::SevenDays => Self::Never,
+        }
+    }
+
+    /// Time-to-live in seconds, or `None` for a non-expiring token.
+    pub fn ttl_secs(self) -> Option<i64> {
+        match self {
+            Self::Never => None,
+            Self::ThirtyMinutes => Some(30 * 60),
+            Self::OneHour => Some(60 * 60),
+            Self::OneDay => Some(24 * 60 * 60),
+            Self::SevenDays => Some(7 * 24 * 60 * 60),
+        }
+    }
+
+    /// Short human label for the create form.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Never => "never",
+            Self::ThirtyMinutes => "30 minutes",
+            Self::OneHour => "1 hour",
+            Self::OneDay => "24 hours",
+            Self::SevenDays => "7 days",
+        }
+    }
+}
+
 /// State for the Tokens screen.
 #[derive(Debug, Clone, Default)]
 pub struct TokensState {
@@ -292,6 +347,8 @@ pub struct TokensState {
     pub form_name: String,
     /// Read-only toggle in the create form.
     pub form_read_only: bool,
+    /// Expiry choice in the create form (cycled with Ctrl-E).
+    pub form_expiry: TokenExpiryChoice,
 }
 
 impl TokensState {

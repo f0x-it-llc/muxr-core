@@ -237,6 +237,15 @@ pub struct CreateTokenArgs {
     /// If set, the token may only be used for read-only operations.
     #[arg(long)]
     pub read_only: bool,
+
+    /// Expire this token after the given duration, refusing new logins past it.
+    ///
+    /// Accepts `<n>s`/`<n>m`/`<n>h`/`<n>d` (e.g. `30m`, `24h`, `7d`), a bare
+    /// number of seconds, or `never` (the default — a long-lived token). Expiry
+    /// bounds when the token can be used to pair (call `Login`); an already-paired
+    /// session lives until its own session-token TTL lapses.
+    #[arg(long, value_name = "DURATION")]
+    pub expires_in: Option<String>,
 }
 
 // ── revoke-token ─────────────────────────────────────────────────────────────
