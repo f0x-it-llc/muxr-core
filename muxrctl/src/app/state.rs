@@ -148,7 +148,7 @@ pub struct ConfigState {
     pub focused: ConfigField,
     /// Directory where TLS certs are stored (display only).
     pub cert_dir: String,
-    /// Extra advertise SANs from the `ZELLIMSERVER_SAN` env var, merged into the
+    /// Extra advertise SANs from the `MUXRD_SAN` env var, merged into the
     /// cert SANs alongside the reachable IPs (e.g. a tailnet IP not visible as a
     /// local interface inside a container). Loaded via `ConfigLoaded`.
     pub advertise_sans: Vec<String>,

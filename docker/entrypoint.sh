@@ -57,18 +57,18 @@ restrict_backend=""
 [ "${BACKEND}" = "herdr" ]  && restrict_backend="herdr"
 
 {
-  printf 'ZELLIMSERVER_BIND=%s\nZELLIMSERVER_SAN=%s\n' \
-    "${ZELLIMSERVER_BIND:-}" "${ZELLIMSERVER_SAN:-}"
+  printf 'MUXRD_BIND=%s\nMUXRD_SAN=%s\n' \
+    "${MUXRD_BIND:-}" "${MUXRD_SAN:-}"
   [ -n "${restrict_backend}" ] && printf 'MUXRD_BACKEND=%s\n' "${restrict_backend}"
   [ "${want_herdr}" -eq 1 ] && printf 'HERDR_SOCKET_PATH=%s\n' "${HERDR_SOCKET_PATH}"
 } > /etc/environment
 {
-  printf "export ZELLIMSERVER_BIND='%s'\nexport ZELLIMSERVER_SAN='%s'\n" \
-    "${ZELLIMSERVER_BIND:-}" "${ZELLIMSERVER_SAN:-}"
+  printf "export MUXRD_BIND='%s'\nexport MUXRD_SAN='%s'\n" \
+    "${MUXRD_BIND:-}" "${MUXRD_SAN:-}"
   [ -n "${restrict_backend}" ] && printf "export MUXRD_BACKEND='%s'\n" "${restrict_backend}"
   [ "${want_herdr}" -eq 1 ] && printf "export HERDR_SOCKET_PATH='%s'\n" "${HERDR_SOCKET_PATH}"
-} > /etc/profile.d/zellim-env.sh
-chmod 0644 /etc/profile.d/zellim-env.sh
+} > /etc/profile.d/muxrd-env.sh
+chmod 0644 /etc/profile.d/muxrd-env.sh
 
 # ── 1. Clear root's password so SSH login needs no credential (dev rig) ──────
 passwd -d root

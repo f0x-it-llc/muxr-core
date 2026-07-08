@@ -42,7 +42,7 @@ impl std::fmt::Display for BackendKind {
 #[command(name = "muxrd", version, about, long_about = None)]
 pub struct Cli {
     /// Override the bind address (e.g. `0.0.0.0:50051`).
-    /// Takes precedence over the config file and ZELLIMSERVER_BIND env var.
+    /// Takes precedence over the config file and MUXRD_BIND env var.
     #[arg(long, global = true, value_name = "ADDR:PORT")]
     pub bind: Option<String>,
 
@@ -57,7 +57,7 @@ pub enum Command {
     /// Safe to re-run (idempotent): if the cert already exists AND covers the
     /// requested SANs, it is left unchanged.  Pass `--san` to add extra Subject
     /// Alternative Names (e.g. a LAN IP) so the cert is valid for
-    /// connections from a phone over the network.  Also reads ZELLIMSERVER_SAN
+    /// connections from a phone over the network.  Also reads MUXRD_SAN
     /// (comma-separated list of IPs or DNS names).
     Init(InitArgs),
 
@@ -109,7 +109,7 @@ pub struct InitArgs {
     /// Repeatable: `--san 100.64.0.5 --san myhost.example.com`.  Each value is
     /// treated as an IP address if it parses as one, otherwise as a DNS name.
     /// The cert always includes `127.0.0.1` and `localhost`; extras are added
-    /// on top.  Also reads ZELLIMSERVER_SAN (comma-separated env var).
+    /// on top.  Also reads MUXRD_SAN (comma-separated env var).
     ///
     /// If the on-disk cert does not cover all requested SANs it is regenerated.
     #[arg(long, value_name = "HOST_OR_IP", action = clap::ArgAction::Append)]
@@ -119,7 +119,7 @@ pub struct InitArgs {
     /// auto-generated self-signed cert.
     ///
     /// Must be paired with `--tls-key`.  The file is validated to exist and be
-    /// readable.  Also reads ZELLIMSERVER_TLS_CERT env var when absent.
+    /// readable.  Also reads MUXRD_TLS_CERT env var when absent.
     ///
     /// When provided, the self-signed cert is neither generated nor overwritten.
     #[arg(long, value_name = "PATH")]
@@ -127,7 +127,7 @@ pub struct InitArgs {
 
     /// Path to the private key PEM file that corresponds to `--tls-cert`.
     ///
-    /// Must be paired with `--tls-cert`.  Also reads ZELLIMSERVER_TLS_KEY env
+    /// Must be paired with `--tls-cert`.  Also reads MUXRD_TLS_KEY env
     /// var when absent.
     #[arg(long, value_name = "PATH")]
     pub tls_key: Option<std::path::PathBuf>,
@@ -141,7 +141,7 @@ pub struct InitArgs {
     /// expose a server in h2c mode directly to the internet or an untrusted
     /// network.
     ///
-    /// Also enabled when ZELLIMSERVER_H2C env var is set to a truthy value
+    /// Also enabled when MUXRD_H2C env var is set to a truthy value
     /// (non-empty and not "0").  Mutually exclusive with `--tls-cert` /
     /// `--tls-key`.
     #[arg(long)]
@@ -161,7 +161,7 @@ pub struct StartArgs {
     ///
     /// Same semantics as `init --san`.  If the on-disk cert does not cover the
     /// requested SANs it is regenerated before the server begins serving.
-    /// Also reads ZELLIMSERVER_SAN (comma-separated env var).
+    /// Also reads MUXRD_SAN (comma-separated env var).
     #[arg(long, value_name = "HOST_OR_IP", action = clap::ArgAction::Append)]
     pub san: Vec<String>,
 
@@ -169,7 +169,7 @@ pub struct StartArgs {
     /// auto-generated self-signed cert.
     ///
     /// Must be paired with `--tls-key`.  Mutually exclusive with
-    /// `--insecure-h2c`.  Also reads ZELLIMSERVER_TLS_CERT env var when absent.
+    /// `--insecure-h2c`.  Also reads MUXRD_TLS_CERT env var when absent.
     ///
     /// Use this when terminating TLS at the server itself with a cert from
     /// Let's Encrypt, a corporate CA, or a Cloudflare Origin CA.
@@ -179,7 +179,7 @@ pub struct StartArgs {
     /// Path to the private key PEM file that corresponds to `--tls-cert`.
     ///
     /// Must be paired with `--tls-cert`.  Mutually exclusive with
-    /// `--insecure-h2c`.  Also reads ZELLIMSERVER_TLS_KEY env var when absent.
+    /// `--insecure-h2c`.  Also reads MUXRD_TLS_KEY env var when absent.
     #[arg(long, value_name = "PATH")]
     pub tls_key: Option<std::path::PathBuf>,
 
@@ -192,7 +192,7 @@ pub struct StartArgs {
     /// expose a server in h2c mode directly to the internet or an untrusted
     /// network.
     ///
-    /// Also enabled when ZELLIMSERVER_H2C env var is set to a truthy value
+    /// Also enabled when MUXRD_H2C env var is set to a truthy value
     /// (non-empty and not "0").  Mutually exclusive with `--tls-cert` /
     /// `--tls-key`.
     #[arg(long)]
@@ -208,7 +208,7 @@ pub struct StartArgs {
     /// is in front of this server.
     ///
     /// Has no effect unless `--insecure-h2c` is also set.  Also enabled when
-    /// `ZELLIMSERVER_H2C_ALLOW_PUBLIC` env var is set to a truthy value
+    /// `MUXRD_H2C_ALLOW_PUBLIC` env var is set to a truthy value
     /// (non-empty and not "0").
     #[arg(long = "i-know-this-is-behind-a-proxy")]
     pub h2c_allow_public: bool,

@@ -44,14 +44,14 @@ cargo build -p muxrctl      # just the TUI
 ```bash
 # Generate the TLS cert, then serve:
 cargo run -p muxrd -- init
-ZELLIMSERVER_SKIP_VERSION_CHECK=1 cargo run -p muxrd -- start
+MUXRD_SKIP_VERSION_CHECK=1 cargo run -p muxrd -- start
 
 # The configure/pair TUI:
 cargo run -p muxrctl
 ```
 
 `start` opens a control socket for `status`/`stop`; add `--daemonize` to detach.
-`ZELLIMSERVER_SKIP_VERSION_CHECK=1` bypasses the Zellij version-match check.
+`MUXRD_SKIP_VERSION_CHECK=1` bypasses the Zellij version-match check.
 
 For the **zellij** backend, requires the matching `zellij` binary on `PATH` (the
 server pins a Zellij version and refuses to start against a different one). For the
@@ -67,8 +67,8 @@ The server resolves its TLS identity by precedence **h2c > external cert > self-
 | Mode | Flags / env | Use for |
 |------|-------------|---------|
 | **Self-signed** (default) | _(none)_ — generated for `127.0.0.1` + `localhost` + any `--san` extras | Direct / LAN connections. The mobile client pins the cert's SHA-256 fingerprint, distributed out-of-band in the pairing QR. |
-| **External cert** | `--tls-cert <pem> --tls-key <pem>` (or `ZELLIMSERVER_TLS_CERT` / `ZELLIMSERVER_TLS_KEY`) | Serving a real, publicly-trusted cert directly — Let's Encrypt, a Cloudflare Origin CA cert, or a corporate CA. The client trusts it via the system CA store; no pinning. Both files are validated at `init`/`start`. |
-| **Plaintext h2c** | `--insecure-h2c` (or `ZELLIMSERVER_H2C=1`) | Sitting behind a TLS-terminating reverse proxy (Traefik / Dokploy / Cloudflare) that owns the public cert. Serves **unencrypted** HTTP/2, so it **refuses a non-loopback bind** unless you also pass `--i-know-this-is-behind-a-proxy` (env `ZELLIMSERVER_H2C_ALLOW_PUBLIC`). |
+| **External cert** | `--tls-cert <pem> --tls-key <pem>` (or `MUXRD_TLS_CERT` / `MUXRD_TLS_KEY`) | Serving a real, publicly-trusted cert directly — Let's Encrypt, a Cloudflare Origin CA cert, or a corporate CA. The client trusts it via the system CA store; no pinning. Both files are validated at `init`/`start`. |
+| **Plaintext h2c** | `--insecure-h2c` (or `MUXRD_H2C=1`) | Sitting behind a TLS-terminating reverse proxy (Traefik / Dokploy / Cloudflare) that owns the public cert. Serves **unencrypted** HTTP/2, so it **refuses a non-loopback bind** unless you also pass `--i-know-this-is-behind-a-proxy` (env `MUXRD_H2C_ALLOW_PUBLIC`). |
 
 External and h2c are mutually exclusive with each other. `muxrd init` validates the
 chosen mode (e.g. parses the external key) so misconfigurations surface before `start`.
@@ -99,7 +99,7 @@ docker compose -f docker/compose.yaml up --build
 
 **Tailnet / LAN exposure:** set `BIND_ADDR` to the host IP you want to publish
 on — the cert's SAN is automatically set to that IP so clients connecting on it
-get a valid TLS cert. Override `ZELLIMSERVER_SAN` explicitly to cover a
+get a valid TLS cert. Override `MUXRD_SAN` explicitly to cover a
 different or additional address (comma-separated).
 
 ```bash

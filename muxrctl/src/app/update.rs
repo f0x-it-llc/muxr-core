@@ -726,7 +726,7 @@ fn handle_tokens_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
 /// 2. If the configured bind host is itself a concrete (non-empty, non-unspecified)
 ///    IP or DNS name, it is also included so that a user who has pinned a specific
 ///    LAN IP in Config gets a cert valid for that address.
-/// 3. Advertise SANs from the `ZELLIMSERVER_SAN` env (loaded via `ConfigLoaded`)
+/// 3. Advertise SANs from the `MUXRD_SAN` env (loaded via `ConfigLoaded`)
 ///    are merged in — these cover externally-advertised addresses that are not
 ///    local interfaces (e.g. a tailnet IP behind a container's NAT publish).
 /// 4. De-duplication preserves first-seen order.
@@ -764,7 +764,7 @@ fn build_sans_from_config(state: &AppState) -> Vec<San> {
         }
     }
 
-    // 3. Merge advertise SANs from the `ZELLIMSERVER_SAN` env (loaded via
+    // 3. Merge advertise SANs from the `MUXRD_SAN` env (loaded via
     //    `ConfigLoaded`). These cover externally-advertised addresses that are
     //    NOT discoverable as local interfaces — e.g. a tailnet IP that reaches
     //    the server through a host-side NAT publish inside a container. Without
@@ -1671,7 +1671,7 @@ mod tests {
     #[test]
     fn build_sans_merges_advertise_sans_and_dedupes() {
         // The tailnet/docker scenario: bind 0.0.0.0, the only reachable IP is the
-        // container's internal address, and ZELLIMSERVER_SAN advertises the
+        // container's internal address, and MUXRD_SAN advertises the
         // externally-reachable tailnet IP. The cert must include BOTH the
         // reachable IP and the advertise SAN, and not duplicate one that overlaps.
         use std::net::Ipv4Addr;

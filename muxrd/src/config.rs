@@ -3,7 +3,7 @@
 //! ## Precedence (highest → lowest)
 //!
 //! 1. CLI flags (`--bind`)
-//! 2. Environment variables (`ZELLIMSERVER_BIND`)
+//! 2. Environment variables (`MUXRD_BIND`)
 //! 3. Config file (`$DATA_DIR/muxrd/config.toml`)
 //! 4. Hard-coded defaults (`127.0.0.1:50051`)
 //!
@@ -144,8 +144,8 @@ pub fn ensure_default_session_layout() -> Result<PathBuf> {
 /// The resolved TLS / transport mode for the server.
 ///
 /// Precedence (highest → lowest):
-/// 1. h2c (`--insecure-h2c` / `ZELLIMSERVER_H2C`)
-/// 2. External cert (`--tls-cert` + `--tls-key` / `ZELLIMSERVER_TLS_CERT` + `ZELLIMSERVER_TLS_KEY`)
+/// 1. h2c (`--insecure-h2c` / `MUXRD_H2C`)
+/// 2. External cert (`--tls-cert` + `--tls-key` / `MUXRD_TLS_CERT` + `MUXRD_TLS_KEY`)
 /// 3. Self-signed (default — auto-generated in the data dir)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CertSource {
@@ -205,9 +205,9 @@ impl From<CertSource> for CertMode {
 /// h2c  >  external (cert + key)  >  self-signed
 ///
 /// ## Env var fallbacks
-/// - `ZELLIMSERVER_TLS_CERT` — path to the external cert PEM
-/// - `ZELLIMSERVER_TLS_KEY`  — path to the external key PEM
-/// - `ZELLIMSERVER_H2C`      — truthy (non-empty and not "0") → h2c mode
+/// - `MUXRD_TLS_CERT` — path to the external cert PEM
+/// - `MUXRD_TLS_KEY`  — path to the external key PEM
+/// - `MUXRD_H2C`      — truthy (non-empty and not "0") → h2c mode
 ///
 /// ## Validation errors
 /// - Exactly one of `--tls-cert` / `--tls-key` given → error (both required).
@@ -219,19 +219,19 @@ pub fn resolve_cert_source(
 ) -> anyhow::Result<CertSource> {
     // ── Apply env fallbacks (CLI > env) ──────────────────────────────────────
     let cert = cli_cert.or_else(|| {
-        std::env::var("ZELLIMSERVER_TLS_CERT")
+        std::env::var("MUXRD_TLS_CERT")
             .ok()
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     });
     let key = cli_key.or_else(|| {
-        std::env::var("ZELLIMSERVER_TLS_KEY")
+        std::env::var("MUXRD_TLS_KEY")
             .ok()
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
     });
     let h2c = cli_h2c || {
-        std::env::var("ZELLIMSERVER_H2C")
+        std::env::var("MUXRD_H2C")
             .ok()
             .is_some_and(|v| !v.is_empty() && v != "0")
     };
@@ -240,7 +240,7 @@ pub fn resolve_cert_source(
     if h2c && (cert.is_some() || key.is_some()) {
         anyhow::bail!(
             "--insecure-h2c serves no TLS; remove --tls-cert/--tls-key \
-             (or ZELLIMSERVER_TLS_CERT/ZELLIMSERVER_TLS_KEY) when using h2c mode"
+             (or MUXRD_TLS_CERT/MUXRD_TLS_KEY) when using h2c mode"
         );
     }
 
@@ -256,11 +256,11 @@ pub fn resolve_cert_source(
             key: key_path,
         }),
         (Some(_), None) => anyhow::bail!(
-            "--tls-cert requires --tls-key (or ZELLIMSERVER_TLS_KEY); \
+            "--tls-cert requires --tls-key (or MUXRD_TLS_KEY); \
              both paths must be provided together"
         ),
         (None, Some(_)) => anyhow::bail!(
-            "--tls-key requires --tls-cert (or ZELLIMSERVER_TLS_CERT); \
+            "--tls-key requires --tls-cert (or MUXRD_TLS_CERT); \
              both paths must be provided together"
         ),
         // ── Default: self-signed ─────────────────────────────────────────────
@@ -278,7 +278,7 @@ pub fn resolve_cert_source(
 /// - H2c on a **loopback** address (`127.0.0.1` / `[::1]`): always allowed.
 /// - H2c on a **non-loopback** address:
 ///   - `allow_public = true` (set via `--i-know-this-is-behind-a-proxy` or
-///     `ZELLIMSERVER_H2C_ALLOW_PUBLIC`): allowed (emits a `warn!`).
+///     `MUXRD_H2C_ALLOW_PUBLIC`): allowed (emits a `warn!`).
 ///   - `allow_public = false`: **hard-fail** with a clear error.
 ///
 /// This is a pure function with no I/O side-effects, extracted for unit testability.
@@ -299,7 +299,7 @@ pub fn check_h2c_bind_safety(
         // Operator has explicitly acknowledged the risk.
         log::warn!(
             "h2c: non-loopback bind on {} acknowledged via \
-             --i-know-this-is-behind-a-proxy / ZELLIMSERVER_H2C_ALLOW_PUBLIC — \
+             --i-know-this-is-behind-a-proxy / MUXRD_H2C_ALLOW_PUBLIC — \
              ensure a TLS-terminating proxy is in front of this port",
             addr
         );
@@ -311,7 +311,7 @@ pub fn check_h2c_bind_safety(
              output in the clear. If you are running behind a TLS-terminating reverse \
              proxy (e.g. Traefik + Let's Encrypt, Cloudflare), re-run with \
              --i-know-this-is-behind-a-proxy (or set \
-             ZELLIMSERVER_H2C_ALLOW_PUBLIC=1) to acknowledge the risk. \
+             MUXRD_H2C_ALLOW_PUBLIC=1) to acknowledge the risk. \
              To serve TLS directly, omit --insecure-h2c."
         )
     }
@@ -341,10 +341,10 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
 
     // ── Precedence chain ─────────────────────────────────────────────────────
 
-    // bind_addr: CLI flag > ZELLIMSERVER_BIND env > config file > default
+    // bind_addr: CLI flag > MUXRD_BIND env > config file > default
     let bind_addr = bind_override
         .map(|s| s.to_owned())
-        .or_else(|| std::env::var("ZELLIMSERVER_BIND").ok())
+        .or_else(|| std::env::var("MUXRD_BIND").ok())
         .or(file_cfg.bind_addr)
         .unwrap_or_else(|| DEFAULT_BIND.to_owned());
 
@@ -606,11 +606,7 @@ mod tests {
     #[test]
     fn cert_source_default_is_self_signed() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::remove(&[
-            "ZELLIMSERVER_TLS_CERT",
-            "ZELLIMSERVER_TLS_KEY",
-            "ZELLIMSERVER_H2C",
-        ]);
+        let _guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY", "MUXRD_H2C"]);
 
         let src = resolve_cert_source(None, None, false).expect("should succeed");
         assert_eq!(src, CertSource::SelfSigned);
@@ -620,11 +616,7 @@ mod tests {
     #[test]
     fn cert_source_h2c_flag_wins_over_all() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::remove(&[
-            "ZELLIMSERVER_TLS_CERT",
-            "ZELLIMSERVER_TLS_KEY",
-            "ZELLIMSERVER_H2C",
-        ]);
+        let _guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY", "MUXRD_H2C"]);
 
         // h2c flag alone → H2c
         let src = resolve_cert_source(None, None, true).expect("should succeed");
@@ -635,8 +627,8 @@ mod tests {
     #[test]
     fn cert_source_h2c_env_truthy() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::set(&[("ZELLIMSERVER_H2C", "1")]);
-        let _key_guard = EnvGuard::remove(&["ZELLIMSERVER_TLS_CERT", "ZELLIMSERVER_TLS_KEY"]);
+        let _guard = EnvGuard::set(&[("MUXRD_H2C", "1")]);
+        let _key_guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY"]);
 
         let src = resolve_cert_source(None, None, false).expect("should succeed");
         assert_eq!(src, CertSource::H2c);
@@ -645,8 +637,8 @@ mod tests {
     #[test]
     fn cert_source_h2c_env_zero_is_falsy() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::set(&[("ZELLIMSERVER_H2C", "0")]);
-        let _key_guard = EnvGuard::remove(&["ZELLIMSERVER_TLS_CERT", "ZELLIMSERVER_TLS_KEY"]);
+        let _guard = EnvGuard::set(&[("MUXRD_H2C", "0")]);
+        let _key_guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY"]);
 
         let src = resolve_cert_source(None, None, false).expect("should succeed");
         assert_eq!(src, CertSource::SelfSigned, "H2C=0 should not activate h2c");
@@ -655,8 +647,8 @@ mod tests {
     #[test]
     fn cert_source_h2c_env_empty_is_falsy() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::set(&[("ZELLIMSERVER_H2C", "")]);
-        let _key_guard = EnvGuard::remove(&["ZELLIMSERVER_TLS_CERT", "ZELLIMSERVER_TLS_KEY"]);
+        let _guard = EnvGuard::set(&[("MUXRD_H2C", "")]);
+        let _key_guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY"]);
 
         let src = resolve_cert_source(None, None, false).expect("should succeed");
         assert_eq!(
@@ -669,11 +661,7 @@ mod tests {
     #[test]
     fn cert_source_external_requires_both_cert_and_key() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::remove(&[
-            "ZELLIMSERVER_TLS_CERT",
-            "ZELLIMSERVER_TLS_KEY",
-            "ZELLIMSERVER_H2C",
-        ]);
+        let _guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY", "MUXRD_H2C"]);
 
         // Only cert → error
         let err = resolve_cert_source(Some("/tmp/cert.pem".into()), None, false)
@@ -695,11 +683,7 @@ mod tests {
     #[test]
     fn cert_source_external_both_paths_succeeds() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::remove(&[
-            "ZELLIMSERVER_TLS_CERT",
-            "ZELLIMSERVER_TLS_KEY",
-            "ZELLIMSERVER_H2C",
-        ]);
+        let _guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY", "MUXRD_H2C"]);
 
         let cert: PathBuf = "/etc/ssl/cert.pem".into();
         let key: PathBuf = "/etc/ssl/key.pem".into();
@@ -718,11 +702,7 @@ mod tests {
     #[test]
     fn cert_source_h2c_with_cert_or_key_is_error() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
-        let _guard = EnvGuard::remove(&[
-            "ZELLIMSERVER_TLS_CERT",
-            "ZELLIMSERVER_TLS_KEY",
-            "ZELLIMSERVER_H2C",
-        ]);
+        let _guard = EnvGuard::remove(&["MUXRD_TLS_CERT", "MUXRD_TLS_KEY", "MUXRD_H2C"]);
 
         // h2c + cert → error
         let err =
@@ -757,10 +737,10 @@ mod tests {
     fn cert_source_env_fallback_external() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::set(&[
-            ("ZELLIMSERVER_TLS_CERT", "/env/cert.pem"),
-            ("ZELLIMSERVER_TLS_KEY", "/env/key.pem"),
+            ("MUXRD_TLS_CERT", "/env/cert.pem"),
+            ("MUXRD_TLS_KEY", "/env/key.pem"),
         ]);
-        let _h2c_guard = EnvGuard::remove(&["ZELLIMSERVER_H2C"]);
+        let _h2c_guard = EnvGuard::remove(&["MUXRD_H2C"]);
 
         // No CLI args → should pick up from env
         let src = resolve_cert_source(None, None, false).expect("should succeed");
@@ -778,10 +758,10 @@ mod tests {
     fn cert_source_cli_overrides_env() {
         let _lock = CERT_SOURCE_ENV_LOCK.lock().unwrap();
         let _guard = EnvGuard::set(&[
-            ("ZELLIMSERVER_TLS_CERT", "/env/cert.pem"),
-            ("ZELLIMSERVER_TLS_KEY", "/env/key.pem"),
+            ("MUXRD_TLS_CERT", "/env/cert.pem"),
+            ("MUXRD_TLS_KEY", "/env/key.pem"),
         ]);
-        let _h2c_guard = EnvGuard::remove(&["ZELLIMSERVER_H2C"]);
+        let _h2c_guard = EnvGuard::remove(&["MUXRD_H2C"]);
 
         // CLI takes precedence over env
         let src = resolve_cert_source(

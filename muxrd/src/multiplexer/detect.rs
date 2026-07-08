@@ -18,7 +18,7 @@ use crate::cli::BackendKind;
 /// Environment variable that bypasses the zellij version-mismatch check.
 /// The same variable is referenced in `bin/muxrd.rs` for startup-warning
 /// logging; the actual skip logic lives here in the shared probe.
-const SKIP_VERSION_CHECK_ENV: &str = "ZELLIMSERVER_SKIP_VERSION_CHECK";
+const SKIP_VERSION_CHECK_ENV: &str = "MUXRD_SKIP_VERSION_CHECK";
 
 /// Timeout for the `zellij --version` subprocess.
 const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -28,7 +28,7 @@ const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 /// Probe whether the zellij backend is usable.
 ///
 /// Returns `true` when:
-/// - `ZELLIMSERVER_SKIP_VERSION_CHECK` is set (truthy, non-"0") **and** the
+/// - `MUXRD_SKIP_VERSION_CHECK` is set (truthy, non-"0") **and** the
 ///   `zellij` binary is present on PATH — version is not checked.
 /// - Otherwise: the `zellij` binary is found on PATH, `zellij --version`
 ///   completes within 5 s, and its version matches the linked

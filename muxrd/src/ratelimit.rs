@@ -29,9 +29,9 @@
 //!
 //! Defaults are generous for a real mobile client (which opens a few RPCs plus
 //! one long-lived `AttachTerminal` stream) and can be overridden via env:
-//! - `ZELLIMSERVER_RATE_LIMIT_RPS`   — sustained requests/sec per IP (default 30)
-//! - `ZELLIMSERVER_RATE_LIMIT_BURST` — burst capacity per IP (default 60)
-//! - `ZELLIMSERVER_RATE_LIMIT_DISABLE=1` — disable the limiter entirely
+//! - `MUXRD_RATE_LIMIT_RPS`   — sustained requests/sec per IP (default 30)
+//! - `MUXRD_RATE_LIMIT_BURST` — burst capacity per IP (default 60)
+//! - `MUXRD_RATE_LIMIT_DISABLE=1` — disable the limiter entirely
 
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr};
@@ -78,15 +78,15 @@ impl Default for RateLimitConfig {
 
 impl RateLimitConfig {
     /// Resolve config from env, falling back to defaults. Returns `None` when
-    /// `ZELLIMSERVER_RATE_LIMIT_DISABLE` is truthy (limiter disabled).
+    /// `MUXRD_RATE_LIMIT_DISABLE` is truthy (limiter disabled).
     pub fn from_env() -> Option<Self> {
-        if env_truthy("ZELLIMSERVER_RATE_LIMIT_DISABLE") {
-            log::warn!("ratelimit: disabled via ZELLIMSERVER_RATE_LIMIT_DISABLE");
+        if env_truthy("MUXRD_RATE_LIMIT_DISABLE") {
+            log::warn!("ratelimit: disabled via MUXRD_RATE_LIMIT_DISABLE");
             return None;
         }
         let d = Self::default();
-        let rps = env_f64("ZELLIMSERVER_RATE_LIMIT_RPS").unwrap_or(d.rps);
-        let burst = env_f64("ZELLIMSERVER_RATE_LIMIT_BURST").unwrap_or(d.burst);
+        let rps = env_f64("MUXRD_RATE_LIMIT_RPS").unwrap_or(d.rps);
+        let burst = env_f64("MUXRD_RATE_LIMIT_BURST").unwrap_or(d.burst);
         // Guard against nonsensical values that would disable the limit.
         let rps = if rps.is_finite() && rps > 0.0 {
             rps
@@ -182,7 +182,7 @@ impl RateLimiter {
 ///
 /// Install **before** [`crate::auth::BearerAuthLayer`] so it is the outermost
 /// middleware (tonic applies the first-added layer outermost). When the limiter
-/// is disabled (`ZELLIMSERVER_RATE_LIMIT_DISABLE`) the layer is a transparent
+/// is disabled (`MUXRD_RATE_LIMIT_DISABLE`) the layer is a transparent
 /// pass-through, so the server builder's type is unaffected either way.
 #[derive(Clone)]
 pub struct RateLimitLayer {
