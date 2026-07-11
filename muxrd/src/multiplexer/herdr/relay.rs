@@ -103,14 +103,41 @@ const WIRE_TIMEOUT: Duration = Duration::from_secs(3);
 /// so we never request herdr-side graphics frames (matching the spike).
 const CELL_PX_DISABLED: u32 = 0;
 
+/// Number of connect+handshake attempts a single [`HerdrMuxSender::reattach`]
+/// makes before giving up and tearing down the AttachTerminal stream. The old
+/// terminal is already `Detach`ed by the time we reconnect, so a single transient
+/// failure — one 3 s [`WIRE_TIMEOUT`] handshake-op timeout against a slow/loaded
+/// herdr is enough — would otherwise be unrecoverable. We therefore retry the full
+/// connect+handshake once on a **fresh** connection (total = 2 attempts) before
+/// sending the `None` sentinel. Also bounds [`SWAP_GRACE`].
+const RECONNECT_ATTEMPTS: usize = 2;
+
+/// Per-attempt time budget folded into [`SWAP_GRACE`] for [`UnixStream::connect`],
+/// which is itself **unbounded** (a kernel-local Unix-socket connect; normally
+/// instant). This is an allowance, not an enforced bound — adding a real connect
+/// timeout (e.g. via `socket2`) is out of scope.
+const CONNECT_SLACK: Duration = Duration::from_secs(1);
+
+/// Final slack folded into [`SWAP_GRACE`] on top of the per-attempt worst case, so
+/// the reader never abandons a swap that is a hair from completing.
+const SWAP_SLACK: Duration = Duration::from_secs(1);
+
 /// How long [`HerdrMuxReceiver::recv`] waits for a reconnect's new read half after
 /// it hits EOF **while a swap is in flight** (`swap_pending` set). It must cover the
-/// worst-case reattach: a `Detach` write, a fresh connect, and the
-/// `Hello`/`Welcome`/`AttachTerminal` handshake — each bounded by [`WIRE_TIMEOUT`] —
-/// plus slack. A genuine disconnect (no swap pending) never waits this out: the
-/// reader returns `None` immediately, so the client-side auto-reattach latency does
-/// not regress.
-const SWAP_GRACE: Duration = Duration::from_secs(2 * WIRE_TIMEOUT.as_secs() + 1);
+/// worst-case [`HerdrMuxSender::reattach`]: [`RECONNECT_ATTEMPTS`] attempts, each of
+/// which may spend up to three [`WIRE_TIMEOUT`]-bounded handshake ops (`Hello`
+/// write, `Welcome` read, `AttachTerminal` write) plus a [`CONNECT_SLACK`] allowance
+/// for the (unbounded) connect — i.e.
+/// `RECONNECT_ATTEMPTS × (3 × WIRE_TIMEOUT + CONNECT_SLACK)` — plus [`SWAP_SLACK`].
+/// With `WIRE_TIMEOUT = 3 s` that is `2 × (3×3 + 1) + 1 = 21 s`. Note that
+/// `UnixStream::connect` is not timeout-bounded (kernel-local, normally instant);
+/// `CONNECT_SLACK` is only an allowance. A genuine disconnect (no swap pending)
+/// never waits this out: the reader returns `None` immediately, so the client-side
+/// auto-reattach latency does not regress.
+const SWAP_GRACE: Duration = Duration::from_secs(
+    RECONNECT_ATTEMPTS as u64 * (3 * WIRE_TIMEOUT.as_secs() + CONNECT_SLACK.as_secs())
+        + SWAP_SLACK.as_secs(),
+);
 
 // ─── open_attach (P2.04 entry point) ──────────────────────────────────────────
 
@@ -409,13 +436,18 @@ impl HerdrMuxSender {
     /// 2. best-effort `Detach` the old connection — herdr's `remove_client` then
     ///    frees the old terminal's owner entry + resize lock and the desktop layout
     ///    restores it (write errors are ignored: the server may already be gone);
-    /// 3. open a **fresh** connection + handshake for `terminal_id`, swap the write
-    ///    half under the mutex, hand the new read half to the reader, and record the
-    ///    new attach target.
+    /// 3. open a **fresh** connection + handshake for `terminal_id` — retrying the
+    ///    whole connect+handshake up to [`RECONNECT_ATTEMPTS`] times so a single
+    ///    transient failure (e.g. one [`WIRE_TIMEOUT`] handshake-op timeout against a
+    ///    loaded herdr) does not tear the stream down — then swap the write half
+    ///    under the mutex, hand the new read half to the reader, and record the new
+    ///    attach target.
     ///
-    /// On a reconnect failure the old terminal is already released (Detach-first),
-    /// so the reader is sent the `None` sentinel, sees EOF, ends the stream, and the
-    /// client-side auto-reattach flow takes over — no half-attached state.
+    /// Only after **every** attempt fails is the old terminal (already released,
+    /// Detach-first) unrecoverable: the reader is sent the `None` sentinel, sees EOF,
+    /// ends the stream, and the client-side auto-reattach flow takes over — no
+    /// half-attached state. Both the per-attempt failure (`warn!`) and the final
+    /// teardown (`error!`) are logged so prod incidents are self-diagnosing.
     fn reattach(&mut self, terminal_id: String) -> Result<()> {
         // 1. Arm the swap BEFORE Detach: the reader must not misread the EOF as a
         //    genuine disconnect.
@@ -439,34 +471,55 @@ impl HerdrMuxSender {
             }
         }
 
-        // 3. Connect + handshake + attach a fresh connection for the new terminal.
-        match connect_and_attach(&self.wire_socket, self.rows, self.cols, &terminal_id)
-            .and_then(split_wire)
-        {
-            Ok((read_half, write_half)) => {
-                // Swap the write half under the mutex so every ShutdownGuard clone
-                // now writes to the new connection.
-                *self.lock_write() = write_half;
-                self.current_terminal_id = terminal_id;
-                // Hand the reader its new read half. A send error means the reader
-                // is already gone — the swap cannot complete.
-                if self.swap_tx.send(Some(read_half)).is_err() {
+        // 3. Connect + handshake + attach a fresh connection for the new terminal,
+        //    retrying the whole handshake up to RECONNECT_ATTEMPTS times. The old
+        //    terminal is already Detached, so a single transient failure must not
+        //    tear the stream down.
+        let mut last_err: Option<anyhow::Error> = None;
+        for attempt in 1..=RECONNECT_ATTEMPTS {
+            match connect_and_attach(&self.wire_socket, self.rows, self.cols, &terminal_id)
+                .and_then(split_wire)
+            {
+                Ok((read_half, write_half)) => {
+                    // Swap the write half under the mutex so every ShutdownGuard clone
+                    // now writes to the new connection.
+                    *self.lock_write() = write_half;
+                    self.current_terminal_id = terminal_id.clone();
+                    // Hand the reader its new read half. A send error means the reader
+                    // is already gone — the swap cannot complete.
+                    if self.swap_tx.send(Some(read_half)).is_err() {
+                        self.swap_pending.store(false, Ordering::SeqCst);
+                        return Err(anyhow!(
+                            "herdr reattach: relay reader gone, cannot adopt new connection"
+                        ));
+                    }
                     self.swap_pending.store(false, Ordering::SeqCst);
-                    return Err(anyhow!(
-                        "herdr reattach: relay reader gone, cannot adopt new connection"
-                    ));
+                    return Ok(());
                 }
-                self.swap_pending.store(false, Ordering::SeqCst);
-                Ok(())
-            }
-            Err(e) => {
-                // Reconnect failed; the old terminal is already Detached. Send the
-                // None sentinel so the reader ends the stream at its EOF.
-                let _ = self.swap_tx.send(None);
-                self.swap_pending.store(false, Ordering::SeqCst);
-                Err(e)
+                Err(e) => {
+                    log::warn!(
+                        "herdr reattach: connect+handshake attempt {attempt}/{RECONNECT_ATTEMPTS} \
+                         for terminal '{terminal_id}' failed: {e:#}"
+                    );
+                    last_err = Some(e);
+                }
             }
         }
+
+        // Every attempt failed; the old terminal is already Detached, so the stream
+        // is unrecoverable. Send the None sentinel so the reader ends the stream at
+        // its EOF, and log loudly with the last error and the operation.
+        let err = last_err.unwrap_or_else(|| {
+            anyhow!("herdr reattach: connect+handshake failed (no error captured)")
+        });
+        let _ = self.swap_tx.send(None);
+        self.swap_pending.store(false, Ordering::SeqCst);
+        log::error!(
+            "herdr reattach: all {RECONNECT_ATTEMPTS} connect+handshake attempts to terminal \
+             '{terminal_id}' failed (last error: {err:#}); sending None sentinel and tearing \
+             down the AttachTerminal stream"
+        );
+        Err(err)
     }
 }
 
@@ -673,23 +726,55 @@ impl HerdrMuxReceiver {
     /// swap pending returns `None` immediately (no grace wait) so the client-side
     /// auto-reattach latency does not regress.
     fn try_adopt_swap(&self) -> Option<UnixStream> {
+        self.try_adopt_swap_within(SWAP_GRACE)
+    }
+
+    /// [`Self::try_adopt_swap`] parameterized by the grace window, so tests can drive
+    /// the bounded-wait path with a short grace without a real [`SWAP_GRACE`] sleep.
+    /// Production always calls it with [`SWAP_GRACE`].
+    fn try_adopt_swap_within(&self, grace: Duration) -> Option<UnixStream> {
         match self.swap_rx.try_recv() {
             // A reconnect already delivered its new read half — adopt it.
             Ok(Some(stream)) => Some(stream),
-            // A reconnect failed (sentinel) — end the stream.
-            Ok(None) => None,
+            // A reconnect exhausted its retries (sentinel) — end the stream. This is
+            // one of the two observable death paths (the other is grace expiry).
+            Ok(None) => {
+                log::warn!(
+                    "herdr wire swap: reconnect failed after retries (None sentinel); \
+                     ending the AttachTerminal stream"
+                );
+                None
+            }
             // The sender (and all its clones) dropped — nothing more will arrive.
+            // Genuine teardown: stay silent.
             Err(mpsc::TryRecvError::Disconnected) => None,
             Err(mpsc::TryRecvError::Empty) => {
                 if self.swap_pending.load(Ordering::SeqCst) {
                     // A swap is in flight but its result has not landed yet: wait,
                     // bounded, for the reconnect to complete (or fail).
-                    match self.swap_rx.recv_timeout(SWAP_GRACE) {
+                    match self.swap_rx.recv_timeout(grace) {
                         Ok(Some(stream)) => Some(stream),
-                        _ => None,
+                        // Reconnect exhausted its retries mid-wait.
+                        Ok(None) => {
+                            log::warn!(
+                                "herdr wire swap: reconnect failed after retries (None sentinel); \
+                                 ending the AttachTerminal stream"
+                            );
+                            None
+                        }
+                        // The swap did not complete within the grace: abandon it.
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            log::warn!(
+                                "herdr wire swap: no reconnect completed within the {grace:?} \
+                                 grace; ending the AttachTerminal stream"
+                            );
+                            None
+                        }
+                        // Sender dropped mid-wait — genuine teardown, stay silent.
+                        Err(mpsc::RecvTimeoutError::Disconnected) => None,
                     }
                 } else {
-                    // Genuine disconnect — propagate immediately.
+                    // Genuine disconnect — propagate immediately (stay silent).
                     None
                 }
             }
@@ -1336,8 +1421,9 @@ mod tests {
         );
     }
 
-    /// Failed reconnect: the wire socket does not exist, so `reattach` returns
-    /// `Err`, sends the `None` sentinel, and the reader at EOF ends the stream.
+    /// Failed reconnect: the wire socket does not exist, so **both**
+    /// [`RECONNECT_ATTEMPTS`] connects fail fast, `reattach` returns `Err`, sends the
+    /// `None` sentinel, and the reader at EOF ends the stream.
     #[test]
     fn reattach_failed_reconnect_errors_and_reader_ends() {
         let (client, server) = UnixStream::pair().unwrap();
@@ -1375,5 +1461,202 @@ mod tests {
             receiver.recv().is_none(),
             "reader must end the stream after a failed reconnect"
         );
+    }
+
+    /// Retry-succeeds (F1 fix): the FIRST reconnect attempt fails (server accepts
+    /// then closes before `Welcome`), the SECOND is served normally → `reattach`
+    /// returns `Ok`, the reader adopts the second connection and delivers its frame,
+    /// so the stream survives a single transient failure. **Fails against the
+    /// pre-fix single-attempt code** (`reattach` would `Err` and `.unwrap()` panics).
+    #[test]
+    fn reattach_retries_once_then_succeeds() {
+        let sock = unique_socket_path("retry_ok");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            // Initial attach on conn1.
+            let (mut c1, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c1);
+            // First reconnect attempt: accept then close before Welcome → fails.
+            let (c2, _) = listener.accept().unwrap();
+            drop(c2);
+            // Second reconnect attempt: serve normally and deliver a frame.
+            let (mut c3, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c3);
+            c3.write_all(&frame_server_message(&term_frame(2))).unwrap();
+            c3.flush().unwrap();
+            (c1, c3) // keep both server ends open
+        });
+
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let (read1, write1) = split_wire(conn1).unwrap();
+
+        let swap_pending = Arc::new(AtomicBool::new(false));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::clone(&swap_pending),
+        };
+        let mut sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(write1)),
+            control: test_control(),
+            workspace_id: "ws-1".into(),
+            current_terminal_id: "term-A".into(),
+            swap_pending,
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: sock.clone(),
+        };
+
+        // Reader blocked on conn1 in a background thread, as in the real relay.
+        let reader = std::thread::spawn(move || receiver.recv());
+
+        // First attempt fails, second succeeds → Ok, target advances.
+        sender.reattach("term-B".into()).unwrap();
+        assert_eq!(sender.current_terminal_id, "term-B");
+
+        let msg = reader.join().unwrap();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "reader must adopt the second (successful) reconnect and return its frame, got {msg:?}"
+        );
+
+        let _ = server.join();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Retry-exhausted: BOTH reconnect attempts fail (server accepts then closes
+    /// before `Welcome` each time) → `reattach` returns `Err`, the attach target is
+    /// unchanged, and the reader (unblocked by the sender's post-Detach shutdown)
+    /// ends the stream. Preserves the pre-fix teardown behavior once retries run out.
+    #[test]
+    fn reattach_retries_exhausted_ends_stream() {
+        let sock = unique_socket_path("retry_fail");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            // Initial attach on conn1.
+            let (mut c1, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c1);
+            // Both reconnect attempts: accept then close before Welcome → all fail.
+            let (a, _) = listener.accept().unwrap();
+            drop(a);
+            let (b, _) = listener.accept().unwrap();
+            drop(b);
+            c1 // keep the initial server end open; the sender's shutdown ends the reader
+        });
+
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let (read1, write1) = split_wire(conn1).unwrap();
+
+        let swap_pending = Arc::new(AtomicBool::new(false));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::clone(&swap_pending),
+        };
+        let mut sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(write1)),
+            control: test_control(),
+            workspace_id: "ws-1".into(),
+            current_terminal_id: "term-A".into(),
+            swap_pending,
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: sock.clone(),
+        };
+
+        let reader = std::thread::spawn(move || receiver.recv());
+
+        assert!(
+            sender.reattach("term-B".into()).is_err(),
+            "reattach must fail after both reconnect attempts fail"
+        );
+        assert_eq!(
+            sender.current_terminal_id, "term-A",
+            "attach target must be unchanged after a fully-failed reattach"
+        );
+
+        assert!(
+            reader.join().unwrap().is_none(),
+            "reader must end the stream once the retries are exhausted"
+        );
+
+        let _ = server.join();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// F2 fix (fails against the old `SWAP_GRACE`): the grace must cover the true
+    /// worst-case reattach — `RECONNECT_ATTEMPTS × (3 × WIRE_TIMEOUT + CONNECT_SLACK)`.
+    /// The pre-fix value `2 × WIRE_TIMEOUT + 1 = 7 s` was smaller than even a single
+    /// slow-but-successful attempt (`3 × WIRE_TIMEOUT = 9 s`) and abandoned
+    /// about-to-succeed swaps; both assertions below fail against that old constant.
+    ///
+    /// Because every handshake op is capped at `WIRE_TIMEOUT = 3 s`, a real >7 s
+    /// single-attempt handshake cannot be staged without violating `WIRE_TIMEOUT`,
+    /// so the constant's adequacy is asserted directly here (deterministic, instant)
+    /// and the reader's grace-wait mechanism is exercised separately in
+    /// [`adopt_swap_waits_out_a_slow_reconnect`] with a scaled grace.
+    #[test]
+    fn swap_grace_covers_reconnect_worst_case() {
+        let worst_case_per_attempt = 3 * WIRE_TIMEOUT + CONNECT_SLACK;
+        let worst_case = RECONNECT_ATTEMPTS as u32 * worst_case_per_attempt;
+        assert!(
+            SWAP_GRACE >= worst_case,
+            "SWAP_GRACE ({SWAP_GRACE:?}) must cover the worst-case reattach ({worst_case:?})"
+        );
+        // Regression guard: the old 7 s grace could not even cover one slow attempt.
+        assert!(
+            SWAP_GRACE > 3 * WIRE_TIMEOUT,
+            "SWAP_GRACE ({SWAP_GRACE:?}) must exceed a single slow attempt (3×WIRE_TIMEOUT)"
+        );
+    }
+
+    /// The reader's bounded grace-wait actually blocks for a late-arriving
+    /// reconnect: with a 2 s grace, a read half delivered after ~150 ms is still
+    /// adopted (and the wait genuinely spanned that delay). Uses the
+    /// grace-parameterized helper to stay fast+deterministic — a real `SWAP_GRACE`
+    /// (21 s) wait would be far too slow for the suite.
+    #[test]
+    fn adopt_swap_waits_out_a_slow_reconnect() {
+        let (recv_read, _srv1) = UnixStream::pair().unwrap();
+        let swap_pending = Arc::new(AtomicBool::new(true));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let receiver = HerdrMuxReceiver {
+            read: recv_read,
+            swap_rx,
+            swap_pending,
+        };
+
+        // Deliver the new read half after ~150 ms (kept alive via _srv2).
+        let (recv_read2, _srv2) = UnixStream::pair().unwrap();
+        let deliver = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            let _ = swap_tx.send(Some(recv_read2));
+            _srv2 // keep the peer alive so the adopted read half stays valid
+        });
+
+        let start = std::time::Instant::now();
+        let adopted = receiver.try_adopt_swap_within(Duration::from_millis(2000));
+        let waited = start.elapsed();
+
+        assert!(
+            adopted.is_some(),
+            "reader must adopt a reconnect that lands within the grace"
+        );
+        assert!(
+            waited >= Duration::from_millis(120),
+            "reader must have waited for the slow reconnect, waited {waited:?}"
+        );
+        assert!(
+            waited < Duration::from_millis(2000),
+            "reader must not wait the full grace once the reconnect lands, waited {waited:?}"
+        );
+
+        let _srv2 = deliver.join().unwrap();
     }
 }
