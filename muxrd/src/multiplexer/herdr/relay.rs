@@ -726,14 +726,9 @@ impl MuxReceiver for HerdrMuxReceiver {
                 return Some(msg);
             }
             // The current connection ended. Adopt a swapped-in connection if a
-            // reattach is in flight; otherwise this is a genuine disconnect.
-            match self.try_adopt_swap() {
-                Some(new_read) => {
-                    self.read = new_read;
-                    continue;
-                }
-                None => return None,
-            }
+            // reattach is in flight; otherwise this is a genuine disconnect
+            // (`?` propagates the `None` and ends the stream).
+            self.read = self.try_adopt_swap()?;
         }
     }
 }
