@@ -110,6 +110,16 @@ const CELL_PX_DISABLED: u32 = 0;
 /// herdr is enough — would otherwise be unrecoverable. We therefore retry the full
 /// connect+handshake once on a **fresh** connection (total = 2 attempts) before
 /// sending the `None` sentinel. Also bounds [`SWAP_GRACE`].
+///
+/// **Deliberate resilience-vs-latency trade-off:** `reattach` runs to completion
+/// inside one `run_sender_op` on the relay's inbound `select!` loop (serialized —
+/// see the module header), so a stuck herdr can block that loop — and therefore
+/// keystrokes and detach-detection on THIS relay — for roughly
+/// `RECONNECT_ATTEMPTS × 3 × WIRE_TIMEOUT` (≈10 s → ≈20 s versus a hypothetical
+/// single-attempt version) before the retries give up. We accept this because a
+/// torn-down stream costs a full client-side reconnect (worse for the user) and
+/// herdr is co-located/local, so a stuck attempt is the rare case the retry exists
+/// to survive.
 const RECONNECT_ATTEMPTS: usize = 2;
 
 /// Per-attempt time budget folded into [`SWAP_GRACE`] for [`UnixStream::connect`],
@@ -134,6 +144,16 @@ const SWAP_SLACK: Duration = Duration::from_secs(1);
 /// `CONNECT_SLACK` is only an allowance. A genuine disconnect (no swap pending)
 /// never waits this out: the reader returns `None` immediately, so the client-side
 /// auto-reattach latency does not regress.
+///
+/// **Coupling to `ShutdownGuard` (relay/reader.rs):** `ShutdownGuard::drop` joins
+/// the reader's std thread, which can be parked inside this same grace wait if a
+/// teardown races an in-flight swap. Today the inbound task's `select!` serializes
+/// `run_sender_op`s, so a `reattach` and a client-exit teardown on the same relay
+/// cannot overlap in practice — but if a future refactor relaxes that
+/// serialization, `ShutdownGuard::drop`'s join becomes transitively bounded by
+/// `SWAP_GRACE` (worst case ~21 s to tear down a relay). A change to either this
+/// constant or the `select!` serialization in `relay/reader.rs` should re-check
+/// that this race stays unreachable.
 const SWAP_GRACE: Duration = Duration::from_secs(
     RECONNECT_ATTEMPTS as u64 * (3 * WIRE_TIMEOUT.as_secs() + CONNECT_SLACK.as_secs())
         + SWAP_SLACK.as_secs(),
@@ -1617,12 +1637,33 @@ mod tests {
     }
 
     /// The reader's bounded grace-wait actually blocks for a late-arriving
-    /// reconnect: with a 2 s grace, a read half delivered after ~150 ms is still
-    /// adopted (and the wait genuinely spanned that delay). Uses the
-    /// grace-parameterized helper to stay fast+deterministic — a real `SWAP_GRACE`
-    /// (21 s) wait would be far too slow for the suite.
+    /// reconnect **long enough that a regression to the OLD `SWAP_GRACE` formula
+    /// (`2 × WIRE_TIMEOUT + 1`) would fail it**, not merely that the wait mechanism
+    /// blocks at all: both the grace and the delivery delay are derived from the
+    /// real constants and scaled down by [`GRACE_TEST_SCALE_DOWN`] to stay
+    /// fast+deterministic (a real 21 s `SWAP_GRACE` wait would be far too slow for
+    /// the suite). The delay is chosen to exceed the OLD formula at the same scale
+    /// but fit comfortably inside the NEW one, so this test — unlike a version
+    /// pinned to arbitrary literals — actually exercises the F2 magnitude fix.
+    /// [`swap_grace_covers_reconnect_worst_case`] is the const-level companion
+    /// guard (asserts the unscaled relationship directly).
     #[test]
     fn adopt_swap_waits_out_a_slow_reconnect() {
+        const GRACE_TEST_SCALE_DOWN: u32 = 10;
+
+        // Scaled-down NEW grace (from the real, derived SWAP_GRACE): ≈2.1 s.
+        let scaled_grace = SWAP_GRACE / GRACE_TEST_SCALE_DOWN;
+        // Scaled-down OLD (pre-fix) formula (`2 × WIRE_TIMEOUT + 1` = 7 s): ≈0.7 s.
+        let old_formula_scaled =
+            (2 * WIRE_TIMEOUT + Duration::from_secs(1)) / GRACE_TEST_SCALE_DOWN;
+        // Just over the old bound, comfortably under the new one.
+        let delay = old_formula_scaled + Duration::from_millis(50);
+        assert!(
+            delay > old_formula_scaled && delay < scaled_grace,
+            "test setup: delay ({delay:?}) must exceed the scaled OLD grace \
+             ({old_formula_scaled:?}) but fit inside the scaled NEW grace ({scaled_grace:?})"
+        );
+
         let (recv_read, _srv1) = UnixStream::pair().unwrap();
         let swap_pending = Arc::new(AtomicBool::new(true));
         let (swap_tx, swap_rx) = mpsc::channel();
@@ -1632,28 +1673,29 @@ mod tests {
             swap_pending,
         };
 
-        // Deliver the new read half after ~150 ms (kept alive via _srv2).
+        // Deliver the new read half after `delay` (kept alive via _srv2).
         let (recv_read2, _srv2) = UnixStream::pair().unwrap();
         let deliver = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(150));
+            std::thread::sleep(delay);
             let _ = swap_tx.send(Some(recv_read2));
             _srv2 // keep the peer alive so the adopted read half stays valid
         });
 
         let start = std::time::Instant::now();
-        let adopted = receiver.try_adopt_swap_within(Duration::from_millis(2000));
+        let adopted = receiver.try_adopt_swap_within(scaled_grace);
         let waited = start.elapsed();
 
         assert!(
             adopted.is_some(),
-            "reader must adopt a reconnect that lands within the grace"
+            "reader must adopt a reconnect that lands within the scaled grace — a \
+             regression to the old SWAP_GRACE formula would time out here (waited {waited:?})"
         );
         assert!(
-            waited >= Duration::from_millis(120),
-            "reader must have waited for the slow reconnect, waited {waited:?}"
+            waited >= delay.saturating_sub(Duration::from_millis(30)),
+            "reader must have waited for the slow reconnect, waited {waited:?}, delay {delay:?}"
         );
         assert!(
-            waited < Duration::from_millis(2000),
+            waited < scaled_grace,
             "reader must not wait the full grace once the reconnect lands, waited {waited:?}"
         );
 
