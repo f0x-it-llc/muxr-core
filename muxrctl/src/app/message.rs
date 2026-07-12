@@ -6,6 +6,7 @@
 
 use crossterm::event::KeyEvent;
 
+use crate::server::devices::DeviceRecord;
 use crate::server::tokens::TokenRecord;
 
 use super::state::{Screen, ServerInfo};
@@ -79,6 +80,18 @@ pub enum Message {
 
     /// A token operation (create/revoke) completed; the list needs a refresh.
     TokensChanged,
+
+    // ── Devices screen messages ───────────────────────────────────────────────
+    /// Push devices + relay URL loaded, posted by a `LoadDevices` task.
+    DevicesLoaded {
+        /// All registered push devices.
+        devices: Vec<DeviceRecord>,
+        /// The resolved push-notification relay URL, or `None` when disabled.
+        relay_url: Option<String>,
+    },
+
+    /// A device was removed; the list needs a refresh.
+    DevicesChanged,
 
     // ── Token QR overlay messages ─────────────────────────────────────────────
     /// The token QR overlay URI is ready: URI to encode + client baseline.

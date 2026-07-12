@@ -9,6 +9,7 @@
 //! the library directly.
 
 pub mod ctl_state;
+pub mod devices;
 pub mod tokens;
 
 use anyhow::{Context, Result};
@@ -32,6 +33,8 @@ fn server_info_from(info: StatusInfo) -> ServerInfo {
         pid: info.pid,
         uptime_secs: info.uptime_secs,
         client_count: info.client_count,
+        notify_relay_url: info.notify_relay_url,
+        push_device_count: info.push_device_count,
     }
 }
 

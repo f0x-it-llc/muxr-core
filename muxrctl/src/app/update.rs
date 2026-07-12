@@ -82,6 +82,7 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
                 Screen::Cert => state.cert.status = format!("Error: {msg}"),
                 Screen::Server => state.server.action_msg = format!("Error: {msg}"),
                 Screen::Tokens => state.tokens.status = format!("Error: {msg}"),
+                Screen::Devices => state.devices.status = format!("Error: {msg}"),
                 _ => {}
             }
             // Clear loading flags.
@@ -89,6 +90,7 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
             state.cert.loading = false;
             state.server.loading = false;
             state.tokens.loading = false;
+            state.devices.loading = false;
             Vec::new()
         }
         Message::ActionOk(msg) => {
@@ -97,12 +99,14 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
                 Screen::Cert => state.cert.status = msg,
                 Screen::Server => state.server.action_msg = msg,
                 Screen::Tokens => state.tokens.status = msg,
+                Screen::Devices => state.devices.status = msg,
                 _ => {}
             }
             state.config.loading = false;
             state.cert.loading = false;
             state.server.loading = false;
             state.tokens.loading = false;
+            state.devices.loading = false;
             Vec::new()
         }
 
@@ -133,6 +137,23 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
             state.tokens.loading = false;
             state.tokens.last_minted_secret = None;
             vec![UpdateAction::LoadTokens]
+        }
+
+        // ── Devices screen messages ────────────────────────────────────────────
+        Message::DevicesLoaded { devices, relay_url } => {
+            state.devices.devices = devices;
+            // Clamp cursor to valid range.
+            if state.devices.cursor >= state.devices.devices.len() {
+                state.devices.cursor = state.devices.devices.len().saturating_sub(1);
+            }
+            state.devices.relay_url = relay_url;
+            state.devices.loading = false;
+            state.devices.status = "Devices loaded.".to_string();
+            Vec::new()
+        }
+        Message::DevicesChanged => {
+            state.devices.loading = false;
+            vec![UpdateAction::LoadDevices]
         }
 
         // ── Token QR overlay messages ─────────────────────────────────────────
@@ -203,6 +224,11 @@ fn on_enter_screen(state: &mut AppState, screen: Screen) -> Vec<UpdateAction> {
             state.tokens.form_phase = TokensFormPhase::Browsing;
             state.tokens.form_name = String::new();
             vec![UpdateAction::LoadTokens]
+        }
+        Screen::Devices => {
+            state.devices.loading = true;
+            state.devices.status = String::new();
+            vec![UpdateAction::LoadDevices]
         }
         Screen::Cert => {
             // Load config + reachable IPs so that `build_sans_from_config` has
@@ -338,6 +364,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
         Screen::Cert => handle_cert_key(state, key),
         Screen::Server => handle_server_key(state, key),
         Screen::Tokens => handle_tokens_key(state, key),
+        Screen::Devices => handle_devices_key(state, key),
         Screen::Dashboard => handle_nav_keys(state, key),
     }
 }
@@ -710,6 +737,50 @@ fn handle_tokens_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
             }
             _ => Vec::new(),
         },
+    }
+}
+
+/// Key handler for the Devices screen.
+///
+/// - `j`/`Down`: move cursor down.
+/// - `k`/`Up`: move cursor up.
+/// - `d`/`x`: remove the selected device.
+/// - `r`: reload the device list.
+fn handle_devices_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => {
+            if !state.devices.devices.is_empty() {
+                state.devices.cursor = (state.devices.cursor + 1) % state.devices.devices.len();
+            }
+            Vec::new()
+        }
+        KeyCode::Up | KeyCode::Char('k') => {
+            if !state.devices.devices.is_empty() {
+                let len = state.devices.devices.len();
+                state.devices.cursor = (state.devices.cursor + len - 1) % len;
+            }
+            Vec::new()
+        }
+        KeyCode::Char('d') | KeyCode::Char('x') => {
+            if !state.devices.loading
+                && let Some(name) = state.devices.selected_name().map(str::to_string)
+            {
+                state.devices.loading = true;
+                state.devices.status = format!("Removing '{name}'…");
+                return vec![UpdateAction::RemoveDevice(name)];
+            }
+            Vec::new()
+        }
+        KeyCode::Char('r') => {
+            if !state.devices.loading {
+                state.devices.loading = true;
+                state.devices.status = "Refreshing…".to_string();
+                vec![UpdateAction::LoadDevices]
+            } else {
+                Vec::new()
+            }
+        }
+        _ => Vec::new(),
     }
 }
 
@@ -1192,6 +1263,8 @@ mod tests {
             pid: 1234,
             uptime_secs: 42,
             client_count,
+            notify_relay_url: None,
+            push_device_count: 0,
         }
     }
 
@@ -1377,6 +1450,145 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, UpdateAction::LoadTokens))
         );
+    }
+
+    // ── Devices screen tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn devices_screen_is_reachable_via_screen_all() {
+        assert!(Screen::ALL.contains(&Screen::Devices));
+    }
+
+    #[test]
+    fn enter_devices_screen_dispatches_load() {
+        let mut state = AppState::new();
+        let actions = update(&mut state, Message::NavTo(Screen::Devices));
+        assert_eq!(state.screen, Screen::Devices);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::LoadDevices))
+        );
+    }
+
+    #[test]
+    fn tab_cycles_through_devices_screen() {
+        let mut state = AppState::new();
+        state.screen = Screen::Tokens;
+        update(&mut state, Message::Key(key(KeyCode::Tab)));
+        assert_eq!(state.screen, Screen::Devices);
+    }
+
+    #[test]
+    fn devices_loaded_updates_list_and_relay_url() {
+        use crate::server::devices::DeviceRecord;
+        let mut state = AppState::new();
+        let records = vec![DeviceRecord {
+            device_name: "phone-a".to_string(),
+            platform: "android".to_string(),
+            registered_at: 1_700_000_000,
+            handle_prefix: "deadbeef".to_string(),
+        }];
+        update(
+            &mut state,
+            Message::DevicesLoaded {
+                devices: records,
+                relay_url: Some("https://noti.muxr.app".to_string()),
+            },
+        );
+        assert_eq!(state.devices.devices.len(), 1);
+        assert_eq!(state.devices.devices[0].device_name, "phone-a");
+        assert_eq!(
+            state.devices.relay_url,
+            Some("https://noti.muxr.app".to_string())
+        );
+        assert!(!state.devices.loading);
+    }
+
+    #[test]
+    fn devices_loaded_empty_list_renders_cleanly() {
+        // Acceptance criterion: the Devices screen must handle an empty
+        // registry without panicking (cursor clamped to 0, no devices).
+        let mut state = AppState::new();
+        update(
+            &mut state,
+            Message::DevicesLoaded {
+                devices: vec![],
+                relay_url: None,
+            },
+        );
+        assert!(state.devices.devices.is_empty());
+        assert_eq!(state.devices.cursor, 0);
+        assert_eq!(state.devices.relay_url, None);
+    }
+
+    #[test]
+    fn devices_remove_key_dispatches_remove_action() {
+        use crate::server::devices::DeviceRecord;
+        let mut state = AppState::new();
+        state.screen = Screen::Devices;
+        state.devices.devices = vec![DeviceRecord {
+            device_name: "phone-a".to_string(),
+            platform: "android".to_string(),
+            registered_at: 1_700_000_000,
+            handle_prefix: "deadbeef".to_string(),
+        }];
+        let actions = update(&mut state, Message::Key(key(KeyCode::Char('x'))));
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::RemoveDevice(name) if name == "phone-a"))
+        );
+        assert!(state.devices.loading);
+    }
+
+    #[test]
+    fn devices_changed_triggers_reload() {
+        let mut state = AppState::new();
+        state.devices.loading = true;
+        let actions = update(&mut state, Message::DevicesChanged);
+        assert!(!state.devices.loading);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::LoadDevices))
+        );
+    }
+
+    #[test]
+    fn devices_j_k_move_cursor() {
+        use crate::server::devices::DeviceRecord;
+        let mut state = AppState::new();
+        state.screen = Screen::Devices;
+        state.devices.devices = vec![
+            DeviceRecord {
+                device_name: "phone-a".to_string(),
+                platform: "android".to_string(),
+                registered_at: 1_700_000_000,
+                handle_prefix: "deadbeef".to_string(),
+            },
+            DeviceRecord {
+                device_name: "phone-b".to_string(),
+                platform: "ios".to_string(),
+                registered_at: 1_700_000_100,
+                handle_prefix: "cafef00d".to_string(),
+            },
+        ];
+        assert_eq!(state.devices.cursor, 0);
+        update(&mut state, Message::Key(key(KeyCode::Char('j'))));
+        assert_eq!(state.devices.cursor, 1);
+        update(&mut state, Message::Key(key(KeyCode::Char('k'))));
+        assert_eq!(state.devices.cursor, 0);
+    }
+
+    #[test]
+    fn devices_action_failed_sets_status_and_clears_loading() {
+        let mut state = AppState::new();
+        state.screen = Screen::Devices;
+        state.devices.loading = true;
+        update(&mut state, Message::ActionFailed("boom".to_string()));
+        assert!(state.devices.status.contains("boom"));
+        assert!(!state.devices.loading);
     }
 
     // ── Token QR overlay tests ────────────────────────────────────────────────
