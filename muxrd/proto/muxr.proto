@@ -134,8 +134,14 @@ message VersionInfo {
   repeated Backend        available_backends = 4;
   // Additive server capability flags. Known values:
   //   "mouse-input" — ClientFrame.mouse is understood on AttachTerminal.
+  //   "push-notifications" — the server has a notify relay configured
+  //     (see notification_relay_url); present only when a relay is set.
   // Clients must ignore unknown values.
   repeated string capabilities = 5;
+  // The push-notification relay URL clients should register devices with.
+  // Empty (proto3 default) means the server has no relay configured — the
+  // client must treat push notifications as unsupported.
+  string notification_relay_url = 6;
 }
 
 message LoginRequest {

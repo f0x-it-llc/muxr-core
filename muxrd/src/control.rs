@@ -91,6 +91,20 @@ pub struct StatusInfo {
     /// assumption for backward compatibility.
     #[serde(default = "default_cert_mode")]
     pub cert_mode: CertMode,
+    /// The configured push-notification relay URL, or `None` when push
+    /// notifications are disabled (`config::EffectiveConfig::notify_relay_url`).
+    ///
+    /// `#[serde(default)]` so a message from an older server (pre-dating this
+    /// field) still deserialises fine.
+    #[serde(default)]
+    pub notify_relay_url: Option<String>,
+    /// Number of devices currently registered for push notifications.
+    ///
+    /// Always `0` today — the device store lands in a follow-up task; this
+    /// field exists now so muxrctl can display it without another wire
+    /// change. `#[serde(default)]` for the same back-compat reason as above.
+    #[serde(default)]
+    pub push_device_count: usize,
 }
 
 /// Path to the control socket: `data_dir()/control.sock`.
@@ -187,6 +201,10 @@ type ShutdownTrigger = Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
 /// `clients` is a cloneable handle to the per-session attached-client registry
 /// used to report the total client count in `Status` responses.
 /// `cert_mode` is the active TLS / transport mode reported in `Status` responses.
+/// `notify_relay_url` is the resolved push-notification relay URL (or `None`
+/// when disabled), reported verbatim in `Status` responses. `push_device_count`
+/// is hard-coded to `0` here — the device store (and its real count) lands in
+/// a follow-up task.
 ///
 /// The socket is bound up-front (so a `status`/`stop` race right after start
 /// still finds it) and removed by the caller on exit (see [`cleanup`]).
@@ -196,6 +214,7 @@ pub fn spawn_listener(
     shutdown_tx: tokio::sync::oneshot::Sender<()>,
     clients: crate::client_count::SessionClients,
     cert_mode: CertMode,
+    notify_relay_url: Option<String>,
 ) -> Result<()> {
     let path = socket_path()?;
 
@@ -238,6 +257,9 @@ pub fn spawn_listener(
                         uptime_secs: started_at.elapsed().as_secs(),
                         client_count: clients.total_count(),
                         cert_mode,
+                        notify_relay_url: notify_relay_url.clone(),
+                        // No device store yet (follow-up task); always report 0.
+                        push_device_count: 0,
                     }),
                     ControlRequest::Shutdown => {
                         log::info!("control: shutdown requested");
@@ -323,5 +345,61 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let result = query_at(&path, &ControlRequest::Status, QUERY_TIMEOUT);
         assert!(result.is_err());
+    }
+
+    // ── StatusInfo back-compat ────────────────────────────────────────────────
+
+    /// A `Status` JSON payload from a server that pre-dates `notify_relay_url` /
+    /// `push_device_count` (and even `cert_mode`, the previous addition) must
+    /// still deserialize — every field added after the original four is
+    /// `#[serde(default)]`. This is what lets an older muxrctl binary keep
+    /// talking to a newer muxrd, and a newer muxrctl keep talking to an older
+    /// muxrd, without a hard version lockstep.
+    #[test]
+    fn status_info_deserializes_from_pre_notify_payload() {
+        let legacy_json = serde_json::json!({
+            "version": "0.2.4",
+            "bind_addr": "127.0.0.1:50051",
+            "pid": 1234,
+            "uptime_secs": 42,
+        });
+        let info: StatusInfo = serde_json::from_value(legacy_json)
+            .expect("legacy StatusInfo payload must deserialize");
+
+        assert_eq!(info.version, "0.2.4");
+        assert_eq!(info.client_count, 0, "missing client_count defaults to 0");
+        assert_eq!(
+            info.cert_mode,
+            CertMode::SelfSigned,
+            "missing cert_mode defaults to SelfSigned"
+        );
+        assert_eq!(
+            info.notify_relay_url, None,
+            "missing notify_relay_url defaults to None"
+        );
+        assert_eq!(
+            info.push_device_count, 0,
+            "missing push_device_count defaults to 0"
+        );
+    }
+
+    /// A full modern payload (including the new fields) round-trips.
+    #[test]
+    fn status_info_round_trips_with_notify_fields() {
+        let info = StatusInfo {
+            version: "0.2.5".to_owned(),
+            bind_addr: "127.0.0.1:50051".to_owned(),
+            pid: 1234,
+            uptime_secs: 10,
+            client_count: 2,
+            cert_mode: CertMode::SelfSigned,
+            notify_relay_url: Some("https://noti.muxr.app".to_owned()),
+            push_device_count: 3,
+        };
+        let json = serde_json::to_string(&info).expect("serialize");
+        let round_tripped: StatusInfo = serde_json::from_str(&json).expect("deserialize");
+
+        assert_eq!(round_tripped.notify_relay_url, info.notify_relay_url);
+        assert_eq!(round_tripped.push_device_count, info.push_device_count);
     }
 }

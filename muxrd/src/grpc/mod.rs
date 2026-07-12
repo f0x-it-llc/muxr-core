@@ -75,6 +75,16 @@ pub struct MuxrService {
     /// the sole backend when `BACKEND_UNSPECIFIED`). No `backend()` shim exists.
     /// Cheap to clone (`Arc`s).
     backends: crate::multiplexer::BackendSet,
+    /// The push-notification relay URL to advertise on `GetVersion`
+    /// (`VersionInfo.notification_relay_url` + the `"push-notifications"`
+    /// capability). `None` when the operator has no relay configured
+    /// (`config::EffectiveConfig::notify_relay_url`) — advertised to clients
+    /// as an empty field and the absence of that capability. Set via
+    /// [`MuxrService::with_notify_relay_url`]; a small seam rather than a new
+    /// constructor parameter so the existing `with_backends`/`new` call sites
+    /// (including every test in `session_ops.rs`/`space_ops.rs`) stay
+    /// unchanged.
+    notify_relay_url: Option<String>,
 }
 
 impl Default for MuxrService {
@@ -106,6 +116,7 @@ impl MuxrService {
                 crate::cli::BackendKind::Zellij,
                 std::sync::Arc::new(crate::multiplexer::ZellijBackend),
             ),
+            notify_relay_url: None,
         }
     }
 
@@ -131,7 +142,18 @@ impl MuxrService {
             control: crate::relay::ControlRegistry::default(),
             view_state: crate::relay::ViewStateRegistry::default(),
             backends,
+            notify_relay_url: None,
         }
+    }
+
+    /// Set the push-notification relay URL this service advertises on
+    /// `GetVersion` (see the `notify_relay_url` field doc). Builder-style so
+    /// callers chain it onto [`MuxrService::new`]/[`MuxrService::with_backends`]
+    /// without touching either constructor's signature.
+    #[must_use]
+    pub fn with_notify_relay_url(mut self, notify_relay_url: Option<String>) -> Self {
+        self.notify_relay_url = notify_relay_url;
+        self
     }
 
     /// Resolve an opaque session `id` (`"<backend>:<bare>"`) to the backend that

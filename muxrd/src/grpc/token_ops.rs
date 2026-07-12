@@ -54,23 +54,32 @@ impl MuxrService {
             });
         }
 
+        let mut capabilities = vec!["mouse-input".to_owned()];
+        // Additive capability flag — only advertised when a relay is actually
+        // configured (`config::EffectiveConfig::notify_relay_url`), so clients
+        // that ignore unknown capabilities never see "push-notifications"
+        // without a corresponding non-empty `notification_relay_url`.
+        if self.notify_relay_url.is_some() {
+            capabilities.push("push-notifications".to_owned());
+        }
+
         let info = VersionInfo {
             server_version: SERVER_VERSION.to_owned(),
             zellij_version,
             backends: backend_versions,
             available_backends,
-            // Additive capability flags (clients ignore unknown values).
-            // "mouse-input": ClientFrame.mouse is understood on AttachTerminal
-            // for every served backend (zellij Action::MouseEvent forwarding,
-            // herdr wire InputEvents).
-            capabilities: vec!["mouse-input".to_owned()],
+            capabilities,
+            // Empty (proto3 default) when unset — clients treat that as
+            // "server does not support push".
+            notification_relay_url: self.notify_relay_url.clone().unwrap_or_default(),
         };
         log::debug!(
-            "GetVersion → server={} zellij={:?} backends={} available={:?}",
+            "GetVersion → server={} zellij={:?} backends={} available={:?} notify={}",
             info.server_version,
             info.zellij_version,
             info.backends.len(),
             info.available_backends,
+            !info.notification_relay_url.is_empty(),
         );
         Ok(Response::new(info))
     }
@@ -251,5 +260,55 @@ impl MuxrService {
             },
             info: String::new(),
         }))
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// No relay configured (the default) → neither the `"push-notifications"`
+    /// capability nor a non-empty `notification_relay_url` is advertised.
+    #[tokio::test]
+    async fn get_version_without_relay_has_no_push_capability() {
+        let service = MuxrService::new();
+
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+
+        assert!(
+            !info.capabilities.iter().any(|c| c == "push-notifications"),
+            "capabilities should not include push-notifications: {:?}",
+            info.capabilities
+        );
+        assert_eq!(
+            info.notification_relay_url, "",
+            "notification_relay_url should be empty (proto3 default) when unset"
+        );
+    }
+
+    /// A configured relay URL → both the capability and the field are populated.
+    #[tokio::test]
+    async fn get_version_with_relay_advertises_push_capability_and_url() {
+        let service =
+            MuxrService::new().with_notify_relay_url(Some("https://noti.muxr.app".to_owned()));
+
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+
+        assert!(
+            info.capabilities.iter().any(|c| c == "push-notifications"),
+            "capabilities should include push-notifications: {:?}",
+            info.capabilities
+        );
+        assert_eq!(info.notification_relay_url, "https://noti.muxr.app");
     }
 }

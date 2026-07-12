@@ -617,6 +617,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         cert_source,
         backends,
         herdr_backend,
+        cfg.notify_relay_url.clone(),
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -676,6 +677,12 @@ fn cert_identity(
 /// entered. `herdr_backend` is the concrete `Arc<HerdrBackend>` when herdr is in
 /// the set (else `None`); it is used only to start the herdr event kernel (task
 /// 01) so it shares the backend's id registries.
+///
+/// `notify_relay_url` is the resolved push-notification relay URL (or `None`
+/// when disabled); it is advertised via `GetVersion`
+/// (`MuxrService::with_notify_relay_url`) and reported over the control
+/// socket (`StatusInfo::notify_relay_url`).
+#[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
 async fn serve(
     addr: std::net::SocketAddr,
     bind_addr: String,
@@ -684,6 +691,7 @@ async fn serve(
     cert_source: CertSource,
     backends: BackendSet,
     herdr_backend: Option<Arc<HerdrBackend>>,
+    notify_relay_url: Option<String>,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -721,7 +729,8 @@ async fn serve(
         }
     };
 
-    let service = MuxrService::with_backends(backends);
+    let service =
+        MuxrService::with_backends(backends).with_notify_relay_url(notify_relay_url.clone());
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -730,13 +739,15 @@ async fn serve(
     // `watch` so long-lived background tasks (the herdr event kernel) observe the
     // same shutdown and exit cleanly.
     let (kernel_shutdown_tx, kernel_shutdown_rx) = tokio::sync::watch::channel(false);
-    // Pass the cert_mode so `status` can report the active transport mode.
+    // Pass the cert_mode + notify_relay_url so `status` can report the active
+    // transport mode and push-notification configuration.
     control::spawn_listener(
         bind_addr.clone(),
         Instant::now(),
         shutdown_tx,
         service.clients(),
         cert_mode,
+        notify_relay_url,
     )
     .context("failed to start control socket")?;
 
@@ -811,6 +822,10 @@ fn cmd_status(_bind_override: Option<&str>) -> Result<()> {
             println!("  pid       : {}", info.pid);
             println!("  uptime    : {}s", info.uptime_secs);
             println!("  clients   : {}", info.client_count);
+            match &info.notify_relay_url {
+                Some(url) => println!("  notify    : {url} ({} device(s))", info.push_device_count),
+                None => println!("  notify    : disabled"),
+            }
             Ok(())
         }
         Ok(other) => {
