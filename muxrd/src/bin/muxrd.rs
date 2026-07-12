@@ -463,8 +463,12 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
     }
 
     // ── Construct each detected backend into the ordered BackendSet ──────────
+    // A concrete `Arc<HerdrBackend>` is retained (when present) so `serve()` can
+    // start the herdr event kernel (task 01) sharing the backend's id registries;
+    // the same `Arc` is also stored in the set as `Arc<dyn MuxBackend>`.
     let mut backend_entries: Vec<(BackendKind, Arc<dyn MuxBackend>)> =
         Vec::with_capacity(resolved_kinds.len());
+    let mut herdr_backend: Option<Arc<HerdrBackend>> = None;
     for kind in &resolved_kinds {
         match kind {
             BackendKind::Zellij => {
@@ -472,9 +476,10 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
                 backend_entries.push((BackendKind::Zellij, Arc::new(ZellijBackend)));
             }
             BackendKind::Herdr => {
-                let b = HerdrBackend::from_env();
+                let b = Arc::new(HerdrBackend::from_env());
                 log::info!("backend: herdr ({})", b.backend_version());
-                backend_entries.push((BackendKind::Herdr, Arc::new(b)));
+                herdr_backend = Some(Arc::clone(&b));
+                backend_entries.push((BackendKind::Herdr, b as Arc<dyn MuxBackend>));
             }
         }
     }
@@ -611,6 +616,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         extra_sans,
         cert_source,
         backends,
+        herdr_backend,
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -667,7 +673,9 @@ fn cert_identity(
 ///
 /// `backends` is the resolved [`BackendSet`] (every detected backend: zellij
 /// and/or herdr), constructed and logged by [`cmd_start`] before the runtime is
-/// entered.
+/// entered. `herdr_backend` is the concrete `Arc<HerdrBackend>` when herdr is in
+/// the set (else `None`); it is used only to start the herdr event kernel (task
+/// 01) so it shares the backend's id registries.
 async fn serve(
     addr: std::net::SocketAddr,
     bind_addr: String,
@@ -675,6 +683,7 @@ async fn serve(
     extra_sans: Vec<SanEntry>,
     cert_source: CertSource,
     backends: BackendSet,
+    herdr_backend: Option<Arc<HerdrBackend>>,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -716,6 +725,11 @@ async fn serve(
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    // A clone-able shutdown signal (task 01): the control-socket oneshot drives
+    // `serve_with_shutdown` exactly as before; when it fires we also flip this
+    // `watch` so long-lived background tasks (the herdr event kernel) observe the
+    // same shutdown and exit cleanly.
+    let (kernel_shutdown_tx, kernel_shutdown_rx) = tokio::sync::watch::channel(false);
     // Pass the cert_mode so `status` can report the active transport mode.
     control::spawn_listener(
         bind_addr.clone(),
@@ -725,6 +739,27 @@ async fn serve(
         cert_mode,
     )
     .context("failed to start control socket")?;
+
+    // ── herdr event kernel (task 01) ─────────────────────────────────────────
+    // When a herdr backend is present, spawn the persistent `events.subscribe`
+    // consumer, publishing agent-status transitions onto a process-local
+    // broadcast bus. The bus handle is kept in scope so the notifications
+    // notifier (task 05) can consume it later; today it has no consumer and the
+    // kernel's sends are simply dropped. A zellij-only server spawns nothing and
+    // creates no bus (zero behaviour change).
+    let _event_bus: Option<muxrd::multiplexer::events::EventBus> = match herdr_backend {
+        Some(backend) => {
+            let (bus, _rx0) =
+                tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY);
+            muxrd::multiplexer::spawn_event_kernel(
+                backend.as_ref(),
+                bus.clone(),
+                kernel_shutdown_rx,
+            );
+            Some(bus)
+        }
+        None => None,
+    };
 
     let transport_desc = match cert_mode {
         muxrd::config::CertMode::SelfSigned => "TLS (self-signed)",
@@ -752,6 +787,10 @@ async fn serve(
         .serve_with_shutdown(addr, async move {
             let _ = shutdown_rx.await;
             log::info!("muxrd: graceful shutdown initiated");
+            // Fan the shutdown out to background tasks (herdr event kernel). This
+            // keeps `serve_with_shutdown`'s own behaviour identical — it still
+            // resolves the instant the control-socket oneshot fires.
+            let _ = kernel_shutdown_tx.send(true);
         })
         .await
         .context("gRPC server error")?;

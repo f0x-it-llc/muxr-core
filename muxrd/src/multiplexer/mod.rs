@@ -33,6 +33,7 @@
 //! [`MuxBackend::open_attach`].
 
 pub mod detect;
+pub mod events;
 pub(crate) mod herdr;
 pub(crate) mod routing;
 pub mod types;
@@ -60,6 +61,11 @@ pub(crate) use herdr::backend::HERDR_SESSION;
 /// integration test harness.  The herdr sub-module remains `pub(crate)` to keep
 /// its wire/API internals crate-private; only the public entry point is lifted.
 pub use herdr::backend::HerdrBackend;
+/// The herdr event-kernel spawn entry point (task 01). Re-exported publicly so
+/// `bin/muxrd.rs::serve()` can start the persistent `events.subscribe` consumer
+/// without reaching into the crate-private `herdr` sub-module. Only spawned when
+/// a herdr backend is present.
+pub use herdr::subscribe::spawn_event_kernel;
 /// The single zellij-JSON → [`LayoutSnapshot`] parse, shared by the ephemeral
 /// [`MuxBackend::query_layout`] impl and the relay-routed `GetLayout` path
 /// (`grpc/layout.rs`). `pub(crate)` so the gRPC layer can reuse it on the JSON
