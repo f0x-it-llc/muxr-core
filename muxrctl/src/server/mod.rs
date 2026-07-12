@@ -2,8 +2,11 @@
 //!
 //! Wraps `muxrd::{config, control, tls}` into a small, ergonomic API
 //! that the TUI screens consume.  The running server binary is launched via
-//! [`start_daemon`] (spawn, not library call), while all pure read/write ops
-//! (config, cert, status) go through the library directly.
+//! [`start_daemon`] (spawn, not library call) and stopped via [`stop`] (which
+//! also spawns the `muxrd` binary — `muxrd stop` — rather than issuing the
+//! control query directly, so it inherits muxrd's pidfile + SIGTERM
+//! fallback), while all pure read/write ops (config, cert, status) go through
+//! the library directly.
 
 pub mod ctl_state;
 pub mod tokens;

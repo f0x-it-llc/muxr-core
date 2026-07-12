@@ -535,7 +535,9 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         ),
         StartDecision::RefuseLiveDaemon(pid) => anyhow::bail!(
             "a muxrd appears to already be running (pid {pid}; control socket \
-             unresponsive). Run `muxrd stop` or `kill {pid}` first."
+             unresponsive). Run `muxrd stop` or `kill {pid}` first; if pid {pid} \
+             is not actually muxrd (verify with `ps -p {pid}`), remove {} and retry.",
+            pidfile.display()
         ),
         StartDecision::Stale => {}
     }
@@ -838,7 +840,11 @@ fn cmd_stop() -> Result<()> {
                     }
                 }
             } else {
-                println!("muxrd: not running (no control socket, no pidfile).");
+                println!(
+                    "muxrd: not running (no control socket, no pidfile). If a bind \
+                     address still appears held, an orphaned daemon may still hold \
+                     the port — check with `ss -ltnp | grep <port>` (or fuser)."
+                );
             }
         }
     }
@@ -954,7 +960,12 @@ fn probe_bind_available(addr: std::net::SocketAddr) -> Result<()> {
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            anyhow::bail!("bind address {addr} is already in use — is another muxrd running?")
+            anyhow::bail!(
+                "bind address {addr} is already in use — is another muxrd running? \
+                 If no pidfile/control socket exists, find the holder with \
+                 `ss -ltnp | grep {}` (or fuser) and kill it.",
+                addr.port()
+            )
         }
         Err(e) => Err(e).with_context(|| format!("probe bind {addr}")),
     }
