@@ -10,3 +10,4 @@
 //! committed") — muxrd/muxrctl/proto stay licensing-agnostic.
 
 pub mod devices;
+pub mod sender;

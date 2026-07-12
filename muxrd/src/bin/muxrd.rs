@@ -618,6 +618,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         backends,
         herdr_backend,
         cfg.notify_relay_url.clone(),
+        cfg.notify_verbosity.clone(),
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -681,7 +682,8 @@ fn cert_identity(
 /// `notify_relay_url` is the resolved push-notification relay URL (or `None`
 /// when disabled); it is advertised via `GetVersion`
 /// (`MuxrService::with_notify_relay_url`) and reported over the control
-/// socket (`StatusInfo::notify_relay_url`).
+/// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
+/// `"generic"`) drives the outbound notifier's payload text (task 05).
 #[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
 async fn serve(
     addr: std::net::SocketAddr,
@@ -692,6 +694,7 @@ async fn serve(
     backends: BackendSet,
     herdr_backend: Option<Arc<HerdrBackend>>,
     notify_relay_url: Option<String>,
+    notify_verbosity: String,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -739,6 +742,20 @@ async fn serve(
         .with_notify_relay_url(notify_relay_url.clone())
         .with_push_device_store(push_devices.clone());
 
+    // Retained inputs for the task-05 outbound notifier, spawned in the herdr
+    // branch below AFTER `spawn_listener` consumes the originals. Built only when
+    // herdr is present (the event bus — and hence the notifier — exists only
+    // then), so a zellij-only server allocates nothing here. Capturing
+    // `notify_verbosity` in the closure also keeps the param "used" on the
+    // zellij-only path (no dead-code warning).
+    let notifier_seed = herdr_backend.as_ref().map(|_| {
+        (
+            notify_relay_url.clone(),
+            push_devices.clone(),
+            notify_verbosity.clone(),
+        )
+    });
+
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     // A clone-able shutdown signal (task 01): the control-socket oneshot drives
@@ -776,6 +793,34 @@ async fn serve(
                 bus.clone(),
                 kernel_shutdown_rx,
             );
+
+            // ── Outbound push notifier (task 05) ────────────────────────────
+            // Consume the same bus, but only when a relay URL is configured.
+            // A fresh shutdown receiver off the same watch channel winds the
+            // notifier down alongside the kernel. A build failure (reqwest
+            // client) is logged and non-fatal — the daemon still serves.
+            if let Some((relay_url, store, verbosity)) = notifier_seed {
+                match relay_url.as_deref() {
+                    Some(url) => {
+                        if let Err(e) = muxrd::notify::sender::spawn_notifier(
+                            &bus,
+                            kernel_shutdown_tx.subscribe(),
+                            store,
+                            url,
+                            verbosity,
+                        ) {
+                            log::warn!("notify: failed to start outbound notifier: {e:#}");
+                        }
+                    }
+                    None => {
+                        log::info!(
+                            "notify: relay disabled — outbound notifier not started \
+                             (herdr events still published to the bus)"
+                        );
+                    }
+                }
+            }
+
             Some(bus)
         }
         None => None,
