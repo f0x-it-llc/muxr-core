@@ -9,6 +9,7 @@
 //! - `relay`   — B2 blocking-IPC ↔ async-gRPC bridge
 //! - `query`   — C1 short-lived cli-client query helper (ListTabs/ListPanes JSON)
 //! - `multiplexer` — P1 backend-agnostic `MuxBackend` trait + neutral types + `ZellijBackend`
+//! - `notify`  — push-notification device registry (`push_devices.json` sidecar)
 //! - `cli`     — E1 clap CLI definitions (subcommand structs)
 //! - `config`  — E1 config file + precedence resolution
 //! - `control` — E2 control socket (status/stop IPC contract)
@@ -23,6 +24,7 @@ pub mod control;
 pub mod grpc;
 pub mod ipc;
 pub mod multiplexer;
+pub mod notify;
 pub mod query;
 pub mod ratelimit;
 pub mod relay;

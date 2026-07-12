@@ -729,8 +729,15 @@ async fn serve(
         }
     };
 
-    let service =
-        MuxrService::with_backends(backends).with_notify_relay_url(notify_relay_url.clone());
+    // Push-device registry: standard data-dir location (construction is
+    // infallible/side-effect-free — see `PushDeviceStore::new`). Cloned into
+    // both the gRPC service (RegisterPushTarget/ListPushTargets/RemovePushTarget)
+    // and the control-socket listener (StatusInfo.push_device_count).
+    let push_devices = muxrd::notify::devices::PushDeviceStore::new();
+
+    let service = MuxrService::with_backends(backends)
+        .with_notify_relay_url(notify_relay_url.clone())
+        .with_push_device_store(push_devices.clone());
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
@@ -740,7 +747,8 @@ async fn serve(
     // same shutdown and exit cleanly.
     let (kernel_shutdown_tx, kernel_shutdown_rx) = tokio::sync::watch::channel(false);
     // Pass the cert_mode + notify_relay_url so `status` can report the active
-    // transport mode and push-notification configuration.
+    // transport mode and push-notification configuration; push_devices lets the
+    // listener report a live (not snapshotted) device count.
     control::spawn_listener(
         bind_addr.clone(),
         Instant::now(),
@@ -748,6 +756,7 @@ async fn serve(
         service.clients(),
         cert_mode,
         notify_relay_url,
+        push_devices,
     )
     .context("failed to start control socket")?;
 

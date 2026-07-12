@@ -100,9 +100,10 @@ pub struct StatusInfo {
     pub notify_relay_url: Option<String>,
     /// Number of devices currently registered for push notifications.
     ///
-    /// Always `0` today — the device store lands in a follow-up task; this
-    /// field exists now so muxrctl can display it without another wire
-    /// change. `#[serde(default)]` for the same back-compat reason as above.
+    /// A fresh read of `notify::devices::PushDeviceStore` taken at query
+    /// time (not cached) — see [`spawn_listener`]. `#[serde(default)]` so a
+    /// message from an older server (pre-dating this field) still
+    /// deserialises fine.
     #[serde(default)]
     pub push_device_count: usize,
 }
@@ -202,9 +203,12 @@ type ShutdownTrigger = Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
 /// used to report the total client count in `Status` responses.
 /// `cert_mode` is the active TLS / transport mode reported in `Status` responses.
 /// `notify_relay_url` is the resolved push-notification relay URL (or `None`
-/// when disabled), reported verbatim in `Status` responses. `push_device_count`
-/// is hard-coded to `0` here — the device store (and its real count) lands in
-/// a follow-up task.
+/// when disabled), reported verbatim in `Status` responses. `push_devices` is
+/// a cheap-to-clone handle to the push-device registry; `push_device_count` is
+/// computed by a **fresh read** of it on every `Status` request (no snapshot
+/// taken at listener-spawn time), so it stays accurate as devices are
+/// registered/removed while the server runs. A read failure (e.g. a corrupt
+/// sidecar) degrades to `0` rather than failing the whole `Status` response.
 ///
 /// The socket is bound up-front (so a `status`/`stop` race right after start
 /// still finds it) and removed by the caller on exit (see [`cleanup`]).
@@ -215,6 +219,7 @@ pub fn spawn_listener(
     clients: crate::client_count::SessionClients,
     cert_mode: CertMode,
     notify_relay_url: Option<String>,
+    push_devices: crate::notify::devices::PushDeviceStore,
 ) -> Result<()> {
     let path = socket_path()?;
 
@@ -258,8 +263,10 @@ pub fn spawn_listener(
                         client_count: clients.total_count(),
                         cert_mode,
                         notify_relay_url: notify_relay_url.clone(),
-                        // No device store yet (follow-up task); always report 0.
-                        push_device_count: 0,
+                        push_device_count: push_devices.count().unwrap_or_else(|e| {
+                            log::warn!("control: failed to read push device count: {e:#}");
+                            0
+                        }),
                     }),
                     ControlRequest::Shutdown => {
                         log::info!("control: shutdown requested");
