@@ -281,14 +281,15 @@ mod tests {
     fn query_at_times_out_on_a_silent_peer() {
         use interprocess::local_socket::traits::ListenerExt;
 
-        let nanos = SystemTime::now()
+        // Keep the socket path SHORT: `sun_path` caps at ~104 bytes on macOS and
+        // the CI runner's temp dir is deep (`/var/folders/…`). A compact
+        // pid+seconds name stays under the cap (mirrors relay.rs's
+        // `unique_socket_path`).
+        let secs = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
-            .as_nanos();
-        let dir =
-            std::env::temp_dir().join(format!("muxrd-control-test-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).expect("create test tmp dir");
-        let sock_path = dir.join("control.sock");
+            .as_secs();
+        let sock_path = std::env::temp_dir().join(format!("mxc{}_{secs}.sock", std::process::id()));
 
         let listener =
             zellij_utils::consts::ipc_bind(&sock_path).expect("bind fake control socket");
@@ -312,7 +313,7 @@ mod tests {
             "query_at took {elapsed:?}, expected to bail near the {timeout:?} bound"
         );
 
-        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_file(&sock_path);
     }
 
     /// A path with no socket present must fail fast (no timeout involved).
