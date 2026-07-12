@@ -1,0 +1,60 @@
+[package]
+name = "muxr-notify"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+# ─── Targets ─────────────────────────────────────────────────────────────────
+# Split lib + bin so `tests/` (which compiles against the library target) and
+# in-crate unit tests can reach the router/handlers/store directly.
+
+[lib]
+name = "muxr_notify"
+path = "src/lib.rs"
+
+[[bin]]
+name = "muxr-notify"
+path = "src/main.rs"
+
+# ─── Runtime deps ────────────────────────────────────────────────────────────
+
+[dependencies]
+# HTTP server. axum 0.8 is already unified in the workspace lock (tonic pulls it);
+# `tokio` is the same multi-thread runtime idiom muxrd uses.
+axum = "0.8"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync"] }
+
+# JSON request/response bodies + service-account JSON parsing.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Persistence. Pin rusqlite 0.30 + `bundled` to match zellij-utils' pin so the
+# workspace links a single libsqlite3-sys (no duplicate SQLite build).
+rusqlite = { version = "0.30", features = ["bundled"] }
+
+# OS CSPRNG for minting unguessable capability push-handles (same crate/version
+# muxrd already uses for connection ids).
+rand = "0.8"
+
+# Outbound FCM HTTP v1 call. rustls-tls, no default (native) TLS — consistent
+# with the rest of muxr-core's rustls/ring stack.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Google service-account OAuth2 bearer tokens (scope firebase.messaging), cached
+# to expiry by the provider. We hand-roll the FCM POST; gcp_auth only mints tokens.
+gcp_auth = "0.12"
+
+# Utility — matches muxrd's logging idiom (log facade + env_logger, no tracing).
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+
+# ─── Dev deps ────────────────────────────────────────────────────────────────
+
+[dev-dependencies]
+# `tower::ServiceExt::oneshot` drives the router directly (no live port).
+tower = { version = "0.5", features = ["util"] }
+# Per-test throwaway SQLite files.
+tempfile = "3"

@@ -1,5 +1,5 @@
 [workspace]
-members = ["muxrd", "muxrctl"]
+members = ["muxrd", "muxrctl", "muxr-notify"]
 resolver = "2"
 
 # Shared package metadata inherited by both crates via `*.workspace = true`.
