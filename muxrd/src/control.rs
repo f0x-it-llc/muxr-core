@@ -23,9 +23,9 @@
 //! `status`/`stop` use [`query`] to send a single request and read the reply.
 
 use std::io::{Read, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -127,17 +127,48 @@ fn read_msg<R: Read, T: for<'de> Deserialize<'de>>(r: &mut R) -> Result<T> {
 
 // ── Client side (status / stop) ───────────────────────────────────────────────
 
+/// Upper bound on a single control-socket round trip (connect already
+/// completes near-instantly for Unix-domain sockets; this bounds the
+/// send/receive of the request/response pair).
+///
+/// Without this, a daemon whose control thread has accepted a connection but
+/// is wedged (deadlocked, stuck holding a lock before it reads/replies) would
+/// hang `query` — and therefore `start`'s liveness check, `status`, and
+/// `stop` — indefinitely. A timed-out query is treated exactly like a
+/// connect failure: "unresponsive" (every caller already maps any `Err` from
+/// `query` to that meaning, including `start_staleness_decision` in
+/// `bin/muxrd.rs`), so no caller-side change was needed to wire this in.
+const QUERY_TIMEOUT: Duration = Duration::from_secs(3);
+
 /// Send a single request to the running server and read its response.
 ///
-/// Returns an error if the socket is absent or the server is unresponsive —
-/// callers treat that as "not running".
+/// Returns an error if the socket is absent, the server is unresponsive, or
+/// the round trip exceeds [`QUERY_TIMEOUT`] — callers treat all three the
+/// same way: "not running" / "unresponsive".
 pub fn query(req: &ControlRequest) -> Result<ControlResponse> {
-    let path = socket_path()?;
+    query_at(&socket_path()?, req, QUERY_TIMEOUT)
+}
+
+/// Testable core of [`query`]: connect to `path`, bound the round trip to
+/// `timeout`, send `req`, and read the reply.
+///
+/// Split out from `query` so tests can point it at a throwaway socket path
+/// instead of the real (shared, non-overridable) data-dir control socket.
+fn query_at(path: &Path, req: &ControlRequest, timeout: Duration) -> Result<ControlResponse> {
     if !path.exists() {
         anyhow::bail!("control socket {} does not exist", path.display());
     }
-    let mut stream = zellij_utils::consts::ipc_connect(&path)
+    let mut stream = zellij_utils::consts::ipc_connect(path)
         .with_context(|| format!("control: connect to {}", path.display()))?;
+    // Bring the `Stream` trait's timeout setters into scope (the concrete type
+    // returned by `ipc_connect` implements it; see interprocess::local_socket).
+    use interprocess::local_socket::traits::Stream as _;
+    stream
+        .set_recv_timeout(Some(timeout))
+        .context("control: set recv timeout")?;
+    stream
+        .set_send_timeout(Some(timeout))
+        .context("control: set send timeout")?;
     write_msg(&mut stream, req)?;
     read_msg(&mut stream)
 }
@@ -235,5 +266,62 @@ pub fn spawn_listener(
 pub fn cleanup() {
     if let Ok(path) = socket_path() {
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Instant, SystemTime, UNIX_EPOCH};
+
+    /// A peer that accepts the connection and never reads/replies must not
+    /// hang `query_at` forever — the bounded recv timeout must fire and the
+    /// call must return `Err` well within a generous margin around the bound.
+    #[test]
+    fn query_at_times_out_on_a_silent_peer() {
+        use interprocess::local_socket::traits::ListenerExt;
+
+        // Keep the socket path SHORT: `sun_path` caps at ~104 bytes on macOS and
+        // the CI runner's temp dir is deep (`/var/folders/…`). A compact
+        // pid+seconds name stays under the cap (mirrors relay.rs's
+        // `unique_socket_path`).
+        let secs = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock")
+            .as_secs();
+        let sock_path = std::env::temp_dir().join(format!("mxc{}_{secs}.sock", std::process::id()));
+
+        let listener =
+            zellij_utils::consts::ipc_bind(&sock_path).expect("bind fake control socket");
+
+        // Accept exactly one connection and hold it open without ever
+        // reading or replying — simulating a wedged control thread.
+        std::thread::spawn(move || {
+            if let Some(Ok(_stream)) = listener.incoming().next() {
+                std::thread::sleep(Duration::from_secs(30));
+            }
+        });
+
+        let timeout = Duration::from_millis(200);
+        let start = Instant::now();
+        let result = query_at(&sock_path, &ControlRequest::Status, timeout);
+        let elapsed = start.elapsed();
+
+        assert!(result.is_err(), "query against a silent peer must fail");
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "query_at took {elapsed:?}, expected to bail near the {timeout:?} bound"
+        );
+
+        let _ = std::fs::remove_file(&sock_path);
+    }
+
+    /// A path with no socket present must fail fast (no timeout involved).
+    #[test]
+    fn query_at_missing_socket_errors_immediately() {
+        let path = std::env::temp_dir().join("muxrd-control-test-does-not-exist.sock");
+        let _ = std::fs::remove_file(&path);
+        let result = query_at(&path, &ControlRequest::Status, QUERY_TIMEOUT);
+        assert!(result.is_err());
     }
 }

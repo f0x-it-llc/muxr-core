@@ -514,15 +514,45 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
 
     let pidfile = pidfile_path()?;
 
+    // ── Guard against clobbering a LIVE daemon ──────────────────────────────
+    //
+    // Both foreground and daemon start run these checks BEFORE any destructive
+    // file cleanup (incident 2026-07-12): a transient control-socket query
+    // failure must NEVER be taken as proof of staleness and lead us to delete a
+    // live daemon's pidfile/socket.
+    //
+    // Upgrade scenario (binary replaced in place + the old daemon still
+    // running): the new `start` refuses here naming the old pid; `stop` still
+    // works (control socket, or SIGTERM via the pidfile we did NOT delete); a
+    // subsequent `start` then succeeds once the old daemon has exited.
+    let control_responsive = control::query(&ControlRequest::Status).is_ok();
+    let pidfile_pid = read_pidfile();
+    let pid_alive = pidfile_pid.is_some_and(pid_is_alive);
+    match start_staleness_decision(control_responsive, pidfile_pid, pid_alive) {
+        StartDecision::RefuseSocketResponsive => anyhow::bail!(
+            "a muxrd appears to already be running (control socket responsive). \
+             Run `muxrd stop` first."
+        ),
+        StartDecision::RefuseLiveDaemon(pid) => anyhow::bail!(
+            "a muxrd appears to already be running (pid {pid}; control socket \
+             unresponsive). Run `muxrd stop` or `kill {pid}` first; if pid {pid} \
+             is not actually muxrd (verify with `ps -p {pid}`), remove {} and retry.",
+            pidfile.display()
+        ),
+        StartDecision::Stale => {}
+    }
+
+    // Pre-flight bind probe: if the port is already held (e.g. an old daemon
+    // whose pidfile/socket were previously lost) bail BEFORE the destructive
+    // cleanup + fork below — otherwise we would delete state we cannot replace
+    // and the forked child would just die on `Address already in use`.  See
+    // `probe_bind_available` for the (accepted) TOCTOU window.
+    probe_bind_available(addr)?;
+
     if args.daemonize {
-        // Refuse to start a second daemon over a live control socket.
-        if control::query(&ControlRequest::Status).is_ok() {
-            anyhow::bail!(
-                "a muxrd appears to already be running (control socket responsive). \
-                 Run `muxrd stop` first."
-            );
-        }
-        // Stale pidfile/socket from a crashed run → clean up before forking.
+        // Genuinely stale pidfile/socket from a crashed run → clean up before
+        // forking.  Safe now: we proved above no live daemon owns this host and
+        // the bind address is free.
         let _ = std::fs::remove_file(&pidfile);
         control::cleanup();
 
@@ -810,7 +840,11 @@ fn cmd_stop() -> Result<()> {
                     }
                 }
             } else {
-                println!("muxrd: not running (no control socket, no pidfile).");
+                println!(
+                    "muxrd: not running (no control socket, no pidfile). If a bind \
+                     address still appears held, an orphaned daemon may still hold \
+                     the port — check with `ss -ltnp | grep <port>` (or fuser)."
+                );
             }
         }
     }
@@ -865,9 +899,152 @@ fn cleanup_stale() {
     }
 }
 
+// ── start-path liveness decision ────────────────────────────────────────────────
+
+/// Decision for whether `start` may treat existing pidfile/socket state as
+/// stale (and therefore clean it up), or must refuse.
+///
+/// Kept as a pure function of three observations so the start-path branch logic
+/// is unit-testable without forking a daemon (in-process fork tests are
+/// infeasible — the start path compensates with precise doc comments instead).
+#[derive(Debug, PartialEq, Eq)]
+enum StartDecision {
+    /// Control socket answered → a healthy daemon is already running.  Refuse.
+    RefuseSocketResponsive,
+    /// Control socket silent, but the pidfile names a live process → refuse and
+    /// name the pid.  Crucially, do NOT delete the pidfile/socket in this case
+    /// (the 2026-07-12 incident: a transient query failure here led to deleting
+    /// a live daemon's control state, leaving it unstoppable).
+    RefuseLiveDaemon(libc::pid_t),
+    /// No evidence of a live daemon → any leftover files are genuinely stale.
+    Stale,
+}
+
+/// Decide whether `start` may treat existing pidfile/socket state as stale.
+///
+/// A control-query failure ALONE is never treated as proof of staleness: only
+/// when the control socket is silent AND the pidfile names no live pid do we
+/// call the state stale.  This is what prevents a transient control-query
+/// failure from destroying a live daemon's pidfile/socket.
+fn start_staleness_decision(
+    control_responsive: bool,
+    pidfile_pid: Option<libc::pid_t>,
+    pid_alive: bool,
+) -> StartDecision {
+    if control_responsive {
+        return StartDecision::RefuseSocketResponsive;
+    }
+    match pidfile_pid {
+        Some(pid) if pid_alive => StartDecision::RefuseLiveDaemon(pid),
+        _ => StartDecision::Stale,
+    }
+}
+
+/// Pre-flight probe: is `addr` bindable right now?
+///
+/// Returns `Ok(())` if a `TcpListener` can bind `addr` (the listener is dropped
+/// immediately on success).  Returns an "already in use" error if the port is
+/// held; other bind errors are surfaced too (they would also stop the real
+/// bind).
+///
+/// TOCTOU: there is a small window between dropping this probe listener and the
+/// daemon child's real bind in which another process could grab the port.  That
+/// is acceptable — the child's own bind error remains the backstop; this probe
+/// exists only to bail BEFORE the destructive cleanup when the port is clearly
+/// taken.  All binds today are TCP `host:port` (see `config::resolve`), so a
+/// `TcpListener` probe is always applicable.
+fn probe_bind_available(addr: std::net::SocketAddr) -> Result<()> {
+    match std::net::TcpListener::bind(addr) {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            anyhow::bail!(
+                "bind address {addr} is already in use — is another muxrd running? \
+                 If no pidfile/control socket exists, find the holder with \
+                 `ss -ltnp | grep {}` (or fuser) and kill it.",
+                addr.port()
+            )
+        }
+        Err(e) => Err(e).with_context(|| format!("probe bind {addr}")),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── start-path staleness decision ───────────────────────────────────────
+
+    /// A responsive control socket is the fast-path refusal — pid state is
+    /// irrelevant.
+    #[test]
+    fn staleness_socket_responsive_refuses_regardless_of_pid() {
+        assert_eq!(
+            start_staleness_decision(true, Some(1234), true),
+            StartDecision::RefuseSocketResponsive
+        );
+        assert_eq!(
+            start_staleness_decision(true, None, false),
+            StartDecision::RefuseSocketResponsive
+        );
+    }
+
+    /// The incident: control query failed (transient) but the pidfile names a
+    /// live process → REFUSE (naming the pid), never clean up.
+    #[test]
+    fn staleness_live_pid_dead_socket_refuses_without_cleanup() {
+        assert_eq!(
+            start_staleness_decision(false, Some(4321), true),
+            StartDecision::RefuseLiveDaemon(4321)
+        );
+    }
+
+    /// Control silent + pidfile pid confirmed dead → genuinely stale.
+    #[test]
+    fn staleness_dead_pid_dead_socket_is_stale() {
+        assert_eq!(
+            start_staleness_decision(false, Some(4321), false),
+            StartDecision::Stale
+        );
+    }
+
+    /// Control silent + no pidfile → genuinely stale (crashed-run remnant).
+    #[test]
+    fn staleness_no_pidfile_dead_socket_is_stale() {
+        assert_eq!(
+            start_staleness_decision(false, None, false),
+            StartDecision::Stale
+        );
+    }
+
+    // ── pre-flight bind probe ────────────────────────────────────────────────
+
+    /// Holding an ephemeral port must make the probe report it as in use.
+    #[test]
+    fn probe_bind_available_refuses_a_held_port() {
+        let held = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let addr = held.local_addr().expect("local_addr");
+        let err = probe_bind_available(addr).expect_err("held port must refuse");
+        assert!(
+            err.to_string().contains("already in use"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// A freshly released ephemeral port should be bindable again.
+    #[test]
+    fn probe_bind_available_accepts_a_free_port() {
+        let addr = {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+            l.local_addr().expect("local_addr")
+        };
+        assert!(
+            probe_bind_available(addr).is_ok(),
+            "freshly released port should be bindable"
+        );
+    }
 
     /// `cert_identity` must return `None` for h2c — no TLS identity to load.
     #[test]

@@ -2,8 +2,11 @@
 //!
 //! Wraps `muxrd::{config, control, tls}` into a small, ergonomic API
 //! that the TUI screens consume.  The running server binary is launched via
-//! [`start_daemon`] (spawn, not library call), while all pure read/write ops
-//! (config, cert, status) go through the library directly.
+//! [`start_daemon`] (spawn, not library call) and stopped via [`stop`] (which
+//! also spawns the `muxrd` binary — `muxrd stop` — rather than issuing the
+//! control query directly, so it inherits muxrd's pidfile + SIGTERM
+//! fallback), while all pure read/write ops (config, cert, status) go through
+//! the library directly.
 
 pub mod ctl_state;
 pub mod tokens;
@@ -79,10 +82,31 @@ pub fn server_cert_mode() -> Option<muxrd::config::CertMode> {
 }
 
 /// Ask the running server to shut down gracefully.
+///
+/// Invokes `muxrd stop` (the same binary [`start_daemon`] launches) instead of
+/// issuing the control query directly, so muxrctl inherits muxrd's FULL stop
+/// semantics — in particular the pidfile + SIGTERM fallback used when the
+/// control socket is unresponsive.
+///
+/// Incident 2026-07-12: this path previously issued `control::query(Shutdown)`
+/// directly and, when the socket was gone, failed with
+/// `stop: control socket query failed` and no fallback — leaving an operator
+/// unable to stop a daemon whose control socket had been lost. Shelling out to
+/// `muxrd stop` keeps the two stop paths from ever diverging again.
+///
+/// Output is captured (not inherited) so a subprocess write cannot corrupt the
+/// raw-mode TUI.
 #[allow(dead_code)]
 pub fn stop() -> Result<()> {
-    muxrd::control::query(&ControlRequest::Shutdown)
-        .context("stop: control socket query failed")?;
+    let bin = find_server_binary();
+    let out = std::process::Command::new(&bin)
+        .arg("stop")
+        .output()
+        .with_context(|| format!("stop: failed to run `{} stop`", bin.display()))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        anyhow::bail!("stop: `{} stop` failed: {}", bin.display(), stderr.trim());
+    }
     Ok(())
 }
 
