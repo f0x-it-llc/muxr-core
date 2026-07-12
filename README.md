@@ -6,12 +6,13 @@ over a TLS, bearer-authenticated gRPC API. `muxrd` drives two backends behind a
 `MuxBackend` trait — [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/) — and auto-detects
 whichever are available at startup.
 
-Two binaries:
+Two distributed binaries, plus a third workspace crate distributed separately:
 
 | Crate | Binary | What it does |
 |-------|--------|--------------|
 | [`muxrd`](muxrd/) | `muxrd` | gRPC server (protobuf package `muxr.v1`) that relays over a terminal multiplexer — zellij (Unix-domain IPC) or herdr (JSON-API + binary wire sockets). TLS (self-signed, an external CA cert, or plaintext h2c behind a proxy) + per-token auth, read-only tokens, daemonize. |
 | [`muxrctl`](muxrctl/) | `muxrctl` | Terminal UI to install, configure, and pair the server: cert/SAN setup, token management, QR-code device pairing (fingerprint-pinned or system-CA), live status. Links `muxrd` as a library for its pure ops. |
+| [`muxr-notify`](muxr-notify/) | `muxr-notify` | A small, self-hostable push-notification relay (mints device push-handles, forwards `muxrd`'s notify requests to FCM). **Not** part of the release suite above — it ships only as its own Docker image (see [`muxr-notify/README.md`](muxr-notify/README.md)), since a self-hosted relay only delivers push to apps you build yourself (FCM tokens are project-scoped). The dev rig runs an in-container instance (`FCM_MODE=log`) for e2e testing. |
 
 ## Install
 
@@ -33,10 +34,11 @@ verifies the downloaded archive against the release's published
 ## Build
 
 ```bash
-cargo build              # both binaries (debug)
-cargo build --release    # both binaries (release)
-cargo build -p muxrd   # just the server
-cargo build -p muxrctl      # just the TUI
+cargo build --workspace          # all three binaries (debug)
+cargo build --release --workspace  # all three binaries (release)
+cargo build -p muxrd             # just the server
+cargo build -p muxrctl           # just the TUI
+cargo build -p muxr-notify       # just the push relay (separately distributed — see below)
 ```
 
 ## Run
@@ -90,8 +92,12 @@ cargo fmt                # format before committing
 
 `docker/` builds a self-contained container running the server against a
 pre-populated Zellij session — or, via the opt-in `herdr` profile, against a herdr
-workspace — useful for on-device testing from a phone on the same network. See
-[`docker/README.md`](docker/README.md).
+workspace — useful for on-device testing from a phone on the same network. It
+also starts an in-container `muxr-notify` instance (`FCM_MODE=log`, loopback
+only) so push-notification flows are exercisable end-to-end without any
+Firebase setup. See [`docker/README.md`](docker/README.md) and
+[`muxr-notify/README.md`](muxr-notify/README.md) (muxr-notify's own deploy
+image + self-host caveats).
 
 ```bash
 docker compose -f docker/compose.yaml up --build
@@ -123,15 +129,23 @@ Releases are cut by the **Release** GitHub Actions workflow
 1. **Version** — auto-computed from conventional commits via
    [git-cliff](https://git-cliff.org/) (`cliff.toml`), or supply an explicit
    `version` input. The single source of truth is `[workspace.package].version`
-   in the root `Cargo.toml`; both crates inherit it.
+   in the root `Cargo.toml`; all three crates inherit it (`muxr-notify`
+   included, since it reports `CARGO_PKG_VERSION` too — but it is not part of
+   what gets published, see below).
 2. **Bump + tag** — the workflow updates the workspace version, commits
    `chore(release): … [skip ci]`, and pushes a `vX.Y.Z` tag to `main`.
-3. **Build** — both binaries are compiled for three targets on native runners
-   (Linux `x86_64`/`aarch64`, macOS `aarch64`) and packaged as one
-   `muxr-core-v<ver>-<target>.tar.gz` suite archive per target. Intel macOS
-   (`x86_64-apple-darwin`) is not built — see the Install section.
+3. **Build** — `muxrd` and `muxrctl` are compiled for three targets on native
+   runners (Linux `x86_64`/`aarch64`, macOS `aarch64`) and packaged **by name**
+   as one `muxr-core-v<ver>-<target>.tar.gz` suite archive per target. Intel
+   macOS (`x86_64-apple-darwin`) is not built — see the Install section.
+   `cargo build --release --target <triple>` compiles the whole workspace
+   (so `muxr-notify` is built too, as a compile-time sanity check), but only
+   `muxrd`/`muxrctl` are copied into the archive — `muxr-notify` is **never**
+   part of the release suite; it ships only as its own Docker image (see
+   [`muxr-notify/README.md`](muxr-notify/README.md)).
 4. **Publish** — a GitHub Release is created with the suite archives,
-   `checksums-sha256.txt`, `install.sh`, and a git-cliff changelog.
+   `checksums-sha256.txt`, `install.sh`, and a git-cliff changelog. `install.sh`
+   only ever installs `muxrd`/`muxrctl`.
 
 The version job pushes the bump commit + tag using the built-in `GITHUB_TOKEN`.
 This requires `main` to accept pushes from `github-actions[bot]`; if `main` is

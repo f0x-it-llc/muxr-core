@@ -19,6 +19,11 @@ it refuses to start on any other version).
   workspace) — the TLS gRPC server (port **50051**, self-signed cert +
   bearer-token auth) and the TUI that configures and starts it.
 - **OpenSSH server** (port **22**) — root login so you can attach and run `muxrctl`.
+- **muxr-notify** (loopback only, not published to the host) — the push-notification
+  relay, started in-container in `FCM_MODE=log` (no Firebase artifacts needed) so
+  `muxrd`'s notifier has a local e2e target. Set `NOTIFY_ENABLED=0` to skip it. See
+  [`muxr-notify/README.md`](../muxr-notify/README.md) — it is a **separate,
+  independently-deployed artifact**, never part of the muxr-core release suite.
 - **Zellij v0.44.3** running a pre-populated `backend-dev` session (see `layout.kdl`):
   an `editor` tab (nvim + shell + btop), a `shell` tab (shell + htop), and a
   `logs` tab (live log stream).
@@ -207,6 +212,11 @@ cargo run --example read_client -- \
   dev-rig only). `SSH_PORT` changes the published SSH port (default `2222`).
 - **Zellij version:** must remain 0.44.3. Upgrading zellij without recompiling
   muxrd will cause a version-mismatch error at startup.
+- **muxr-notify:** `NOTIFY_ENABLED` (default `1`) and `NOTIFY_PORT` (default `8090`)
+  control the in-container relay. It always runs `FCM_MODE=log` in the rig — no
+  real FCM send happens, the would-be message is logged (`docker exec <container>
+  cat /var/log/muxr-notify.log`). Its SQLite store persists under the same
+  `zellij-data`/`muxrd-*-data` volume as the rest of muxrd's state.
 - **Security:** this is a **dev/test rig** — the self-signed cert, the
   passwordless SSH root login, and the `BIND_ADDR` LAN exposure are intentional
   dev affordances. Do not expose this container on an untrusted network.

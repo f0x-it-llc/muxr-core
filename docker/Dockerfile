@@ -2,9 +2,13 @@
 # Muxr — muxrd gRPC backend rig
 #
 # Multi-stage build:
-#   builder        — rust:1.92-alpine, static musl binaries (muxrd + muxrctl)
+#   builder        — rust:1.92-alpine, static musl binaries (muxrd + muxrctl +
+#                    muxr-notify — the whole workspace)
 #   runtime        — debian:trixie-slim with full terminal tooling + zellij 0.44.3,
-#                    an SSH server, and muxrctl to configure/start the server
+#                    an SSH server, muxrctl to configure/start the server, and
+#                    muxr-notify (started in-container by the entrypoint in
+#                    FCM_MODE=log, so `MUXRD_NOTIFY_RELAY_URL` has a local target
+#                    for e2e testing — no Firebase artifacts needed)
 #                    (the DEFAULT image — zellij only)
 #   runtime-herdr  — runtime + a pinned, UNMODIFIED upstream herdr binary, so the
 #                    image carries BOTH backends (zellij AND herdr). Built ONLY
@@ -16,6 +20,11 @@
 #                                      serves BOTH simultaneously (Phase 3
 #                                      serve-all default — the on-device multi-
 #                                      backend test rig)
+#
+# muxr-notify is a SEPARATE distributable artifact from muxrd/muxrctl (never
+# bundled in the release suite tarballs or install.sh) — its own deployment
+# image is muxr-notify/Dockerfile. It only rides in THIS rig image so the rig
+# can exercise the full push-notification path end-to-end.
 #
 # Build context: repo root  (compose sets context: ..)
 #   docker compose -f docker/compose.yaml up --build                              # zellij (default)
@@ -63,13 +72,17 @@ RUN apk add --no-cache \
 
 WORKDIR /build
 
-# Copy the whole Cargo workspace (muxrctl path-depends on muxrd) so
-# both binaries build from the same locked dependency set.
+# Copy the whole Cargo workspace (muxrctl path-depends on muxrd; muxr-notify is
+# a third, independent workspace member — see docker/README or ARCHITECTURE for
+# why it needs its own explicit COPY: `cargo build --workspace` resolves every
+# member's manifest, so an uncopied member breaks the build, not just gets
+# skipped) so all three binaries build from the same locked dependency set.
 COPY Cargo.toml Cargo.lock ./
 COPY muxrd/ ./muxrd/
 COPY muxrctl/ ./muxrctl/
+COPY muxr-notify/ ./muxr-notify/
 
-# Build both static release binaries (muxrd + muxrctl).
+# Build all release binaries (muxrd + muxrctl + muxr-notify).
 # On rust:alpine the native target IS musl — no --target flag needed.
 # OPENSSL_STATIC=1  → openssl-sys links statically
 # PKG_CONFIG_ALL_STATIC=1 → all pkg-config deps linked statically
@@ -141,6 +154,13 @@ COPY --from=builder /build/target/release/muxrd /usr/local/bin/muxrd
 COPY --from=builder /build/target/release/muxrctl /usr/local/bin/muxrctl
 RUN chmod +x /usr/local/bin/muxrd /usr/local/bin/muxrctl
 
+# ── muxr-notify binary (rig-only in-container relay, FCM_MODE=log — see
+# entrypoint.sh's start_notify()). This is the SAME rig image; muxr-notify is
+# never distributed as part of the muxr-core release suite — its own
+# deployment image lives at muxr-notify/Dockerfile. ──────────────────────────
+COPY --from=builder /build/target/release/muxr-notify /usr/local/bin/muxr-notify
+RUN chmod +x /usr/local/bin/muxr-notify
+
 # Bind on all interfaces by default so the gRPC server is reachable through the
 # published port. The Docker port mapping (compose) still gates host exposure;
 # override per-run via muxrctl's Configure screen or MUXRD_BIND.
@@ -154,6 +174,13 @@ ENV MUXRD_BIND=0.0.0.0:50051
 # Multiplexer backend the rig drives. The default `runtime` image is zellij-only;
 # the `runtime-herdr` stage overrides this to `herdr`. The entrypoint branches on it.
 ENV BACKEND=zellij
+
+# muxr-notify (in-container push relay for e2e testing — FCM_MODE=log, no
+# Firebase artifacts needed). Loopback-only; not published to the host, since
+# only the co-located muxrd needs to reach it. Set NOTIFY_ENABLED=0 to skip
+# starting it. See entrypoint.sh's start_notify().
+ENV NOTIFY_ENABLED=1
+ENV NOTIFY_PORT=8090
 
 # ── SSH access (dev rig) ─────────────────────────────────────────────────────
 # Passwordless root login over SSH so you can attach and drive muxrctl. Host
