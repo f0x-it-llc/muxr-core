@@ -21,8 +21,16 @@
 //! ## Concurrency contract
 //!
 //! `muxrctl` may read/edit this same file while the daemon is running (a
-//! future devices screen — see `RESEARCH-DELTA.md` §4/§7), so:
+//! future devices screen — see `RESEARCH-DELTA.md` §4/§7), and two muxrd
+//! RPCs can mutate concurrently, so:
 //!
+//! - an advisory lock on a `<file>.lock` sidecar spans the **whole**
+//!   load→mutate→store cycle of every mutator (`upsert`/`remove_by_*`) — held
+//!   *exclusive* — so two concurrent read-modify-write cycles serialize
+//!   instead of losing each other's updates (a lost-update race). Reads
+//!   (`list`/`count`) take the *shared* lock, so they never observe a write
+//!   mid-flight. The lock is `flock(2)`-style advisory (`fs4`) and works
+//!   cross-process, covering the muxrctl-while-daemon-runs case too;
 //! - every **write** = serialize → temp file in the same directory → atomic
 //!   `rename` (never a partial file is observable);
 //! - every **read** is a fresh read of the file — there is NO in-memory
@@ -36,9 +44,11 @@
 //! a corrupt or unreadable devices file as "empty" risks an `upsert`/`remove`
 //! silently discarding every other registered device on its next write.
 
+use std::fs::File;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 /// Sidecar file name inside the muxrd data dir.
@@ -115,9 +125,13 @@ impl PushDeviceStore {
         }
     }
 
-    /// List every registered device (fresh read — see module docs).
+    /// List every registered device (fresh read — see module docs). Takes the
+    /// *shared* advisory lock so a concurrent mutator's load→store cycle is
+    /// never observed half-applied.
     pub fn list(&self) -> Result<Vec<PushDevice>> {
-        load(&self.resolve_path()?)
+        let path = self.resolve_path()?;
+        let _lock = lock_shared(&path)?;
+        load(&path)
     }
 
     /// Number of registered devices (fresh read).
@@ -126,9 +140,12 @@ impl PushDeviceStore {
     }
 
     /// Insert a new device, or replace the existing entry with the same
-    /// `device_name` (the token-refresh / re-register path).
+    /// `device_name` (the token-refresh / re-register path). The *exclusive*
+    /// advisory lock spans the whole load→mutate→store cycle so concurrent
+    /// mutators serialize instead of losing updates.
     pub fn upsert(&self, device: PushDevice) -> Result<()> {
         let path = self.resolve_path()?;
+        let _lock = lock_exclusive(&path)?;
         let mut devices = load(&path)?;
         match devices
             .iter_mut()
@@ -141,9 +158,11 @@ impl PushDeviceStore {
     }
 
     /// Remove a device by `device_name`. Returns `true` if a device was
-    /// removed, `false` if no device with that name existed.
+    /// removed, `false` if no device with that name existed. Holds the
+    /// *exclusive* lock across load→mutate→store (see [`Self::upsert`]).
     pub fn remove_by_name(&self, name: &str) -> Result<bool> {
         let path = self.resolve_path()?;
+        let _lock = lock_exclusive(&path)?;
         let mut devices = load(&path)?;
         let before = devices.len();
         devices.retain(|d| d.device_name != name);
@@ -156,10 +175,12 @@ impl PushDeviceStore {
 
     /// Remove a device by `push_handle`. Returns `true` if a device was
     /// removed, `false` if no device with that handle existed. Used by the
-    /// (future) notifier when the relay reports the handle as gone
-    /// (404/410 — see `RESEARCH-DELTA.md` §6).
+    /// notifier when the relay reports the handle as gone (404/410 — see
+    /// `RESEARCH-DELTA.md` §6). Holds the *exclusive* lock across
+    /// load→mutate→store (see [`Self::upsert`]).
     pub fn remove_by_handle(&self, handle: &str) -> Result<bool> {
         let path = self.resolve_path()?;
+        let _lock = lock_exclusive(&path)?;
         let mut devices = load(&path)?;
         let before = devices.len();
         devices.retain(|d| d.push_handle != handle);
@@ -169,6 +190,53 @@ impl PushDeviceStore {
         }
         Ok(removed)
     }
+}
+
+// ─── Advisory file lock ──────────────────────────────────────────────────────
+
+/// Path of the advisory-lock sidecar for `path` (`<path>.lock`). A dedicated
+/// sidecar (not the registry file itself) so the lock is orthogonal to the
+/// atomic temp-file+`rename` write — the `rename` never disturbs the fd the
+/// lock is held on.
+fn lock_path_for(path: &Path) -> PathBuf {
+    let mut os = path.as_os_str().to_owned();
+    os.push(".lock");
+    PathBuf::from(os)
+}
+
+/// Open (creating if absent) the advisory-lock sidecar. The parent dir is
+/// created first so the very first `upsert` on a fresh data dir can lock
+/// before the registry file exists.
+fn open_lock_file(path: &Path) -> Result<File> {
+    let lock_path = lock_path_for(path);
+    let parent = lock_path
+        .parent()
+        .context("push_devices: lock sidecar has no parent dir")?;
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("push_devices: create dir {}", parent.display()))?;
+    std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("push_devices: open lock {}", lock_path.display()))
+}
+
+/// Acquire the exclusive advisory lock, returning the fd-holding guard. The
+/// lock releases when the returned `File` is dropped (fd close), i.e. at the
+/// end of the caller's method — after `store` has renamed the new file in.
+fn lock_exclusive(path: &Path) -> Result<File> {
+    let f = open_lock_file(path)?;
+    FileExt::lock_exclusive(&f).context("push_devices: acquire exclusive lock")?;
+    Ok(f)
+}
+
+/// Acquire the shared advisory lock (concurrent readers permitted; blocks while
+/// an exclusive mutator holds it). Guard released on drop.
+fn lock_shared(path: &Path) -> Result<File> {
+    let f = open_lock_file(path)?;
+    FileExt::lock_shared(&f).context("push_devices: acquire shared lock")?;
+    Ok(f)
 }
 
 /// Load the device list. A missing file is treated as an empty registry (the
@@ -372,6 +440,45 @@ mod tests {
         assert_eq!(writer.count().unwrap(), 2);
 
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn concurrent_upserts_of_distinct_devices_all_persist() {
+        // N threads race `upsert` of distinct-named devices at one path. With
+        // the exclusive advisory lock spanning each load→mutate→store cycle,
+        // every write is applied to the latest state, so all N survive.
+        //
+        // On the *pre-lock* code this fails: unsynchronized read-modify-write
+        // cycles interleave — a thread loads an older snapshot, then its
+        // `store` renames a file missing the entries other threads added in
+        // between (classic lost-update), leaving fewer than N devices.
+        use std::sync::Arc;
+        use std::thread;
+
+        const N: usize = 24;
+        let path = temp_store_path("race");
+        let store = Arc::new(PushDeviceStore::at_path(path.clone()));
+
+        let handles: Vec<_> = (0..N)
+            .map(|i| {
+                let store = Arc::clone(&store);
+                thread::spawn(move || {
+                    store.upsert(sample(&format!("device-{i}"), 'a')).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().expect("upsert thread must not panic");
+        }
+
+        assert_eq!(
+            store.count().unwrap(),
+            N,
+            "every concurrent upsert of a distinct device must persist"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(lock_path_for(&path));
     }
 
     #[test]

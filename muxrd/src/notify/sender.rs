@@ -315,11 +315,21 @@ async fn handle_event<T: RelayTransport>(
 
     // 2. Zero-devices short-circuit — BEFORE building or sending anything, so an
     //    empty registry produces zero outbound traffic (the opt-in guarantee).
-    let devices = match store.list() {
-        Ok(d) => d,
-        Err(e) => {
-            log::warn!("notify: failed to read push-device registry: {e:#}");
-            return;
+    //    The store is plain synchronous `std::fs` (+ an advisory file lock), so
+    //    read it on the blocking pool — never on the async runtime — matching
+    //    every other caller (grpc::push_ops, muxrctl runner).
+    let devices = {
+        let store = store.clone();
+        match tokio::task::spawn_blocking(move || store.list()).await {
+            Ok(Ok(d)) => d,
+            Ok(Err(e)) => {
+                log::warn!("notify: failed to read push-device registry: {e:#}");
+                return;
+            }
+            Err(e) => {
+                log::warn!("notify: push-device list task panicked: {e}");
+                return;
+            }
         }
     };
     if devices.is_empty() {
@@ -361,8 +371,13 @@ async fn handle_event<T: RelayTransport>(
                     handle_prefix(&device.push_handle),
                     device.device_name
                 );
-                if let Err(e) = store.remove_by_handle(&device.push_handle) {
-                    log::warn!("notify: failed to prune gone device: {e:#}");
+                // Prune on the blocking pool (synchronous std::fs + file lock).
+                let store = store.clone();
+                let handle = device.push_handle.clone();
+                match tokio::task::spawn_blocking(move || store.remove_by_handle(&handle)).await {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(e)) => log::warn!("notify: failed to prune gone device: {e:#}"),
+                    Err(e) => log::warn!("notify: prune task panicked: {e}"),
                 }
             }
             SendOutcome::RateLimited => {

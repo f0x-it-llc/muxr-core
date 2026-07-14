@@ -53,6 +53,15 @@ impl MuxrService {
                 "RegisterPushTarget: server has no push-notification relay configured",
             ));
         }
+        // The event kernel + outbound notifier only spawn in the herdr branch
+        // (`bin/muxrd.rs`), so a registration on a zellij-only server can never
+        // deliver a push. Reject it up-front rather than persisting a handle
+        // that will never be notified (matches the GetVersion capability gate).
+        if self.backends.get(crate::cli::BackendKind::Herdr).is_none() {
+            return Err(Status::failed_precondition(
+                "push notifications require the herdr backend",
+            ));
+        }
 
         let req = request.into_inner();
         devices::validate_push_handle(&req.push_handle)
@@ -167,7 +176,10 @@ impl MuxrService {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::BackendKind;
+    use crate::multiplexer::{BackendSet, ZellijBackend};
     use crate::notify::devices::PushDeviceStore;
+    use std::sync::Arc;
 
     fn temp_store() -> (PushDeviceStore, std::path::PathBuf) {
         let secs = std::time::SystemTime::now()
@@ -181,9 +193,20 @@ mod tests {
         (PushDeviceStore::at_path(path.clone()), path)
     }
 
+    /// A backend set with a herdr entry — RegisterPushTarget now requires the
+    /// herdr backend to be present (only a `get(Herdr)` presence probe is done),
+    /// so a trivially-constructable `ZellijBackend` registered under the `Herdr`
+    /// kind is a faithful stand-in for "herdr detected" in these unit tests.
+    fn backends_with_herdr() -> BackendSet {
+        BackendSet::new(vec![
+            (BackendKind::Zellij, Arc::new(ZellijBackend) as _),
+            (BackendKind::Herdr, Arc::new(ZellijBackend) as _),
+        ])
+    }
+
     fn service_with_relay() -> (MuxrService, std::path::PathBuf) {
         let (store, path) = temp_store();
-        let service = MuxrService::new()
+        let service = MuxrService::with_backends(backends_with_herdr())
             .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()))
             .with_push_device_store(store);
         (service, path)
@@ -280,6 +303,33 @@ mod tests {
             .await
             .expect_err("no relay configured must fail precondition");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn register_without_herdr_backend_fails_precondition() {
+        // Relay configured, but a zellij-only server (no herdr) can never
+        // deliver a push — RegisterPushTarget must refuse rather than persist a
+        // handle that will never be notified (M3).
+        let (store, path) = temp_store();
+        let service = MuxrService::new() // zellij-only backend set
+            .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()))
+            .with_push_device_store(store);
+        let req = writable_request(RegisterPushTargetReq {
+            push_handle: valid_handle('a'),
+            device_name: "phone".to_owned(),
+            platform: "android".to_owned(),
+        });
+        let err = service
+            .register_push_target_impl(req)
+            .await
+            .expect_err("no herdr backend must fail precondition");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert!(
+            err.message().contains("herdr"),
+            "message should explain herdr is required: {}",
+            err.message()
+        );
         let _ = std::fs::remove_file(&path);
     }
 
