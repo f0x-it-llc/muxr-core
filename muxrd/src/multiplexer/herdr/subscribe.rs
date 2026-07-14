@@ -49,6 +49,19 @@
 //! subscription set): backoff is reset and a short [`GROW_RECONNECT_DELAY`]
 //! applied rather than the failure backoff.
 //!
+//! ## Grow-reconnect circuit breaker
+//!
+//! Two prior live-schema assumptions have already broken against real herdr
+//! (`pane_created` snapshot replay being the second — see below); each failure
+//! mode was a tight ~250 ms Grow-reconnect loop. `run` tracks a rolling
+//! timestamp history of Grow reconnects: more than [`GROW_STORM_THRESHOLD`]
+//! within [`GROW_STORM_WINDOW`] trips a circuit breaker that treats *further*
+//! Grows as failures for backoff purposes — escalating through the normal
+//! exponential ladder up to [`MAX_BACKOFF`] instead of reconnecting every
+//! [`GROW_RECONNECT_DELAY`] — until the window quiets back down. A single new
+//! pane (the common case) never comes close to the threshold and always keeps
+//! the fast path.
+//!
 //! ## `pane_created` snapshot replay (herdr 0.7.1)
 //!
 //! herdr replays a `pane_created` for **every** already-existing pane immediately
@@ -113,6 +126,16 @@ const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
 /// (connect-time-fixed) subscription set by reconnecting; this is an expected
 /// widening, not a failure, so backoff is reset and only this short pause applied.
 const GROW_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+
+/// Rolling window over which Grow reconnects are counted for storm detection
+/// (see [`GROW_STORM_THRESHOLD`] and `record_grow_and_check_storm`).
+const GROW_STORM_WINDOW: Duration = Duration::from_secs(30);
+
+/// More than this many Grow reconnects within [`GROW_STORM_WINDOW`] trips the
+/// circuit breaker: a real new pane is a one-off, so a burst this size means a
+/// live-schema assumption is wrong and every push is (wrongly) triggering a
+/// Grow — the failure mode must be slow reconnects, not a tight loop.
+const GROW_STORM_THRESHOLD: usize = 5;
 
 /// Hard ceiling on a single pushed-event line, mirroring the control plane's
 /// [`MAX_RESPONSE_BYTES`](super::control::MAX_RESPONSE_BYTES) defence: a peer
@@ -193,6 +216,9 @@ async fn run(
     );
     let last_status: StatusTable = Arc::new(Mutex::new(HashMap::new()));
     let mut backoff = INITIAL_BACKOFF;
+    // Rolling Grow-reconnect timestamp history — see "Grow-reconnect circuit
+    // breaker" above. Lives for the whole kernel lifetime, across reconnects.
+    let mut grow_history: Vec<Instant> = Vec::new();
     loop {
         if *shutdown.borrow() {
             break;
@@ -209,6 +235,28 @@ async fn run(
         .await
         {
             SessionOutcome::Shutdown => break,
+            SessionOutcome::Grow
+                if record_grow_and_check_storm(&mut grow_history, Instant::now()) =>
+            {
+                // Storm: more than GROW_STORM_THRESHOLD Grows within
+                // GROW_STORM_WINDOW — a live-schema assumption is wrong and
+                // every push is triggering a Grow. Treat this reconnect as a
+                // failure for backoff purposes instead of the fast path.
+                log::warn!("herdr event kernel: grow-reconnect storm — circuit breaker engaged");
+                log::info!(
+                    "herdr event kernel: disconnected — retrying in {}s",
+                    backoff.as_secs()
+                );
+                tokio::select! {
+                    _ = tokio::time::sleep(backoff) => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+                backoff = next_backoff(backoff);
+            }
             SessionOutcome::Grow => {
                 // Expected widening of the subscription set — reset backoff and
                 // reconnect promptly rather than treating it as a failure.
@@ -742,6 +790,20 @@ fn next_backoff(prev: Duration) -> Duration {
     (prev * 2).min(MAX_BACKOFF)
 }
 
+/// Record a Grow-reconnect at `now`, pruning entries older than
+/// [`GROW_STORM_WINDOW`] from `history`, and report whether the circuit
+/// breaker should engage for *this* reconnect (recording it pushes the
+/// window's count over [`GROW_STORM_THRESHOLD`]).
+///
+/// Pure and fixture-testable: `history` is the kernel's rolling Grow
+/// timestamp log, owned by `run` across reconnects so a storm that spans
+/// several sessions is still detected.
+fn record_grow_and_check_storm(history: &mut Vec<Instant>, now: Instant) -> bool {
+    history.retain(|&t| now.saturating_duration_since(t) < GROW_STORM_WINDOW);
+    history.push(now);
+    history.len() > GROW_STORM_THRESHOLD
+}
+
 /// Lock a mutex, recovering the guard if a previous holder panicked. The table
 /// holds only a plain map, so a poisoned lock leaves consistent data.
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -1212,6 +1274,62 @@ mod tests {
             b = next_backoff(b);
             assert_eq!(b, MAX_BACKOFF);
         }
+    }
+
+    // ── grow-reconnect circuit breaker ───────────────────────────────────────
+
+    #[test]
+    fn below_threshold_grows_stay_fast() {
+        let mut history = Vec::new();
+        let base = Instant::now();
+        // Exactly GROW_STORM_THRESHOLD Grows in quick succession must never
+        // trip the breaker — only exceeding it does.
+        for i in 0..GROW_STORM_THRESHOLD {
+            let now = base + Duration::from_millis(i as u64 * 10);
+            assert!(
+                !record_grow_and_check_storm(&mut history, now),
+                "grow #{i} should stay under threshold"
+            );
+        }
+    }
+
+    #[test]
+    fn storm_engages_breaker() {
+        let mut history = Vec::new();
+        let base = Instant::now();
+        for i in 0..GROW_STORM_THRESHOLD {
+            let now = base + Duration::from_millis(i as u64 * 10);
+            assert!(!record_grow_and_check_storm(&mut history, now));
+        }
+        // The (GROW_STORM_THRESHOLD + 1)th Grow inside the window trips it.
+        let tripped = base + Duration::from_millis(GROW_STORM_THRESHOLD as u64 * 10 + 10);
+        assert!(record_grow_and_check_storm(&mut history, tripped));
+        // Further reconnects while still inside the window stay engaged.
+        let still_storming = tripped + Duration::from_millis(10);
+        assert!(record_grow_and_check_storm(&mut history, still_storming));
+    }
+
+    #[test]
+    fn breaker_disengages_after_quiet_window() {
+        let mut history = Vec::new();
+        let base = Instant::now();
+        // Trip the breaker.
+        for i in 0..=GROW_STORM_THRESHOLD {
+            let now = base + Duration::from_millis(i as u64 * 10);
+            record_grow_and_check_storm(&mut history, now);
+        }
+        let storming_at = base + Duration::from_millis(GROW_STORM_THRESHOLD as u64 * 10);
+        assert!(
+            record_grow_and_check_storm(&mut history, storming_at + Duration::from_millis(1)),
+            "sanity: breaker is engaged right before the quiet window"
+        );
+        // Once GROW_STORM_WINDOW passes with no further Grows, the old
+        // timestamps are pruned and a fresh Grow is back under threshold.
+        let quiet = storming_at + GROW_STORM_WINDOW + Duration::from_millis(1);
+        assert!(
+            !record_grow_and_check_storm(&mut history, quiet),
+            "breaker must disengage once the window clears"
+        );
     }
 
     // ── bounded line reader ──────────────────────────────────────────────────
