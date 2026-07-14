@@ -45,8 +45,18 @@
 //! via `HerdrControl` and emits synthetic [`AgentStatus::Blocked`]/[`AgentStatus::Done`]
 //! events (`synthetic: true`) so a consumer that missed a transition during the
 //! gap still learns which panes currently need attention. A `pane.created` push
-//! is a **non-error reconnect** (widen the subscription set): backoff is reset and
-//! a short [`GROW_RECONNECT_DELAY`] applied rather than the failure backoff.
+//! for a pane **not** already subscribed is a **non-error reconnect** (widen the
+//! subscription set): backoff is reset and a short [`GROW_RECONNECT_DELAY`]
+//! applied rather than the failure backoff.
+//!
+//! ## `pane_created` snapshot replay (herdr 0.7.1)
+//!
+//! herdr replays a `pane_created` for **every** already-existing pane immediately
+//! after the `subscription_started` ack (snapshot semantics, wire-confirmed
+//! 2026-07-15). Treating each as a widening would Grow-reconnect, whose fresh
+//! subscription replays them again — an infinite loop. The kernel therefore
+//! Grow-reconnects **only** for a `pane_id` absent from the connect-time set; a
+//! replayed/known id is ignored (the id lives at `data.pane.pane_id`).
 //!
 //! ## Synthetic resend suppression
 //!
@@ -256,6 +266,10 @@ async fn run_session(
             return SessionOutcome::Ended;
         }
     };
+    // The connect-time subscription set, for O(1) replay detection: herdr replays
+    // a `pane_created` for every one of these right after the ack (snapshot), and
+    // only an id absent from this set is a genuinely new pane worth growing for.
+    let known_pane_ids: HashSet<&str> = pane_ids.iter().map(String::as_str).collect();
 
     // 2. Connect the long-lived subscription socket.
     let stream = match UnixStream::connect(api_socket).await {
@@ -360,11 +374,18 @@ async fn run_session(
                             // No receivers yet is fine (broadcast → recoverable Err).
                             let _ = bus.send(MuxEvent::AgentStatusChanged(ev));
                         }
-                        Pushed::PaneCreated => {
-                            log::info!(
-                                "herdr event kernel: pane created — reconnecting to widen subscription set"
+                        Pushed::PaneCreated(pane_id) => {
+                            if pane_created_grows(pane_id.as_deref(), &known_pane_ids) {
+                                log::info!(
+                                    "herdr event kernel: new pane created ({}) — reconnecting to widen subscription set",
+                                    pane_id.as_deref().unwrap_or("<no id>")
+                                );
+                                return SessionOutcome::Grow;
+                            }
+                            log::debug!(
+                                "herdr event kernel: ignoring replayed pane_created for already-subscribed pane {}",
+                                pane_id.as_deref().unwrap_or("<no id>")
                             );
-                            return SessionOutcome::Grow;
                         }
                         Pushed::PaneGone(id) => {
                             // A dead subscription is harmless; just drop tracking so
@@ -523,8 +544,12 @@ fn build_resync_events(
 enum Pushed {
     /// A live `pane.agent_status_changed` transition, ready to publish.
     AgentStatus(AgentStatusChanged),
-    /// A `pane_created` push — the subscription set must be widened via reconnect.
-    PaneCreated,
+    /// A `pane_created` push, carrying the herdr `pane_id` if one was parseable
+    /// (`data.pane.pane_id`). herdr replays a `pane_created` for **every**
+    /// already-subscribed pane right after the ack (snapshot semantics), so the
+    /// caller must Grow-reconnect **only** for an id absent from the connect-time
+    /// set — a replayed/known id is ignored.
+    PaneCreated(Option<String>),
     /// A `pane_closed` / `pane_exited` push for a pane we track (neutral id).
     PaneGone(u32),
     /// Anything not consumed (ack, unknown event, malformed, unknown pane) — ignored.
@@ -555,7 +580,7 @@ fn classify_pushed(line: &str, panes: &HerdrPaneRegistry) -> Pushed {
     let data = value.get("data");
     match canonical.as_str() {
         "pane_agent_status_changed" => parse_agent_status(data, panes),
-        "pane_created" => Pushed::PaneCreated,
+        "pane_created" => Pushed::PaneCreated(pane_created_id(data)),
         "pane_closed" | "pane_exited" => parse_pane_gone(data, panes),
         other => {
             log::trace!("herdr event kernel: ignoring event {other}");
@@ -606,6 +631,36 @@ fn parse_pane_gone(data: Option<&Value>, panes: &HerdrPaneRegistry) -> Pushed {
     match herdr_pane_id.and_then(|pid| panes.id_for_herdr_pane(pid)) {
         Some(id) => Pushed::PaneGone(id),
         None => Pushed::Ignored,
+    }
+}
+
+/// Extract the herdr `pane_id` from a `pane_created` payload. The wire capture
+/// nests the full pane object under `data.pane` (`data.pane.pane_id`); a
+/// top-level `data.pane_id` is also accepted for tolerance. `None` when no id is
+/// parseable (genuine new panes always carry one per the wire capture).
+fn pane_created_id(data: Option<&Value>) -> Option<String> {
+    let data = data?;
+    data.get("pane")
+        .and_then(|p| p.get("pane_id"))
+        .and_then(Value::as_str)
+        .or_else(|| data.get("pane_id").and_then(Value::as_str))
+        .map(str::to_string)
+}
+
+/// Decide whether a `pane_created` push should trigger a Grow reconnect.
+///
+/// herdr 0.7.1 replays a `pane_created` for **every** already-subscribed pane
+/// immediately after the `subscription_started` ack (snapshot semantics,
+/// wire-confirmed 2026-07-15). Those carry a `pane_id` already in the
+/// connect-time set and must be ignored — otherwise each replay triggers a Grow
+/// reconnect, whose fresh subscription replays them again: an infinite loop.
+/// Only an id **absent** from `known` is a genuine new pane. A push with no
+/// parseable id can't be matched, so err toward Grow (safe: genuine new panes
+/// always carry the id, so this path should not fire in practice).
+fn pane_created_grows(pane_id: Option<&str>, known: &HashSet<&str>) -> bool {
+    match pane_id {
+        Some(pid) => !known.contains(pid),
+        None => true,
     }
 }
 
@@ -820,14 +875,58 @@ mod tests {
             "event": "pane_created",
             "data": { "pane": { "pane_id": "w1:p2", "terminal_id": "t2", "workspace_id": "w1" } }
         }"#;
-        assert!(matches!(classify_pushed(line, &panes), Pushed::PaneCreated));
+        match classify_pushed(line, &panes) {
+            // The nested pane_id must be extracted for replay detection.
+            Pushed::PaneCreated(id) => assert_eq!(id.as_deref(), Some("w1:p2")),
+            _ => panic!("expected PaneCreated"),
+        }
     }
 
     #[test]
     fn classifies_pane_created_dot_form_too() {
         let panes = HerdrPaneRegistry::new();
         let line = r#"{"event":"pane.created","data":{}}"#;
-        assert!(matches!(classify_pushed(line, &panes), Pushed::PaneCreated));
+        match classify_pushed(line, &panes) {
+            // No parseable pane_id in this payload.
+            Pushed::PaneCreated(id) => assert!(id.is_none()),
+            _ => panic!("expected PaneCreated"),
+        }
+    }
+
+    #[test]
+    fn pane_created_id_accepts_top_level_pane_id_too() {
+        let data = serde_json::json!({ "pane_id": "w2:p7" });
+        assert_eq!(pane_created_id(Some(&data)).as_deref(), Some("w2:p7"));
+        // Nested form wins / is found.
+        let nested = serde_json::json!({ "pane": { "pane_id": "w3:p1" } });
+        assert_eq!(pane_created_id(Some(&nested)).as_deref(), Some("w3:p1"));
+        // Nothing parseable.
+        assert!(pane_created_id(Some(&serde_json::json!({}))).is_none());
+        assert!(pane_created_id(None).is_none());
+    }
+
+    // ── pane_created replay suppression (the Grow-loop fix) ───────────────────
+
+    #[test]
+    fn replayed_pane_created_for_known_pane_does_not_grow() {
+        // herdr replays a pane_created for every already-subscribed pane after the
+        // ack; a known id must NOT trigger a Grow reconnect.
+        let known: HashSet<&str> = ["w1:p1", "w1:p2"].into_iter().collect();
+        assert!(!pane_created_grows(Some("w1:p1"), &known));
+    }
+
+    #[test]
+    fn genuinely_new_pane_created_grows() {
+        let known: HashSet<&str> = ["w1:p1"].into_iter().collect();
+        assert!(pane_created_grows(Some("w1:p2"), &known));
+    }
+
+    #[test]
+    fn pane_created_with_no_id_grows() {
+        // Can't tell whether it's a replay; genuine new panes always carry an id,
+        // so this path should not fire in practice — err toward Grow.
+        let known: HashSet<&str> = ["w1:p1"].into_iter().collect();
+        assert!(pane_created_grows(None, &known));
     }
 
     #[test]
