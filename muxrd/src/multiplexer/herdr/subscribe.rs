@@ -10,8 +10,31 @@
 //! long-lived socket, then read newline-delimited pushed events indefinitely.
 //! This task therefore owns its own [`tokio::net::UnixStream`] reader — the
 //! blocking `spawn_blocking` idiom applies to the *short* control calls, not to
-//! this streaming reader. The only blocking work it does (the post-reconnect
-//! resync) is routed through `HerdrControl` on the blocking pool.
+//! this streaming reader. The only blocking work it does (pre-connect pane
+//! enumeration and the post-connect resync) is routed through `HerdrControl` on
+//! the blocking pool.
+//!
+//! ## Wire schema (live-verified against herdr 0.7.1 / protocol 14)
+//!
+//! - **Request** — the subscription set is fixed at connect time and sent in a
+//!   single request whose params carry a `subscriptions` array:
+//!   `{"id":…,"method":"events.subscribe","params":{"subscriptions":[…]}}`.
+//!   `pane.agent_status_changed` is **per-pane** and requires a `pane_id`
+//!   (`"w1:p1"` form) — no wildcard and no omission — so the kernel enumerates
+//!   the current panes first and emits one entry per pane, plus bare
+//!   `{"type":"pane.created"}` / `{"type":"pane.closed"}` entries. A **second**
+//!   `events.subscribe` on the same socket resets the connection, so growing the
+//!   set means reconnecting.
+//! - **Ack** — `{"id":…,"result":{"type":"subscription_started"}}`. The kernel
+//!   logs "subscribed" only once this ack is observed, then resyncs.
+//! - **Pushed event** — top-level key `event` (dot form for agent status,
+//!   inconsistently underscore for `pane_created`) with the payload under `data`:
+//!   `{"event":"pane.agent_status_changed","data":{"agent_status":"blocked",
+//!   "pane_id":"w1:p1","workspace_id":"w1"}}`. The push carries no
+//!   `terminal_id` / `workspace_name` / `title` for the agent-status event, so
+//!   those stay `None` on the push path (the resync path still supplies the
+//!   workspace label). The event name is parsed tolerantly (dot **and**
+//!   underscore forms accepted).
 //!
 //! ## Reconnect & loss
 //!
@@ -21,7 +44,18 @@
 //! as **lossy**: after every (re)connect it *resyncs* current pane agent states
 //! via `HerdrControl` and emits synthetic [`AgentStatus::Blocked`]/[`AgentStatus::Done`]
 //! events (`synthetic: true`) so a consumer that missed a transition during the
-//! gap still learns which panes currently need attention.
+//! gap still learns which panes currently need attention. A `pane.created` push
+//! is a **non-error reconnect** (widen the subscription set): backoff is reset and
+//! a short [`GROW_RECONNECT_DELAY`] applied rather than the failure backoff.
+//!
+//! ## Synthetic resend suppression
+//!
+//! The kernel tracks each pane's last-known [`AgentStatus`]. During a resync a
+//! synthetic event is emitted **only** when a pane's `Blocked`/`Done` status
+//! *differs* from its last-known value — so a connection that flaps repeatedly no
+//! longer re-pings a consumer for the same still-stuck agent. On a fresh start the
+//! table is empty, so every currently-blocked pane emits exactly once. Tracking is
+//! pruned for panes that disappear from the enumeration and updated by live pushes.
 //!
 //! ## Read-only
 //!
@@ -31,12 +65,13 @@
 //! ([`HerdrPaneRegistry::id_for_herdr_pane`]) so a pushed event that omits
 //! `terminal_id` can never clobber a live pane's relay attach key.
 
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use serde::Deserialize;
+use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::sync::watch;
@@ -64,6 +99,11 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// escalate (so a herdr that flaps once an hour never sits at the 60 s cap).
 const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
 
+/// Delay before a `pane.created`-driven reconnect. A new pane must be added to the
+/// (connect-time-fixed) subscription set by reconnecting; this is an expected
+/// widening, not a failure, so backoff is reset and only this short pause applied.
+const GROW_RECONNECT_DELAY: Duration = Duration::from_millis(250);
+
 /// Hard ceiling on a single pushed-event line, mirroring the control plane's
 /// [`MAX_RESPONSE_BYTES`](super::control::MAX_RESPONSE_BYTES) defence: a peer
 /// streaming bytes without a newline must not grow the line buffer unbounded.
@@ -71,12 +111,14 @@ const STABLE_THRESHOLD: Duration = Duration::from_secs(60);
 /// stream.
 const MAX_EVENT_LINE_BYTES: usize = 1024 * 1024;
 
-/// herdr event type in the **subscription request** (dot form).
-const SUBSCRIBE_EVENT_TYPE: &str = "pane.agent_status_changed";
+/// Per-pane agent-status subscription type (dot form, in the request).
+const SUBSCRIBE_AGENT_STATUS_TYPE: &str = "pane.agent_status_changed";
 
-/// herdr event type on **pushed events** (underscore form — the shape code must
-/// match; verified against herdr's public schema).
-const PUSHED_EVENT_TYPE: &str = "pane_agent_status_changed";
+/// Pane-created subscription type (bare, no `pane_id`).
+const SUBSCRIBE_PANE_CREATED_TYPE: &str = "pane.created";
+
+/// Pane-closed subscription type (bare, no `pane_id`).
+const SUBSCRIBE_PANE_CLOSED_TYPE: &str = "pane.closed";
 
 // ── Public entry point ──────────────────────────────────────────────────────────
 
@@ -86,7 +128,7 @@ const PUSHED_EVENT_TYPE: &str = "pane_agent_status_changed";
 /// `true`. Shares the backend's [`HerdrPaneRegistry`] / [`HerdrTabRegistry`]
 /// `Arc`s so translated pane ids stay identical to those handed out by layout
 /// polls, and builds its own long-lived subscription socket (plus a per-request
-/// `HerdrControl` over the same socket path for resync).
+/// `HerdrControl` over the same socket path for pane enumeration and resync).
 ///
 /// Called from `bin/muxrd.rs::serve()` only when a herdr backend is present; a
 /// zellij-only server never spawns it.
@@ -110,12 +152,20 @@ pub fn spawn_event_kernel(
 
 // ── Subscription lifecycle ──────────────────────────────────────────────────────
 
+/// Shared last-known agent status per neutral pane id, used to suppress duplicate
+/// synthetic resync emissions. Lives for the whole kernel lifetime (across
+/// reconnects) so a flapping connection does not re-ping unchanged blocked panes.
+type StatusTable = Arc<Mutex<HashMap<u32, AgentStatus>>>;
+
 /// Outcome of a single subscription session (one connected socket lifetime).
 enum SessionOutcome {
     /// Shutdown was requested — the outer loop must exit.
     Shutdown,
-    /// The session ended (connect failure, EOF, or read error) — reconnect.
+    /// The session ended (connect failure, EOF, or read error) — reconnect with backoff.
     Ended,
+    /// A `pane.created` push arrived — reconnect promptly to widen the subscription
+    /// set (not a failure; backoff is reset).
+    Grow,
 }
 
 /// The reconnect loop: (re)subscribe forever until shutdown, backing off between
@@ -131,14 +181,37 @@ async fn run(
         "herdr event kernel: starting (socket {})",
         api_socket.display()
     );
+    let last_status: StatusTable = Arc::new(Mutex::new(HashMap::new()));
     let mut backoff = INITIAL_BACKOFF;
     loop {
         if *shutdown.borrow() {
             break;
         }
         let started = Instant::now();
-        match run_session(&api_socket, &panes, &control, &bus, &mut shutdown).await {
+        match run_session(
+            &api_socket,
+            &panes,
+            &control,
+            &last_status,
+            &bus,
+            &mut shutdown,
+        )
+        .await
+        {
             SessionOutcome::Shutdown => break,
+            SessionOutcome::Grow => {
+                // Expected widening of the subscription set — reset backoff and
+                // reconnect promptly rather than treating it as a failure.
+                backoff = INITIAL_BACKOFF;
+                tokio::select! {
+                    _ = tokio::time::sleep(GROW_RECONNECT_DELAY) => {}
+                    _ = shutdown.changed() => {
+                        if *shutdown.borrow() {
+                            break;
+                        }
+                    }
+                }
+            }
             SessionOutcome::Ended => {
                 // A connection that lasted long enough is "stable": reset backoff.
                 if started.elapsed() >= STABLE_THRESHOLD {
@@ -163,15 +236,28 @@ async fn run(
     log::info!("herdr event kernel: stopped");
 }
 
-/// One subscription session: connect, subscribe, resync, then read pushed events
-/// until EOF / error / shutdown.
+/// One subscription session: enumerate panes, connect, subscribe, await the ack,
+/// resync, then read pushed events until EOF / error / shutdown / a `pane.created`
+/// widening.
 async fn run_session(
     api_socket: &Path,
     panes: &Arc<HerdrPaneRegistry>,
     control: &Arc<HerdrControl>,
+    last_status: &StatusTable,
     bus: &EventBus,
     shutdown: &mut watch::Receiver<bool>,
 ) -> SessionOutcome {
+    // 1. Enumerate the current panes BEFORE connecting: the subscription set is
+    //    fixed at connect time and `pane.agent_status_changed` is per-pane.
+    let pane_ids = match enumerate_pane_ids(Arc::clone(control)).await {
+        Ok(ids) => ids,
+        Err(e) => {
+            log::info!("herdr event kernel: pane enumeration failed: {e:#}");
+            return SessionOutcome::Ended;
+        }
+    };
+
+    // 2. Connect the long-lived subscription socket.
     let stream = match UnixStream::connect(api_socket).await {
         Ok(s) => s,
         Err(e) => {
@@ -184,7 +270,8 @@ async fn run_session(
     };
     let (read_half, mut write_half) = stream.into_split();
 
-    let line = match subscribe_request_line() {
+    // 3. Build and send the single subscribe request.
+    let line = match subscribe_request_line(&pane_ids) {
         Ok(l) => l,
         Err(e) => {
             log::error!("herdr event kernel: could not build subscribe request: {e:#}");
@@ -195,14 +282,59 @@ async fn run_session(
         log::info!("herdr event kernel: subscribe write failed: {e}");
         return SessionOutcome::Ended;
     }
-    log::info!("herdr event kernel: subscribed to {SUBSCRIBE_EVENT_TYPE}");
-
-    // Lossy subscription: re-observe current state on every (re)connect.
-    let resynced = resync(Arc::clone(control), Arc::clone(panes), bus.clone()).await;
-    log::info!("herdr event kernel: resync emitted {resynced} synthetic event(s)");
 
     let mut reader = BufReader::new(read_half);
     let mut buf = String::new();
+
+    // 4. Wait for the `subscription_started` ack before doing anything else.
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => {
+                if *shutdown.borrow() {
+                    return SessionOutcome::Shutdown;
+                }
+            }
+            read = read_event_line(&mut reader, &mut buf) => {
+                match read {
+                    Ok(0) => {
+                        log::info!("herdr event kernel: stream closed before subscribe ack");
+                        return SessionOutcome::Ended;
+                    }
+                    Ok(_) => {
+                        let l = buf.trim_end();
+                        if is_subscription_ack(l) {
+                            log::info!(
+                                "herdr event kernel: subscribed ({} pane subscription(s) + pane.created/closed)",
+                                pane_ids.len()
+                            );
+                            break;
+                        }
+                        if let Some(err) = subscribe_error(l) {
+                            log::warn!("herdr event kernel: subscribe rejected: {err}");
+                            return SessionOutcome::Ended;
+                        }
+                        log::trace!("herdr event kernel: ignoring pre-ack line");
+                    }
+                    Err(e) => {
+                        log::info!("herdr event kernel: read error before ack: {e}");
+                        return SessionOutcome::Ended;
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Lossy subscription: re-observe current state (deduped) on every (re)connect.
+    let resynced = resync(
+        Arc::clone(control),
+        Arc::clone(panes),
+        Arc::clone(last_status),
+        bus.clone(),
+    )
+    .await;
+    log::info!("herdr event kernel: resync emitted {resynced} synthetic event(s)");
+
+    // 6. Read pushed events until EOF / error / shutdown / a widening reconnect.
     loop {
         tokio::select! {
             _ = shutdown.changed() => {
@@ -216,18 +348,31 @@ async fn run_session(
                         log::info!("herdr event kernel: subscription stream closed (EOF)");
                         return SessionOutcome::Ended;
                     }
-                    Ok(_) => {
-                        if let Some(ev) = parse_pushed_event(buf.trim_end(), panes) {
+                    Ok(_) => match classify_pushed(buf.trim_end(), panes) {
+                        Pushed::AgentStatus(ev) => {
+                            lock(last_status).insert(ev.pane, ev.status);
                             log::debug!(
                                 "herdr event kernel: {:?} pane={} ws={}",
                                 ev.status,
                                 ev.pane,
                                 ev.workspace_id
                             );
-                            // No receivers yet (task 05 is the first consumer) is fine.
+                            // No receivers yet is fine (broadcast → recoverable Err).
                             let _ = bus.send(MuxEvent::AgentStatusChanged(ev));
                         }
-                    }
+                        Pushed::PaneCreated => {
+                            log::info!(
+                                "herdr event kernel: pane created — reconnecting to widen subscription set"
+                            );
+                            return SessionOutcome::Grow;
+                        }
+                        Pushed::PaneGone(id) => {
+                            // A dead subscription is harmless; just drop tracking so
+                            // a future pane reusing the id does not inherit its status.
+                            lock(last_status).remove(&id);
+                        }
+                        Pushed::Ignored => {}
+                    },
                     Err(e) => {
                         log::info!("herdr event kernel: read error: {e}");
                         return SessionOutcome::Ended;
@@ -238,15 +383,47 @@ async fn run_session(
     }
 }
 
+/// Enumerate the herdr `pane_id`s of every pane across all workspaces, on the
+/// blocking pool (connection-per-request control transport).
+async fn enumerate_pane_ids(control: Arc<HerdrControl>) -> Result<Vec<String>> {
+    tokio::task::spawn_blocking(move || collect_pane_ids(&control))
+        .await
+        .context("herdr pane enumeration task panicked")?
+}
+
+/// Blocking helper: list every workspace's panes and collect their herdr `pane_id`s.
+fn collect_pane_ids(control: &HerdrControl) -> Result<Vec<String>> {
+    let workspaces = control
+        .list_workspaces()
+        .context("enumerate: workspace.list")?;
+    let mut ids = Vec::new();
+    for ws in &workspaces {
+        let ws_panes = control
+            .list_panes(&ws.workspace_id)
+            .with_context(|| format!("enumerate: pane.list for {}", ws.workspace_id))?;
+        for pane in ws_panes {
+            ids.push(pane.pane_id);
+        }
+    }
+    Ok(ids)
+}
+
 /// Re-observe current pane agent states after a (re)connect and publish synthetic
-/// `Blocked`/`Done` events. Returns the number of synthetic events emitted.
+/// `Blocked`/`Done` events (deduped against the last-known status table). Returns
+/// the number of synthetic events emitted.
 ///
 /// Runs the blocking `HerdrControl` list calls on the blocking pool (they use the
 /// synchronous connection-per-request transport, per the `spawn_blocking`
 /// discipline for short herdr calls).
-async fn resync(control: Arc<HerdrControl>, panes: Arc<HerdrPaneRegistry>, bus: EventBus) -> usize {
+async fn resync(
+    control: Arc<HerdrControl>,
+    panes: Arc<HerdrPaneRegistry>,
+    last_status: StatusTable,
+    bus: EventBus,
+) -> usize {
     let collected =
-        tokio::task::spawn_blocking(move || collect_resync_events(&control, &panes)).await;
+        tokio::task::spawn_blocking(move || collect_resync_events(&control, &panes, &last_status))
+            .await;
     match collected {
         Ok(Ok(events)) => {
             let n = events.len();
@@ -267,96 +444,188 @@ async fn resync(control: Arc<HerdrControl>, panes: Arc<HerdrPaneRegistry>, bus: 
 }
 
 /// Blocking helper: list every workspace's panes and build synthetic events for
-/// those currently `Blocked`/`Done`. `list_panes` carries each pane's real
-/// `terminal_id`, so `assign_or_get` here refreshes the registry correctly.
+/// those currently `Blocked`/`Done` whose status *changed* since last observed.
+/// `list_panes` carries each pane's real `terminal_id`, so `assign_or_get` here
+/// refreshes the registry correctly.
 fn collect_resync_events(
     control: &HerdrControl,
     panes: &HerdrPaneRegistry,
+    last_status: &Mutex<HashMap<u32, AgentStatus>>,
 ) -> Result<Vec<AgentStatusChanged>> {
     let workspaces = control
         .list_workspaces()
         .context("resync: workspace.list")?;
-    let mut events = Vec::new();
+    let mut input = Vec::new();
     for ws in &workspaces {
         let ws_panes = control
             .list_panes(&ws.workspace_id)
             .with_context(|| format!("resync: pane.list for {}", ws.workspace_id))?;
         for pane in ws_panes {
-            if matches!(
-                pane.agent_status,
-                HerdrAgentStatus::Blocked | HerdrAgentStatus::Done
-            ) {
-                let id = panes.assign_or_get(&pane.pane_id, &pane.terminal_id);
-                events.push(AgentStatusChanged {
-                    pane: id,
-                    workspace_id: ws.workspace_id.clone(),
-                    workspace_name: Some(ws.label.clone()),
-                    status: map_status(pane.agent_status),
-                    title: pane.title.clone(),
-                    synthetic: true,
-                });
-            }
+            input.push(ResyncPane {
+                herdr_pane_id: pane.pane_id,
+                terminal_id: pane.terminal_id,
+                workspace_id: ws.workspace_id.clone(),
+                workspace_label: ws.label.clone(),
+                title: pane.title,
+                status: pane.agent_status,
+            });
         }
     }
-    Ok(events)
+    let mut table = lock(last_status);
+    Ok(build_resync_events(&input, panes, &mut table))
+}
+
+/// One pane's state as gathered by the resync enumeration. Neutral of transport so
+/// [`build_resync_events`] is a pure, fixture-testable function.
+struct ResyncPane {
+    herdr_pane_id: String,
+    terminal_id: String,
+    workspace_id: String,
+    workspace_label: String,
+    title: Option<String>,
+    status: HerdrAgentStatus,
+}
+
+/// Pure dedup core: register each pane, update the last-known status table, and
+/// emit a synthetic event only for a `Blocked`/`Done` pane whose status *changed*.
+/// Panes absent from `input` are pruned from `last_status`.
+fn build_resync_events(
+    input: &[ResyncPane],
+    reg: &HerdrPaneRegistry,
+    last_status: &mut HashMap<u32, AgentStatus>,
+) -> Vec<AgentStatusChanged> {
+    let mut live: HashSet<u32> = HashSet::with_capacity(input.len());
+    let mut events = Vec::new();
+    for p in input {
+        let id = reg.assign_or_get(&p.herdr_pane_id, &p.terminal_id);
+        live.insert(id);
+        let status = map_status(p.status);
+        let changed = last_status.get(&id) != Some(&status);
+        last_status.insert(id, status);
+        if changed && matches!(status, AgentStatus::Blocked | AgentStatus::Done) {
+            events.push(AgentStatusChanged {
+                pane: id,
+                workspace_id: p.workspace_id.clone(),
+                workspace_name: Some(p.workspace_label.clone()),
+                status,
+                title: p.title.clone(),
+                synthetic: true,
+            });
+        }
+    }
+    last_status.retain(|id, _| live.contains(id));
+    events
 }
 
 // ── Parsing ─────────────────────────────────────────────────────────────────────
 
-/// A pushed `pane_agent_status_changed` event. Defensive: unknown fields are
-/// ignored (no `deny_unknown_fields`) and every non-required field is optional so
-/// a herdr schema drift degrades to "some fields missing", never a hard failure.
-#[derive(Debug, Deserialize)]
-struct RawPushedEvent {
-    pane_id: String,
-    #[serde(default)]
-    terminal_id: Option<String>,
-    workspace_id: String,
-    #[serde(default)]
-    workspace_name: Option<String>,
-    agent_status: HerdrAgentStatus,
-    #[serde(default)]
-    title: Option<String>,
+/// A classified pushed line.
+enum Pushed {
+    /// A live `pane.agent_status_changed` transition, ready to publish.
+    AgentStatus(AgentStatusChanged),
+    /// A `pane_created` push — the subscription set must be widened via reconnect.
+    PaneCreated,
+    /// A `pane_closed` / `pane_exited` push for a pane we track (neutral id).
+    PaneGone(u32),
+    /// Anything not consumed (ack, unknown event, malformed, unknown pane) — ignored.
+    Ignored,
 }
 
-/// Parse one newline-stripped stream line into a neutral [`AgentStatusChanged`],
-/// or `None` for anything that is not a pushed agent-status event (the subscribe
-/// ack, the dot-form request schema, unknown event types, or malformed lines) —
-/// all ignored without error.
-fn parse_pushed_event(line: &str, panes: &HerdrPaneRegistry) -> Option<AgentStatusChanged> {
+/// Classify one newline-stripped stream line. The event name is matched
+/// tolerantly: dot and underscore forms of a given event are treated alike
+/// (herdr pushes `pane.agent_status_changed` with a dot but `pane_created` with an
+/// underscore). Unknown events, response envelopes, and malformed lines are ignored.
+fn classify_pushed(line: &str, panes: &HerdrPaneRegistry) -> Pushed {
     if line.is_empty() {
-        return None;
+        return Pushed::Ignored;
     }
-    let value: serde_json::Value = match serde_json::from_str(line) {
+    let value: Value = match serde_json::from_str(line) {
         Ok(v) => v,
         Err(_) => {
             log::trace!("herdr event kernel: ignoring non-JSON line");
-            return None;
+            return Pushed::Ignored;
         }
     };
-    let ty = value.get("type").and_then(serde_json::Value::as_str)?;
-    if ty != PUSHED_EVENT_TYPE {
-        // Subscribe ack, dot-form `pane.agent_status_changed`, or an event family
-        // we do not consume — silently ignored.
-        log::trace!("herdr event kernel: ignoring line of type {ty}");
-        return None;
+    // Pushed events carry a top-level `event`; a response envelope (ack/error) does
+    // not, so it falls through to Ignored here.
+    let Some(event) = value.get("event").and_then(Value::as_str) else {
+        return Pushed::Ignored;
+    };
+    let canonical = event.replace('.', "_");
+    let data = value.get("data");
+    match canonical.as_str() {
+        "pane_agent_status_changed" => parse_agent_status(data, panes),
+        "pane_created" => Pushed::PaneCreated,
+        "pane_closed" | "pane_exited" => parse_pane_gone(data, panes),
+        other => {
+            log::trace!("herdr event kernel: ignoring event {other}");
+            Pushed::Ignored
+        }
     }
-    let raw: RawPushedEvent = match serde_json::from_value(value) {
-        Ok(r) => r,
-        Err(e) => {
-            log::debug!("herdr event kernel: malformed {PUSHED_EVENT_TYPE} event ignored: {e}");
-            return None;
-        }
+}
+
+/// Parse a `pane.agent_status_changed` payload (`data`) into a neutral event. The
+/// push omits `terminal_id`, `workspace_name`, and `title`, so those stay `None`.
+fn parse_agent_status(data: Option<&Value>, panes: &HerdrPaneRegistry) -> Pushed {
+    let Some(data) = data else {
+        return Pushed::Ignored;
     };
-    let pane = translate_pane(panes, &raw.pane_id, raw.terminal_id.as_deref());
-    Some(AgentStatusChanged {
+    let (Some(pane_id), Some(workspace_id), Some(status)) = (
+        data.get("pane_id").and_then(Value::as_str),
+        data.get("workspace_id").and_then(Value::as_str),
+        data.get("agent_status")
+            .and_then(|v| serde_json::from_value::<HerdrAgentStatus>(v.clone()).ok()),
+    ) else {
+        log::debug!("herdr event kernel: malformed agent-status event ignored");
+        return Pushed::Ignored;
+    };
+    // A pushed event never carries terminal_id → never clobber a live attach key.
+    let pane = translate_pane(panes, pane_id, None);
+    Pushed::AgentStatus(AgentStatusChanged {
         pane,
-        workspace_id: raw.workspace_id,
-        workspace_name: raw.workspace_name,
-        status: map_status(raw.agent_status),
-        title: raw.title,
+        workspace_id: workspace_id.to_string(),
+        workspace_name: None,
+        status: map_status(status),
+        title: None,
         synthetic: false,
     })
+}
+
+/// Parse a `pane_closed` / `pane_exited` payload for the herdr `pane_id` (either
+/// top-level in `data` or nested under `data.pane.pane_id`) and resolve it to a
+/// tracked neutral id. A pane we never registered is [`Pushed::Ignored`].
+fn parse_pane_gone(data: Option<&Value>, panes: &HerdrPaneRegistry) -> Pushed {
+    let Some(data) = data else {
+        return Pushed::Ignored;
+    };
+    let herdr_pane_id = data.get("pane_id").and_then(Value::as_str).or_else(|| {
+        data.get("pane")
+            .and_then(|p| p.get("pane_id"))
+            .and_then(Value::as_str)
+    });
+    match herdr_pane_id.and_then(|pid| panes.id_for_herdr_pane(pid)) {
+        Some(id) => Pushed::PaneGone(id),
+        None => Pushed::Ignored,
+    }
+}
+
+/// Is this line the `{"result":{"type":"subscription_started"}}` ack?
+fn is_subscription_ack(line: &str) -> bool {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| {
+            v.get("result")
+                .and_then(|r| r.get("type"))
+                .and_then(Value::as_str)
+                .map(|t| t == "subscription_started")
+        })
+        .unwrap_or(false)
+}
+
+/// Extract a herdr error body from a response envelope line, if present.
+fn subscribe_error(line: &str) -> Option<String> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    v.get("error").map(ToString::to_string)
 }
 
 /// Translate a herdr `pane_id` to a neutral `u32` **without clobbering** an
@@ -390,12 +659,23 @@ fn map_status(status: HerdrAgentStatus) -> AgentStatus {
     }
 }
 
-/// Build the `events.subscribe` request line (JSON + trailing newline) that
-/// subscribes to `pane.agent_status_changed` (dot form in the request).
-fn subscribe_request_line() -> Result<String> {
-    let params = serde_json::json!({
-        "events": [ { "type": SUBSCRIBE_EVENT_TYPE } ],
-    });
+/// Build the `events.subscribe` request line (JSON + trailing newline).
+///
+/// The set is fixed at connect time and carried in a single `subscriptions` array:
+/// one per-pane `pane.agent_status_changed` entry (each with its `pane_id`) plus
+/// bare `pane.created` / `pane.closed` entries.
+fn subscribe_request_line(pane_ids: &[String]) -> Result<String> {
+    let mut subscriptions: Vec<Value> = Vec::with_capacity(pane_ids.len() + 2);
+    for pane_id in pane_ids {
+        subscriptions.push(serde_json::json!({
+            "type": SUBSCRIBE_AGENT_STATUS_TYPE,
+            "pane_id": pane_id,
+        }));
+    }
+    subscriptions.push(serde_json::json!({ "type": SUBSCRIBE_PANE_CREATED_TYPE }));
+    subscriptions.push(serde_json::json!({ "type": SUBSCRIBE_PANE_CLOSED_TYPE }));
+
+    let params = serde_json::json!({ "subscriptions": subscriptions });
     let req = ApiRequest::new("muxrd-events-subscribe", "events.subscribe", params);
     let mut line = serde_json::to_string(&req).context("serialize events.subscribe request")?;
     line.push('\n');
@@ -405,6 +685,12 @@ fn subscribe_request_line() -> Result<String> {
 /// Next backoff: double, capped at [`MAX_BACKOFF`].
 fn next_backoff(prev: Duration) -> Duration {
     (prev * 2).min(MAX_BACKOFF)
+}
+
+/// Lock a mutex, recovering the guard if a previous holder panicked. The table
+/// holds only a plain map, so a poisoned lock leaves consistent data.
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 // ── Bounded line reader ──────────────────────────────────────────────────────────
@@ -461,140 +747,196 @@ where
 mod tests {
     use super::*;
 
-    // ── pushed-event parsing (acceptance 2a/2b) ──────────────────────────────
+    // ── pushed-event parsing (live `{"event","data"}` envelope) ──────────────
 
     #[test]
-    fn parses_full_underscore_event() {
+    fn parses_agent_status_dot_envelope() {
         let panes = HerdrPaneRegistry::new();
         let line = r#"{
-            "type": "pane_agent_status_changed",
-            "pane_id": "pane-abc",
-            "terminal_id": "term-xyz",
-            "workspace_id": "ws-1",
-            "workspace_name": "main",
-            "agent_status": "blocked",
-            "title": "claude"
+            "event": "pane.agent_status_changed",
+            "data": {
+                "agent": "claude",
+                "agent_status": "blocked",
+                "pane_id": "w1:p1",
+                "workspace_id": "w1"
+            }
         }"#;
-        let ev = parse_pushed_event(line, &panes).expect("a full event must parse");
-        assert_eq!(ev.status, AgentStatus::Blocked);
-        assert_eq!(ev.workspace_id, "ws-1");
-        assert_eq!(ev.workspace_name.as_deref(), Some("main"));
-        assert_eq!(ev.title.as_deref(), Some("claude"));
-        assert!(!ev.synthetic, "a pushed event is never synthetic");
-        // pane id was registered and round-trips to the herdr id + terminal id.
-        assert_eq!(panes.herdr_pane_id(ev.pane).as_deref(), Some("pane-abc"));
-        assert_eq!(panes.terminal_id(ev.pane).as_deref(), Some("term-xyz"));
+        match classify_pushed(line, &panes) {
+            Pushed::AgentStatus(ev) => {
+                assert_eq!(ev.status, AgentStatus::Blocked);
+                assert_eq!(ev.workspace_id, "w1");
+                // The push carries no name/title/terminal_id.
+                assert!(ev.workspace_name.is_none());
+                assert!(ev.title.is_none());
+                assert!(!ev.synthetic, "a pushed event is never synthetic");
+                assert_eq!(panes.herdr_pane_id(ev.pane).as_deref(), Some("w1:p1"));
+            }
+            _ => panic!("expected an agent-status event"),
+        }
     }
 
     #[test]
-    fn parses_minimal_underscore_event_without_optional_fields() {
+    fn parses_agent_status_underscore_event_name_too() {
+        // Tolerant name parsing: the underscore form must classify identically.
         let panes = HerdrPaneRegistry::new();
         let line = r#"{
-            "type": "pane_agent_status_changed",
-            "pane_id": "pane-1",
-            "workspace_id": "ws-9",
-            "agent_status": "done"
+            "event": "pane_agent_status_changed",
+            "data": { "agent_status": "done", "pane_id": "w9:p3", "workspace_id": "w9" }
         }"#;
-        let ev = parse_pushed_event(line, &panes).expect("required-only event must parse");
-        assert_eq!(ev.status, AgentStatus::Done);
-        assert_eq!(ev.workspace_id, "ws-9");
-        assert!(ev.workspace_name.is_none());
-        assert!(ev.title.is_none());
-        assert!(ev.pane >= 1, "a neutral id was assigned");
+        match classify_pushed(line, &panes) {
+            Pushed::AgentStatus(ev) => {
+                assert_eq!(ev.status, AgentStatus::Done);
+                assert_eq!(ev.workspace_id, "w9");
+            }
+            _ => panic!("expected an agent-status event"),
+        }
     }
 
     #[test]
-    fn tolerates_unknown_extra_fields() {
+    fn tolerates_unknown_extra_data_fields() {
         let panes = HerdrPaneRegistry::new();
         let line = r#"{
-            "type": "pane_agent_status_changed",
-            "pane_id": "p",
-            "workspace_id": "w",
-            "agent_status": "working",
-            "display_agent": "claude-code",
-            "custom_status": "thinking",
-            "state_labels": {"k":"v"},
-            "future_field": 42
+            "event": "pane.agent_status_changed",
+            "data": {
+                "agent_status": "working",
+                "pane_id": "w1:p1",
+                "workspace_id": "w1",
+                "display_agent": "claude-code",
+                "custom_status": "thinking",
+                "future_field": 42
+            }
         }"#;
-        let ev = parse_pushed_event(line, &panes).expect("unknown fields must be ignored");
-        assert_eq!(ev.status, AgentStatus::Working);
+        match classify_pushed(line, &panes) {
+            Pushed::AgentStatus(ev) => assert_eq!(ev.status, AgentStatus::Working),
+            _ => panic!("unknown fields must be ignored, not fail the parse"),
+        }
     }
 
-    // ── ignored lines (acceptance 2b) ────────────────────────────────────────
+    #[test]
+    fn classifies_pane_created_underscore_form() {
+        let panes = HerdrPaneRegistry::new();
+        // herdr pushes pane_created with the full pane object under data.pane.
+        let line = r#"{
+            "event": "pane_created",
+            "data": { "pane": { "pane_id": "w1:p2", "terminal_id": "t2", "workspace_id": "w1" } }
+        }"#;
+        assert!(matches!(classify_pushed(line, &panes), Pushed::PaneCreated));
+    }
 
     #[test]
-    fn ignores_dot_form_request_schema() {
+    fn classifies_pane_created_dot_form_too() {
         let panes = HerdrPaneRegistry::new();
-        // The dot form is the *request* type — it must NEVER be treated as a
-        // pushed event.
-        let line = r#"{"type":"pane.agent_status_changed","pane_id":"p","agent_status":"blocked"}"#;
-        assert!(parse_pushed_event(line, &panes).is_none());
+        let line = r#"{"event":"pane.created","data":{}}"#;
+        assert!(matches!(classify_pushed(line, &panes), Pushed::PaneCreated));
+    }
+
+    #[test]
+    fn classifies_pane_closed_to_tracked_neutral_id() {
+        let panes = HerdrPaneRegistry::new();
+        let id = panes.assign_or_get("w1:p1", "t1");
+        let line = r#"{"event":"pane.closed","data":{"pane_id":"w1:p1"}}"#;
+        match classify_pushed(line, &panes) {
+            Pushed::PaneGone(gone) => assert_eq!(gone, id),
+            _ => panic!("expected PaneGone"),
+        }
+    }
+
+    #[test]
+    fn classifies_pane_exited_nested_pane_id() {
+        let panes = HerdrPaneRegistry::new();
+        let id = panes.assign_or_get("w1:p5", "t5");
+        let line = r#"{"event":"pane_exited","data":{"pane":{"pane_id":"w1:p5"}}}"#;
+        match classify_pushed(line, &panes) {
+            Pushed::PaneGone(gone) => assert_eq!(gone, id),
+            _ => panic!("expected PaneGone"),
+        }
+    }
+
+    #[test]
+    fn pane_closed_for_untracked_pane_is_ignored() {
+        let panes = HerdrPaneRegistry::new();
+        let line = r#"{"event":"pane.closed","data":{"pane_id":"never-seen"}}"#;
+        assert!(matches!(classify_pushed(line, &panes), Pushed::Ignored));
+    }
+
+    // ── ignored lines ────────────────────────────────────────────────────────
+
+    #[test]
+    fn subscription_ack_is_recognised_and_not_a_pushed_event() {
+        let ack = r#"{"id":"muxrd-events-subscribe","result":{"type":"subscription_started"}}"#;
+        assert!(is_subscription_ack(ack));
+        // The ack has no top-level "event", so classify ignores it.
+        let panes = HerdrPaneRegistry::new();
+        assert!(matches!(classify_pushed(ack, &panes), Pushed::Ignored));
+    }
+
+    #[test]
+    fn non_ack_response_is_not_an_ack() {
+        assert!(!is_subscription_ack(r#"{"id":"x","result":{"type":"ok"}}"#));
+        assert!(!is_subscription_ack(r#"{"id":"x","error":{"code":"bad"}}"#));
+        assert!(!is_subscription_ack("not json"));
+    }
+
+    #[test]
+    fn subscribe_error_extracts_error_body() {
+        let line = r#"{"id":"x","error":{"code":"invalid_request","message":"missing field 'subscriptions'"}}"#;
+        let err = subscribe_error(line).expect("error present");
+        assert!(err.contains("invalid_request"));
+        assert!(subscribe_error(r#"{"id":"x","result":{"type":"ok"}}"#).is_none());
     }
 
     #[test]
     fn ignores_unknown_event_type() {
         let panes = HerdrPaneRegistry::new();
-        let line = r#"{"type":"workspace_focused","workspace_id":"ws-1"}"#;
-        assert!(parse_pushed_event(line, &panes).is_none());
-    }
-
-    #[test]
-    fn ignores_subscribe_ack_and_error_responses() {
-        let panes = HerdrPaneRegistry::new();
-        // A JSON-API response envelope (no top-level "type") — e.g. the subscribe ack.
-        assert!(
-            parse_pushed_event(
-                r#"{"id":"muxrd-events-subscribe","result":{"type":"ok"}}"#,
-                &panes
-            )
-            .is_none()
-        );
-        assert!(
-            parse_pushed_event(
-                r#"{"id":"x","error":{"code":"bad","message":"no"}}"#,
-                &panes
-            )
-            .is_none()
-        );
+        let line = r#"{"event":"workspace.focused","data":{"workspace_id":"w1"}}"#;
+        assert!(matches!(classify_pushed(line, &panes), Pushed::Ignored));
     }
 
     #[test]
     fn ignores_malformed_and_empty_lines() {
         let panes = HerdrPaneRegistry::new();
-        assert!(parse_pushed_event("", &panes).is_none());
-        assert!(parse_pushed_event("not json at all", &panes).is_none());
-        assert!(parse_pushed_event("{ broken", &panes).is_none());
-        // Right type but missing a required field (workspace_id) → ignored.
-        assert!(
-            parse_pushed_event(
-                r#"{"type":"pane_agent_status_changed","pane_id":"p","agent_status":"idle"}"#,
+        assert!(matches!(classify_pushed("", &panes), Pushed::Ignored));
+        assert!(matches!(
+            classify_pushed("not json at all", &panes),
+            Pushed::Ignored
+        ));
+        assert!(matches!(
+            classify_pushed("{ broken", &panes),
+            Pushed::Ignored
+        ));
+        // Right event, but missing a required data field (workspace_id) → ignored.
+        assert!(matches!(
+            classify_pushed(
+                r#"{"event":"pane.agent_status_changed","data":{"pane_id":"p","agent_status":"idle"}}"#,
                 &panes
-            )
-            .is_none()
-        );
+            ),
+            Pushed::Ignored
+        ));
     }
 
     // ── non-clobbering pane translation (the terminal_id-safety fix) ──────────
 
     #[test]
-    fn translate_does_not_clobber_existing_terminal_id() {
+    fn push_does_not_clobber_existing_terminal_id() {
         let panes = HerdrPaneRegistry::new();
         // A layout poll registered this pane with its real terminal_id.
-        let id = panes.assign_or_get("pane-x", "term-real");
+        let id = panes.assign_or_get("w1:p1", "term-real");
         // A pushed event for the same pane arrives WITHOUT a terminal_id.
         let line = r#"{
-            "type": "pane_agent_status_changed",
-            "pane_id": "pane-x",
-            "workspace_id": "ws-1",
-            "agent_status": "blocked"
+            "event": "pane.agent_status_changed",
+            "data": { "pane_id": "w1:p1", "workspace_id": "w1", "agent_status": "blocked" }
         }"#;
-        let ev = parse_pushed_event(line, &panes).expect("event must parse");
-        assert_eq!(ev.pane, id, "same pane must resolve to the same neutral id");
-        assert_eq!(
-            panes.terminal_id(id).as_deref(),
-            Some("term-real"),
-            "the live relay terminal_id must NOT be clobbered by the event"
-        );
+        match classify_pushed(line, &panes) {
+            Pushed::AgentStatus(ev) => {
+                assert_eq!(ev.pane, id, "same pane must resolve to the same neutral id");
+                assert_eq!(
+                    panes.terminal_id(id).as_deref(),
+                    Some("term-real"),
+                    "the live relay terminal_id must NOT be clobbered by the event"
+                );
+            }
+            _ => panic!("expected an agent-status event"),
+        }
     }
 
     #[test]
@@ -618,20 +960,140 @@ mod tests {
         assert_eq!(map_status(HerdrAgentStatus::Unknown), AgentStatus::Unknown);
     }
 
-    // ── subscribe request shape ──────────────────────────────────────────────
+    // ── subscribe request shape (live `subscriptions` schema) ─────────────────
 
     #[test]
-    fn subscribe_request_targets_events_subscribe_with_dot_type() {
-        let line = subscribe_request_line().expect("build subscribe line");
+    fn subscribe_request_uses_subscriptions_array_with_per_pane_entries() {
+        let pane_ids = vec!["w1:p1".to_string(), "w1:p2".to_string()];
+        let line = subscribe_request_line(&pane_ids).expect("build subscribe line");
         assert!(line.ends_with('\n'), "request must be newline-terminated");
-        let value: serde_json::Value =
+        let value: Value =
             serde_json::from_str(line.trim_end()).expect("subscribe line is valid JSON");
         assert_eq!(value["method"], "events.subscribe");
-        assert_eq!(value["params"]["events"][0]["type"], SUBSCRIBE_EVENT_TYPE);
-        assert_eq!(SUBSCRIBE_EVENT_TYPE, "pane.agent_status_changed");
+
+        let subs = value["params"]["subscriptions"]
+            .as_array()
+            .expect("params.subscriptions must be an array");
+        // Two per-pane agent-status entries + pane.created + pane.closed.
+        assert_eq!(subs.len(), 4);
+        assert_eq!(subs[0]["type"], SUBSCRIBE_AGENT_STATUS_TYPE);
+        assert_eq!(subs[0]["pane_id"], "w1:p1");
+        assert_eq!(subs[1]["type"], SUBSCRIBE_AGENT_STATUS_TYPE);
+        assert_eq!(subs[1]["pane_id"], "w1:p2");
+        assert_eq!(subs[2]["type"], SUBSCRIBE_PANE_CREATED_TYPE);
+        assert!(subs[2].get("pane_id").is_none(), "pane.created is bare");
+        assert_eq!(subs[3]["type"], SUBSCRIBE_PANE_CLOSED_TYPE);
+        assert_eq!(SUBSCRIBE_AGENT_STATUS_TYPE, "pane.agent_status_changed");
     }
 
-    // ── backoff math (acceptance 2c) ─────────────────────────────────────────
+    #[test]
+    fn subscribe_request_with_no_panes_still_subscribes_to_lifecycle() {
+        let line = subscribe_request_line(&[]).expect("build subscribe line");
+        let value: Value = serde_json::from_str(line.trim_end()).expect("valid JSON");
+        let subs = value["params"]["subscriptions"].as_array().unwrap();
+        assert_eq!(subs.len(), 2, "just pane.created + pane.closed");
+        assert_eq!(subs[0]["type"], SUBSCRIBE_PANE_CREATED_TYPE);
+        assert_eq!(subs[1]["type"], SUBSCRIBE_PANE_CLOSED_TYPE);
+    }
+
+    // ── synthetic resend suppression (dedup) ─────────────────────────────────
+
+    fn resync_pane(pane_id: &str, status: HerdrAgentStatus) -> ResyncPane {
+        ResyncPane {
+            herdr_pane_id: pane_id.to_string(),
+            terminal_id: format!("term-{pane_id}"),
+            workspace_id: "w1".to_string(),
+            workspace_label: "main".to_string(),
+            title: None,
+            status,
+        }
+    }
+
+    #[test]
+    fn fresh_start_emits_each_blocked_pane_once() {
+        let reg = HerdrPaneRegistry::new();
+        let mut last = HashMap::new();
+        let input = vec![
+            resync_pane("w1:p1", HerdrAgentStatus::Blocked),
+            resync_pane("w1:p2", HerdrAgentStatus::Done),
+            resync_pane("w1:p3", HerdrAgentStatus::Idle),
+        ];
+        let events = build_resync_events(&input, &reg, &mut last);
+        assert_eq!(events.len(), 2, "only blocked + done emit");
+        assert!(events.iter().all(|e| e.synthetic));
+        // Second resync with identical state emits nothing.
+        let again = build_resync_events(&input, &reg, &mut last);
+        assert!(again.is_empty(), "unchanged state must not re-emit");
+    }
+
+    #[test]
+    fn changed_status_re_emits_but_unchanged_does_not() {
+        let reg = HerdrPaneRegistry::new();
+        let mut last = HashMap::new();
+        // First observation: blocked → emitted.
+        let first = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Blocked)],
+            &reg,
+            &mut last,
+        );
+        assert_eq!(first.len(), 1);
+        // Goes idle (no emit — not blocked/done — but last-known updates).
+        let idle = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Idle)],
+            &reg,
+            &mut last,
+        );
+        assert!(idle.is_empty());
+        // Blocked again — a genuine change from idle → re-emit.
+        let reblocked = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Blocked)],
+            &reg,
+            &mut last,
+        );
+        assert_eq!(reblocked.len(), 1, "idle→blocked is a real transition");
+    }
+
+    #[test]
+    fn a_live_push_suppresses_the_next_resync_for_the_same_status() {
+        let reg = HerdrPaneRegistry::new();
+        let mut last = HashMap::new();
+        // Simulate the push path having recorded this pane as blocked.
+        let id = reg.assign_or_get("w1:p1", "t1");
+        last.insert(id, AgentStatus::Blocked);
+        // A resync observing the same blocked status must not re-ping.
+        let events = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Blocked)],
+            &reg,
+            &mut last,
+        );
+        assert!(events.is_empty(), "push already reported this block");
+    }
+
+    #[test]
+    fn disappeared_panes_are_pruned_from_tracking() {
+        let reg = HerdrPaneRegistry::new();
+        let mut last = HashMap::new();
+        build_resync_events(
+            &[
+                resync_pane("w1:p1", HerdrAgentStatus::Blocked),
+                resync_pane("w1:p2", HerdrAgentStatus::Blocked),
+            ],
+            &reg,
+            &mut last,
+        );
+        assert_eq!(last.len(), 2);
+        // p2 vanished from the enumeration.
+        build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Blocked)],
+            &reg,
+            &mut last,
+        );
+        assert_eq!(last.len(), 1, "p2 tracking pruned");
+        let p1 = reg.id_for_herdr_pane("w1:p1").unwrap();
+        assert!(last.contains_key(&p1));
+    }
+
+    // ── backoff math ─────────────────────────────────────────────────────────
 
     #[test]
     fn backoff_doubles_then_caps_at_sixty() {
