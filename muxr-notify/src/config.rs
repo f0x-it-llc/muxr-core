@@ -27,8 +27,10 @@ pub struct Config {
     pub project_id: Option<String>,
     /// Per-handle notifications/day cap.
     pub daily_cap: u32,
-    /// When true, take the client IP from `X-Forwarded-For` (left-most) rather
-    /// than the socket peer address.
+    /// When true, take the client IP from the **right-most** `X-Forwarded-For`
+    /// entry (the address the single trusted fronting proxy appended) rather than
+    /// the socket peer address. See `handlers::resolve_client_ip` for the trust
+    /// model. Enable only behind a proxy that overwrites/appends XFF itself.
     pub trust_proxy: bool,
 }
 

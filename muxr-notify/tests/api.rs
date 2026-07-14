@@ -206,6 +206,41 @@ async fn delete_is_idempotent_204() {
 }
 
 #[tokio::test]
+async fn notify_per_ip_throttle_is_429() {
+    let (router, _s, _d) = app(150);
+    // Unknown handle → 404, but the per-IP request limiter is consumed *before*
+    // the store lookup. After 60 requests from the same (fallback) IP the 61st
+    // is throttled with 429 rather than reaching the store.
+    let body = r#"{"push_handle":"deadbeef","kind":"blocked"}"#;
+    for i in 0..60 {
+        assert_eq!(
+            notify(&router, body).await,
+            StatusCode::NOT_FOUND,
+            "req {i}"
+        );
+    }
+    assert_eq!(notify(&router, body).await, StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
+async fn delete_per_ip_throttle_is_429() {
+    let (router, _s, _d) = app(150);
+    let del = |h: &str| {
+        Request::builder()
+            .method("DELETE")
+            .uri(format!("/v1/registrations/{h}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+    for i in 0..60 {
+        let resp = router.clone().oneshot(del("abc")).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT, "req {i}");
+    }
+    let resp = router.clone().oneshot(del("abc")).await.unwrap();
+    assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+}
+
+#[tokio::test]
 async fn healthz_is_200() {
     let (router, _s, _d) = app(150);
     let resp = router

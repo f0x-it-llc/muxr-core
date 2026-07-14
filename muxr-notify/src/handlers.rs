@@ -56,24 +56,42 @@ impl FromRequestParts<AppState> for ClientIp {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
-        let ip = if state.config.trust_proxy {
-            parts
-                .headers
-                .get("x-forwarded-for")
-                .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.split(',').next())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-                .unwrap_or_else(|| "unknown".to_string())
-        } else {
-            parts
-                .extensions
-                .get::<ConnectInfo<SocketAddr>>()
-                .map(|ci| ci.0.ip().to_string())
-                .unwrap_or_else(|| "unknown".to_string())
-        };
-        Ok(ClientIp(ip))
+        let peer = parts
+            .extensions
+            .get::<ConnectInfo<SocketAddr>>()
+            .map(|ci| ci.0.ip().to_string());
+        let xff = parts
+            .headers
+            .get("x-forwarded-for")
+            .and_then(|v| v.to_str().ok());
+        Ok(ClientIp(resolve_client_ip(
+            state.config.trust_proxy,
+            xff,
+            peer,
+        )))
     }
+}
+
+/// Resolve the client IP used for per-IP rate-limiting.
+///
+/// When `trust_proxy` is enabled we read `X-Forwarded-For`. A conforming fronting
+/// proxy *appends* the address of the peer it accepted the connection from to any
+/// client-supplied XFF list, so the **right-most** entry is the only one it
+/// vouches for — the left-most entries are attacker-controlled and MUST be
+/// ignored (trusting them lets a client mint arbitrary IP keys and bypass the
+/// per-IP limits). Exactly **one** trusted hop is assumed. On an absent, blank,
+/// or unparseable header — or when `trust_proxy` is off — we fall back to the
+/// socket peer address, then to `"unknown"`.
+fn resolve_client_ip(trust_proxy: bool, xff: Option<&str>, peer: Option<String>) -> String {
+    let trusted = if trust_proxy {
+        xff.and_then(|s| s.split(',').next_back())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+    } else {
+        None
+    };
+    trusted.or(peer).unwrap_or_else(|| "unknown".to_string())
 }
 
 // ─── Wire types ──────────────────────────────────────────────────────────────
@@ -152,7 +170,16 @@ async fn register(
     }
 }
 
-async fn notify(State(st): State<AppState>, Json(req): Json<NotifyRequest>) -> Response {
+async fn notify(
+    State(st): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Json(req): Json<NotifyRequest>,
+) -> Response {
+    // Per-IP throttle first — before any store/mutex lookup — to bound the
+    // single-mutex DoS surface.
+    if !st.limiter.allow_request(&ip) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     let title_len = req.title.as_deref().map_or(0, |s| s.chars().count());
     let body_len = req.body.as_deref().map_or(0, |s| s.chars().count());
     if title_len > MAX_TITLE_CHARS || body_len > MAX_BODY_CHARS {
@@ -210,7 +237,15 @@ async fn notify(State(st): State<AppState>, Json(req): Json<NotifyRequest>) -> R
     }
 }
 
-async fn delete_registration(State(st): State<AppState>, Path(handle): Path<String>) -> Response {
+async fn delete_registration(
+    State(st): State<AppState>,
+    ClientIp(ip): ClientIp,
+    Path(handle): Path<String>,
+) -> Response {
+    // Per-IP throttle first — before any store/mutex lookup.
+    if !st.limiter.allow_request(&ip) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
     match st.store.delete(handle).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(e) => {
@@ -257,5 +292,43 @@ mod tests {
         assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
         assert_ne!(mint_handle(), h, "handles must be unique");
+    }
+
+    #[test]
+    fn xff_takes_rightmost_trusted_entry() {
+        // Client spoofs the left-most entries; the trusted proxy appended the
+        // real peer address on the right — that is the one we must use.
+        let ip = resolve_client_ip(
+            true,
+            Some("1.1.1.1, 2.2.2.2, 9.9.9.9"),
+            Some("10.0.0.1".to_string()),
+        );
+        assert_eq!(ip, "9.9.9.9", "spoofed left-most entries must be ignored");
+    }
+
+    #[test]
+    fn xff_single_entry_is_trimmed() {
+        let ip = resolve_client_ip(true, Some("  9.9.9.9  "), Some("10.0.0.1".to_string()));
+        assert_eq!(ip, "9.9.9.9");
+    }
+
+    #[test]
+    fn xff_ignored_when_not_trusting_proxy() {
+        let ip = resolve_client_ip(false, Some("1.1.1.1"), Some("10.0.0.1".to_string()));
+        assert_eq!(ip, "10.0.0.1", "socket peer wins when proxy is untrusted");
+    }
+
+    #[test]
+    fn xff_absent_or_blank_falls_back_to_peer() {
+        let peer = || Some("10.0.0.1".to_string());
+        assert_eq!(resolve_client_ip(true, None, peer()), "10.0.0.1");
+        assert_eq!(resolve_client_ip(true, Some(""), peer()), "10.0.0.1");
+        assert_eq!(resolve_client_ip(true, Some("   "), peer()), "10.0.0.1");
+    }
+
+    #[test]
+    fn no_peer_and_no_xff_is_unknown() {
+        assert_eq!(resolve_client_ip(true, None, None), "unknown");
+        assert_eq!(resolve_client_ip(false, Some("1.1.1.1"), None), "unknown");
     }
 }
