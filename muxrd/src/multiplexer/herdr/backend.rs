@@ -66,7 +66,6 @@ use super::control::HerdrControl;
 use super::paths::HerdrSocketPaths;
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 use super::relay;
-use super::wire::HERDR_PROTOCOL_VERSION;
 
 /// Default `(rows, cols)` reported when herdr exposes no usable layout area for a
 /// session (no panes yet, or a zero-sized area). A conventional 24×80 keeps the
@@ -556,8 +555,17 @@ impl MuxBackend for HerdrBackend {
 
     fn backend_version(&self) -> String {
         // The wire protocol version is the meaningful compat marker between muxrd
-        // and a given herdr release.
-        format!("herdr-wire-v{HERDR_PROTOCOL_VERSION}")
+        // and a given herdr release — and since muxrd negotiates it per connection
+        // rather than pinning it, the only truthful answer comes from the server.
+        // Best-effort: this is a reporting surface, so a failed probe degrades to an
+        // "unknown" marker rather than propagating an error.
+        match self.control.ping() {
+            Ok(info) => format!("herdr-{}-wire-v{}", info.version, info.protocol),
+            Err(e) => {
+                log::debug!("herdr backend_version: ping failed: {e:#}");
+                "herdr-wire-unknown".to_string()
+            }
+        }
     }
 }
 
@@ -653,13 +661,14 @@ mod tests {
         assert!(focused.is_none());
     }
 
+    /// With no reachable herdr the `ping` probe fails, so `backend_version()` must
+    /// degrade to the "unknown" marker rather than panicking or reporting a
+    /// fabricated protocol number. (The negotiated-value path needs a live server
+    /// and is covered by the `herdr_integration` smoke tests.)
     #[test]
-    fn backend_version_encodes_wire_protocol() {
+    fn backend_version_degrades_when_server_unreachable() {
         let b = backend();
-        assert_eq!(
-            b.backend_version(),
-            format!("herdr-wire-v{HERDR_PROTOCOL_VERSION}")
-        );
+        assert_eq!(b.backend_version(), "herdr-wire-unknown");
     }
 
     // ── validate_session_name keeps the strict security guard ─────────────────

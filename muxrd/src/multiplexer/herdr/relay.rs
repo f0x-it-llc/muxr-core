@@ -87,8 +87,8 @@ use super::control::HerdrControl;
 use super::registry::HerdrPaneRegistry;
 use super::wire::{
     AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode, ClientMessage,
-    FramingError, HERDR_PROTOCOL_VERSION, RenderEncoding, ServerMessage, read_server_message,
-    write_message,
+    FramingError, HERDR_MAX_TESTED_PROTOCOL, HERDR_MIN_PROTOCOL, RenderEncoding, ServerMessage,
+    WireFrame, read_server_message, write_message,
 };
 
 /// Bound on the blocking handshake (`Hello`/`Welcome`/`AttachTerminal`) and on
@@ -193,9 +193,12 @@ pub fn open_attach(
     // later focus_pane(PaneRef{id}) resolves), before opening the wire socket.
     let (_pane_id, terminal_id) = resolve_focused_terminal(&control, &workspace_id)?;
 
+    // Ask this herdr which wire protocol it speaks — never assume a version.
+    let protocol = discover_protocol(&control)?;
+
     // Connect + handshake + attach on a fresh wire connection, then split into the
     // blocking read half and the bounded write half.
-    let stream = connect_and_attach(&wire_socket, rows, cols, &terminal_id)?;
+    let stream = connect_and_attach(&wire_socket, rows, cols, &terminal_id, protocol)?;
     let (read_half, write_half) = split_wire(stream)?;
 
     // Shared, swappable connection state. The write half lives behind a mutex so a
@@ -217,6 +220,7 @@ pub fn open_attach(
             rows,
             cols,
             wire_socket,
+            protocol,
         }),
         receiver: Box::new(HerdrMuxReceiver {
             read: read_half,
@@ -225,6 +229,50 @@ pub fn open_attach(
         }),
         session_name,
     })
+}
+
+/// Ask the connected herdr which wire protocol version it speaks.
+///
+/// muxrd never pins a version: herdr enforces strict equality on the relay handshake
+/// and rejects clients that are older *or* newer than itself, so the only correct
+/// value is whatever this specific server reports. The JSON-API socket used here is
+/// stable across herdr releases and has reported `protocol` since 0.7.1.
+///
+/// A protocol above [`HERDR_MAX_TESTED_PROTOCOL`] is **not** an error — muxrd proceeds
+/// and logs a warning. herdr's changes so far have been additive (appended message
+/// variants), which the decoder tolerates, so refusing to attach would break users on
+/// a new herdr for no reason. The warning is the tripwire that tells us to re-verify
+/// the layout if herdr ever makes a breaking change.
+fn discover_protocol(control: &HerdrControl) -> Result<u32> {
+    let info = control
+        .ping()
+        .context("discover herdr wire protocol version via JSON-API ping")?;
+
+    if info.protocol < HERDR_MIN_PROTOCOL {
+        log::warn!(
+            "herdr {} reports wire protocol v{}, which is older than the oldest version \
+             muxrd vendored message layouts for (v{HERDR_MIN_PROTOCOL}). Proceeding, but \
+             frames may not decode — upgrading herdr is the supported fix.",
+            info.version,
+            info.protocol,
+        );
+    } else if info.protocol > HERDR_MAX_TESTED_PROTOCOL {
+        log::warn!(
+            "herdr {} speaks wire protocol v{}, which is newer than the highest version \
+             muxrd has been tested against (v{HERDR_MAX_TESTED_PROTOCOL}). Proceeding — \
+             herdr's protocol changes have so far been additive — but if terminal output \
+             misbehaves, this mismatch is the first thing to check.",
+            info.version,
+            info.protocol,
+        );
+    } else {
+        log::debug!(
+            "herdr {} speaks wire protocol v{}",
+            info.version,
+            info.protocol
+        );
+    }
+    Ok(info.protocol)
 }
 
 /// Connect a fresh herdr wire socket and drive the full attach handshake for
@@ -239,6 +287,7 @@ fn connect_and_attach(
     rows: u16,
     cols: u16,
     terminal_id: &str,
+    protocol: u32,
 ) -> Result<UnixStream> {
     let stream = UnixStream::connect(wire_socket)
         .with_context(|| format!("connect herdr wire socket {}", wire_socket.display()))?;
@@ -250,7 +299,7 @@ fn connect_and_attach(
         .context("set herdr wire handshake write timeout")?;
 
     let hello = ClientMessage::Hello {
-        version: HERDR_PROTOCOL_VERSION,
+        version: protocol,
         cols,
         rows,
         cell_width_px: CELL_PX_DISABLED,
@@ -261,7 +310,15 @@ fn connect_and_attach(
     };
     write_message(&mut &stream, &hello).context("send herdr Hello")?;
 
-    let welcome = read_server_message(&mut &stream).context("read herdr Welcome")?;
+    let welcome = match read_server_message(&mut &stream).context("read herdr Welcome")? {
+        WireFrame::Message(msg) => msg,
+        WireFrame::Unknown { tag, .. } => {
+            return Err(anyhow!(
+                "herdr handshake: expected Welcome, got an unknown frame (tag {tag}) — \
+                 the server's wire layout is not one muxrd can interpret"
+            ));
+        }
+    };
     assert_welcome(&welcome)?;
 
     let attach = ClientMessage::AttachTerminal {
@@ -289,10 +346,15 @@ fn split_wire(stream: UnixStream) -> Result<(UnixStream, UnixStream)> {
     Ok((read_half, write_half))
 }
 
-/// Assert herdr accepted the handshake: protocol **version 14** (strict equality)
-/// and no `error`. herdr is young (v0.7.1) and the wire protocol can change
-/// between releases, so we fail loudly on any mismatch rather than risk
-/// misinterpreting frames.
+/// Assert herdr accepted the handshake: no `error`, and the negotiated encoding is
+/// what we asked for.
+///
+/// There is deliberately **no protocol-version equality check** here. The version we
+/// send is the one the server itself reported over the JSON-API `ping`, so a
+/// client-side re-assertion could only ever fire if herdr contradicted itself — while
+/// a hard-coded expectation would (and did) break muxrd on every herdr release that
+/// bumps the protocol. herdr performs the authoritative check on its side and reports
+/// any rejection through `error`, which is surfaced verbatim below.
 fn assert_welcome(msg: &ServerMessage) -> Result<()> {
     let ServerMessage::Welcome {
         version,
@@ -307,11 +369,7 @@ fn assert_welcome(msg: &ServerMessage) -> Result<()> {
     if let Some(err) = error {
         return Err(anyhow!("herdr rejected the handshake: {err}"));
     }
-    if *version != HERDR_PROTOCOL_VERSION {
-        return Err(anyhow!(
-            "herdr wire protocol mismatch: server speaks v{version}, muxrd requires v{HERDR_PROTOCOL_VERSION}"
-        ));
-    }
+    log::debug!("herdr handshake: negotiated wire protocol v{version}");
     if *encoding != RenderEncoding::TerminalAnsi {
         // Not fatal — we still receive Terminal frames — but surface it: a
         // SemanticFrame negotiation would mean no ANSI bytes arrive.
@@ -427,6 +485,13 @@ pub struct HerdrMuxSender {
     cols: u16,
     /// Wire socket path for reconnects (the same instance `open_attach` resolved).
     wire_socket: PathBuf,
+    /// Wire protocol version negotiated on the CURRENT connection.
+    ///
+    /// A reconnect re-queries herdr (it may have been restarted, even upgraded, in
+    /// the meantime) but falls back to this value if the JSON-API socket is briefly
+    /// unreachable — a reconnect must not fail merely because the control plane
+    /// blipped when the wire socket itself is fine.
+    protocol: u32,
 }
 
 impl HerdrMuxSender {
@@ -497,8 +562,34 @@ impl HerdrMuxSender {
         //    tear the stream down.
         let mut last_err: Option<anyhow::Error> = None;
         for attempt in 1..=RECONNECT_ATTEMPTS {
-            match connect_and_attach(&self.wire_socket, self.rows, self.cols, &terminal_id)
-                .and_then(split_wire)
+            // Re-discover the protocol rather than blindly reusing the old value: a
+            // reconnect is exactly when herdr may have been restarted — possibly
+            // upgraded to a release speaking a new protocol — under a running muxrd.
+            // If the control socket is momentarily unreachable, fall back to the
+            // version already negotiated instead of failing the reconnect outright;
+            // the wire socket is what actually matters here.
+            let protocol = match discover_protocol(&self.control) {
+                Ok(p) => {
+                    self.protocol = p;
+                    p
+                }
+                Err(e) => {
+                    log::debug!(
+                        "herdr reattach: protocol re-discovery failed ({e:#}); \
+                         reusing negotiated v{}",
+                        self.protocol
+                    );
+                    self.protocol
+                }
+            };
+            match connect_and_attach(
+                &self.wire_socket,
+                self.rows,
+                self.cols,
+                &terminal_id,
+                protocol,
+            )
+            .and_then(split_wire)
             {
                 Ok((read_half, write_half)) => {
                     // Swap the write half under the mutex so every ShutdownGuard clone
@@ -699,6 +790,7 @@ impl MuxSender for HerdrMuxSender {
             rows: self.rows,
             cols: self.cols,
             wire_socket: self.wire_socket.clone(),
+            protocol: self.protocol,
         })
     }
 }
@@ -805,7 +897,15 @@ impl HerdrMuxReceiver {
 /// a corrupt frame.
 fn recv_from<R: io::Read>(reader: &mut R) -> Option<MuxServerMsg> {
     match read_server_message(reader) {
-        Ok(msg) => Some(map_server_message(msg)),
+        Ok(WireFrame::Message(msg)) => Some(map_server_message(*msg)),
+        // A variant appended by a newer herdr. The frame was fully consumed using its
+        // length prefix, so the stream is still aligned — drain it like any other
+        // message we do not act on. This must NOT end the relay: doing so would turn
+        // every future additive herdr change into a silently dying terminal.
+        Ok(WireFrame::Unknown { tag, len }) => {
+            log::debug!("herdr wire: skipping unknown message tag {tag} ({len} bytes)");
+            Some(MuxServerMsg::Other)
+        }
         Err(FramingError::UnexpectedEof) => None,
         Err(e) => {
             log::debug!("herdr wire recv ended on framing error: {e}");
@@ -859,8 +959,12 @@ mod tests {
 
     // ── Release-then-reconnect test harness ───────────────────────────────────
 
-    /// A `HerdrControl` over a nonexistent JSON-API socket — reattach never touches
-    /// it (only the wire socket), and the layout tests want the query to fail fast.
+    /// A `HerdrControl` over a nonexistent JSON-API socket.
+    ///
+    /// The layout tests want the query to fail fast — and this doubles as coverage
+    /// for the reconnect fallback: `reattach` re-queries the protocol over this
+    /// socket, so with it unreachable the reconnect must still succeed using the
+    /// version negotiated on the original attach.
     fn test_control() -> Arc<HerdrControl> {
         Arc::new(HerdrControl::new(
             PathBuf::from("/nonexistent/herdr.sock"),
@@ -883,6 +987,7 @@ mod tests {
             rows: 24,
             cols: 80,
             wire_socket: PathBuf::from("/nonexistent/herdr.sock"),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         }
     }
 
@@ -923,12 +1028,21 @@ mod tests {
     }
 
     /// Fake herdr server side of one attach handshake: read `Hello`, reply
-    /// `Welcome{v14, TerminalAnsi, no error}`, read `AttachTerminal`. Returns both.
+    /// `Welcome{echoed version, TerminalAnsi, no error}`, read `AttachTerminal`.
+    /// Returns both.
+    ///
+    /// The version is echoed back from the client's `Hello` exactly as a real herdr
+    /// does — it accepts only a client whose version equals its own, so an echo is
+    /// the faithful stand-in and keeps these fixtures free of any pinned constant.
     fn serve_handshake(stream: &mut UnixStream) -> (ClientMessage, ClientMessage) {
         let hello = read_client_message(stream);
+        let hello_version = match &hello {
+            ClientMessage::Hello { version, .. } => *version,
+            other => panic!("expected Hello first, got {other:?}"),
+        };
         stream
             .write_all(&frame_server_message(&ServerMessage::Welcome {
-                version: HERDR_PROTOCOL_VERSION,
+                version: hello_version,
                 encoding: RenderEncoding::TerminalAnsi,
                 error: None,
             }))
@@ -1004,7 +1118,7 @@ mod tests {
     fn drained_variants_map_to_other() {
         for msg in [
             ServerMessage::Welcome {
-                version: HERDR_PROTOCOL_VERSION,
+                version: HERDR_MIN_PROTOCOL,
                 encoding: RenderEncoding::TerminalAnsi,
                 error: None,
             },
@@ -1064,13 +1178,13 @@ mod tests {
         }
     }
 
-    // ── assert_welcome: the v14 gate ──────────────────────────────────────────
+    // ── assert_welcome: error-driven, NOT version-gated ───────────────────────
 
     #[test]
-    fn assert_welcome_accepts_v14_no_error() {
+    fn assert_welcome_accepts_no_error() {
         assert!(
             assert_welcome(&ServerMessage::Welcome {
-                version: HERDR_PROTOCOL_VERSION,
+                version: HERDR_MIN_PROTOCOL,
                 encoding: RenderEncoding::TerminalAnsi,
                 error: None,
             })
@@ -1078,23 +1192,31 @@ mod tests {
         );
     }
 
+    /// The regression that broke muxrd on herdr 0.7.2+: a client-side equality check
+    /// on the protocol version. muxrd now echoes the version the server itself
+    /// reported, so *any* version in a clean `Welcome` must be accepted — including
+    /// ones newer than anything muxrd has been tested against. herdr performs the
+    /// authoritative check and signals rejection via `error`.
     #[test]
-    fn assert_welcome_rejects_version_mismatch() {
-        assert!(
-            assert_welcome(&ServerMessage::Welcome {
-                version: 13,
-                encoding: RenderEncoding::TerminalAnsi,
-                error: None,
-            })
-            .is_err()
-        );
+    fn assert_welcome_accepts_any_version_when_server_reports_no_error() {
+        for version in [13, HERDR_MIN_PROTOCOL, 16, HERDR_MAX_TESTED_PROTOCOL, 99] {
+            assert!(
+                assert_welcome(&ServerMessage::Welcome {
+                    version,
+                    encoding: RenderEncoding::TerminalAnsi,
+                    error: None,
+                })
+                .is_ok(),
+                "version {version} must not be rejected client-side"
+            );
+        }
     }
 
     #[test]
     fn assert_welcome_rejects_handshake_error() {
         assert!(
             assert_welcome(&ServerMessage::Welcome {
-                version: HERDR_PROTOCOL_VERSION,
+                version: HERDR_MIN_PROTOCOL,
                 encoding: RenderEncoding::TerminalAnsi,
                 error: Some("no such terminal".into()),
             })
@@ -1246,7 +1368,7 @@ mod tests {
         });
 
         // Establish conn1 as the sender's current connection.
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
         let (_read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -1261,6 +1383,7 @@ mod tests {
             rows: 24,
             cols: 80,
             wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         };
 
         // Change client dimensions, then switch to terminal B.
@@ -1340,7 +1463,7 @@ mod tests {
             (c1, c2)
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -1360,6 +1483,7 @@ mod tests {
             rows: 24,
             cols: 80,
             wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         };
 
         // Reader blocked on conn1 in a background thread, as in the real relay.
@@ -1457,6 +1581,7 @@ mod tests {
             cols: 80,
             // Nonexistent socket → the reconnect connect fails.
             wire_socket: PathBuf::from("/nonexistent/mxr_hr_missing.sock"),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         };
         let mut receiver = HerdrMuxReceiver {
             read: read_half,
@@ -1503,7 +1628,7 @@ mod tests {
             (c1, c3) // keep both server ends open
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -1523,6 +1648,7 @@ mod tests {
             rows: 24,
             cols: 80,
             wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         };
 
         // Reader blocked on conn1 in a background thread, as in the real relay.
@@ -1563,7 +1689,7 @@ mod tests {
             c1 // keep the initial server end open; the sender's shutdown ends the reader
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A").unwrap();
+        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -1583,6 +1709,7 @@ mod tests {
             rows: 24,
             cols: 80,
             wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
         };
 
         let reader = std::thread::spawn(move || receiver.recv());

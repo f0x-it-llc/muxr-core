@@ -100,6 +100,19 @@ pub struct ApiErrorBody {
     pub message: String,
 }
 
+/// What a `ping` told us about the connected herdr server.
+///
+/// muxrd's wire protocol version is **discovered, never pinned** — herdr enforces
+/// strict equality on the relay handshake and rejects clients that are older *or*
+/// newer, so any hard-coded constant breaks on some herdr release.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrServerInfo {
+    /// herdr's release version (e.g. `"0.7.4"`) — diagnostics only.
+    pub version: String,
+    /// Wire protocol version to send in the relay `Hello`.
+    pub protocol: u32,
+}
+
 // ─── Typed result enum ────────────────────────────────────────────────────────
 
 /// Typed result variants for the methods muxrd calls.
@@ -123,6 +136,24 @@ pub struct ApiErrorBody {
 // (clippy::large_enum_variant).
 #[allow(dead_code)] // Phase 3: typed create/info/focus/zoom/export payloads not yet consumed
 pub enum ApiResult {
+    /// `ping` — the server self-describes its version, wire protocol and
+    /// capabilities.  This is muxrd's protocol-discovery mechanism: the JSON-API
+    /// socket is stable across herdr releases, so it can be queried to learn which
+    /// wire version the binary relay handshake must speak.  Verified present on
+    /// herdr 0.7.1 (protocol 14), 0.7.4 (16) and 0.7.5 (17).
+    Pong {
+        /// herdr's own release version (e.g. `"0.7.4"`) — diagnostics only.
+        #[serde(default)]
+        version: String,
+        /// Wire protocol version the server speaks.  Echoed back in the relay
+        /// `Hello`; herdr enforces strict equality on it.
+        protocol: u32,
+        /// Server capability flags.  Deliberately an open map: herdr adds keys
+        /// between releases (`detached_server_daemon` appeared after 0.7.1), and a
+        /// fixed struct here would turn any future addition into a parse failure.
+        #[serde(default)]
+        capabilities: HashMap<String, serde_json::Value>,
+    },
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
@@ -170,6 +201,10 @@ pub enum ApiResult {
 //
 // One struct per method we call. Serialize with `serde_json::to_value` to
 // produce the `params` field of an `ApiRequest`.
+
+/// `ping` — no params.  Used to discover the server's wire protocol version.
+#[derive(Debug, Default, Serialize)]
+pub struct PingParams {}
 
 /// `workspace.list` — no params.
 #[derive(Debug, Default, Serialize)]

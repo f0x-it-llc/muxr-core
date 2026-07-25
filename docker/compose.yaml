@@ -84,7 +84,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime-herdr
       args:
-        HERDR_VERSION: "${HERDR_VERSION:-0.7.1}"   # wire protocol 14 — see Dockerfile
+        HERDR_VERSION: "${HERDR_VERSION:-latest}"   # not pinned — muxrd negotiates the protocol; see Dockerfile
     image: muxr-herdr-rig
     container_name: muxr-herdr-rig
     ports:
@@ -125,7 +125,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime-herdr
       args:
-        HERDR_VERSION: "${HERDR_VERSION:-0.7.1}"   # wire protocol 14 — see Dockerfile
+        HERDR_VERSION: "${HERDR_VERSION:-latest}"   # not pinned — muxrd negotiates the protocol; see Dockerfile
     image: muxr-both-rig
     container_name: muxr-both-rig
     ports:

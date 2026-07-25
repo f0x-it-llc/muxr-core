@@ -7,9 +7,22 @@
 //! herdr uses bincode 2 (`bincode::config::standard()`) with a 4-byte little-endian length
 //! prefix for every frame.  The enum discriminants are positional (0-based declaration order) and
 //! MUST match herdr's exact `ClientMessage`/`ServerMessage` declaration order or the server will
-//! reject / misinterpret messages.  The order here was verified by reading herdr's
-//! `client_message_wire_tags_preserve_protocol_14_order` test and confirming each variant's
-//! first-byte tag value:
+//! reject / misinterpret messages.
+//!
+//! # Version handling — discovered, never pinned
+//!
+//! herdr enforces **strict equality** on the `Hello`/`Welcome` protocol version: it rejects a
+//! client that is older *or* newer than itself.  muxrd therefore discovers the server's version
+//! over the stable JSON-API socket (`HerdrControl::ping`) and echoes it back, rather than
+//! compiling one in — a pinned constant is guaranteed to break on some herdr release, and did
+//! (muxrd targeted 14 while herdr shipped 16 in v0.7.2 and 17 in v0.7.5, breaking every attach).
+//!
+//! herdr has so far only **appended** variants (`ObserveTerminal`/`ControlTerminal` to
+//! `ClientMessage`, `PrefixInputSource` to `ServerMessage`, all in v0.7.2), so the tags below stay
+//! valid across 14–17.  A frame carrying a tag beyond [`HIGHEST_KNOWN_SERVER_TAG`] is skipped via
+//! its length prefix ([`WireFrame::Unknown`]) instead of being treated as stream corruption.
+//!
+//! The tag values below were verified against herdr's own wire-tag ordering test:
 //!
 //! | Variant | Tag |
 //! |---|---|
@@ -41,9 +54,30 @@ use serde::{Deserialize, Serialize};
 
 // ─── Protocol constants ───────────────────────────────────────────────────────
 
-/// herdr wire protocol version this crate targets.  herdr enforces strict
-/// equality on `Welcome`; a mismatch means incompatible server.
-pub const HERDR_PROTOCOL_VERSION: u32 = 14;
+/// Lowest herdr wire protocol version muxrd knows how to speak (herdr v0.7.1).
+///
+/// muxrd **does not pin** a protocol version: herdr enforces strict equality on the
+/// `Hello`/`Welcome` handshake and rejects clients that are older *or* newer than
+/// itself, so any compiled-in constant breaks on some herdr release.  The version
+/// actually sent is discovered per connection via the JSON-API `ping`
+/// (`HerdrControl::ping`).  This floor exists only to catch an implausible
+/// downgrade below the layout this module was written against.
+pub const HERDR_MIN_PROTOCOL: u32 = 14;
+
+/// Highest herdr wire protocol version muxrd has been **tested** against (v0.7.5).
+///
+/// This is a diagnostic tripwire, **not a gate** — muxrd still attaches to a server
+/// reporting a higher protocol, it just logs a prominent warning first.  herdr's
+/// changes from 14 → 17 were purely additive (variants appended to
+/// `ClientMessage`/`ServerMessage`, none removed or reordered), so the layout below
+/// stayed valid; the warning is what tells us to re-verify if that ever stops
+/// being true.  Bump this after testing a newer herdr.
+pub const HERDR_MAX_TESTED_PROTOCOL: u32 = 17;
+
+/// Highest `ServerMessage` bincode tag this module can decode ([`ServerMessage`]
+/// declares tags 0..=9).  A frame carrying a higher tag is a variant herdr appended
+/// in a newer release; it is skipped rather than treated as a corrupt stream.
+const HIGHEST_KNOWN_SERVER_TAG: u8 = 9;
 
 /// Maximum frame payload we accept from the server (2 MiB, matching herdr's
 /// `MAX_FRAME_SIZE`).  Frames larger than this are rejected before allocation.
@@ -376,6 +410,24 @@ pub enum ServerMessage {
     MouseCapture { enabled: bool },
 }
 
+// ─── Read results ─────────────────────────────────────────────────────────────
+
+/// One frame read off the wire.
+///
+/// herdr **appends** variants to `ServerMessage` between releases (`PrefixInputSource`
+/// arrived in v0.7.2).  Because every frame carries a 4-byte little-endian length
+/// prefix, a frame whose tag we do not know can be consumed and discarded without
+/// desynchronising the stream — so an unrecognised variant is reported as
+/// [`WireFrame::Unknown`] rather than as a decode error.  Treating it as an error
+/// would silently kill the terminal relay on any future additive herdr change.
+#[derive(Debug)]
+pub enum WireFrame {
+    /// A frame decoded into a variant this module knows.
+    Message(Box<ServerMessage>),
+    /// A well-framed message carrying a tag from a newer herdr; safely skipped.
+    Unknown { tag: u8, len: usize },
+}
+
 // ─── Framing errors ───────────────────────────────────────────────────────────
 
 /// Errors from framing / deframing operations.
@@ -454,7 +506,7 @@ pub fn write_message<W: Write>(writer: &mut W, msg: &ClientMessage) -> Result<()
 /// `bincode::config::standard()`.  Returns [`FramingError::UnexpectedEof`] on
 /// clean stream close and [`FramingError::Oversized`] if the declared length
 /// exceeds [`MAX_FRAME_SIZE`].
-pub fn read_server_message<R: Read>(reader: &mut R) -> Result<ServerMessage, FramingError> {
+pub fn read_server_message<R: Read>(reader: &mut R) -> Result<WireFrame, FramingError> {
     let mut len_buf = [0u8; 4];
     read_exact_or_eof(reader, &mut len_buf)?;
     let claimed = u32::from_le_bytes(len_buf) as usize;
@@ -466,6 +518,21 @@ pub fn read_server_message<R: Read>(reader: &mut R) -> Result<ServerMessage, Fra
     }
     let mut payload = vec![0u8; claimed];
     read_exact_or_eof(reader, &mut payload)?;
+
+    // Peek the enum discriminant before decoding. bincode's `standard()` config
+    // encodes the variant tag as a varint, and every value we care about here
+    // (0..=250) is a single leading byte — so an appended variant from a newer
+    // herdr is identifiable without a decode attempt. The whole frame has already
+    // been consumed, so skipping it leaves the stream perfectly aligned.
+    let Some(&tag) = payload.first() else {
+        return Err(FramingError::Bincode(
+            "empty frame payload — no variant tag".to_string(),
+        ));
+    };
+    if tag > HIGHEST_KNOWN_SERVER_TAG {
+        return Ok(WireFrame::Unknown { tag, len: claimed });
+    }
+
     let (msg, consumed) = bincode::serde::decode_from_slice::<ServerMessage, _>(
         &payload,
         bincode::config::standard(),
@@ -476,7 +543,7 @@ pub fn read_server_message<R: Read>(reader: &mut R) -> Result<ServerMessage, Fra
             "decoded {consumed} bytes but frame claimed {claimed} — trailing bytes not allowed"
         )));
     }
-    Ok(msg)
+    Ok(WireFrame::Message(Box::new(msg)))
 }
 
 /// Like `Read::read_exact` but maps `UnexpectedEof` to [`FramingError::UnexpectedEof`]
@@ -514,7 +581,7 @@ mod tests {
 
         assert_eq!(
             tag(&ClientMessage::Hello {
-                version: HERDR_PROTOCOL_VERSION,
+                version: HERDR_MIN_PROTOCOL,
                 cols: 80,
                 rows: 24,
                 cell_width_px: 0,
@@ -588,7 +655,7 @@ mod tests {
 
         assert_eq!(
             tag(&ServerMessage::Welcome {
-                version: HERDR_PROTOCOL_VERSION,
+                version: HERDR_MIN_PROTOCOL,
                 encoding: RenderEncoding::TerminalAnsi,
                 error: None,
             }),
@@ -668,7 +735,7 @@ mod tests {
     #[test]
     fn hello_round_trip() {
         let msg = ClientMessage::Hello {
-            version: HERDR_PROTOCOL_VERSION,
+            version: HERDR_MIN_PROTOCOL,
             cols: 120,
             rows: 40,
             cell_width_px: 0,
@@ -720,7 +787,7 @@ mod tests {
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         framed.extend_from_slice(&payload);
 
-        let decoded = read_server_message(&mut framed.as_slice()).unwrap();
+        let decoded = expect_message(read_server_message(&mut framed.as_slice()).unwrap());
         assert_eq!(frame, decoded);
 
         if let ServerMessage::Terminal(tf) = decoded {
@@ -738,7 +805,7 @@ mod tests {
     #[test]
     fn welcome_round_trip() {
         let msg = ServerMessage::Welcome {
-            version: HERDR_PROTOCOL_VERSION,
+            version: HERDR_MIN_PROTOCOL,
             encoding: RenderEncoding::TerminalAnsi,
             error: None,
         };
@@ -747,7 +814,70 @@ mod tests {
         framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
         framed.extend_from_slice(&payload);
 
-        let decoded = read_server_message(&mut framed.as_slice()).unwrap();
+        let decoded = expect_message(read_server_message(&mut framed.as_slice()).unwrap());
         assert_eq!(msg, decoded);
+    }
+
+    // ── Forward compatibility with newer herdr releases ───────────────────────
+
+    /// Frame an arbitrary tag byte plus payload the way herdr frames a message.
+    fn frame_raw(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut payload = vec![tag];
+        payload.extend_from_slice(body);
+        let mut framed = Vec::with_capacity(4 + payload.len());
+        framed.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+        framed.extend_from_slice(&payload);
+        framed
+    }
+
+    /// A variant appended by a newer herdr (e.g. `PrefixInputSource`, added in
+    /// v0.7.2 at tag 10) must be reported as skippable — NOT as a decode error.
+    /// Treating it as an error is what silently killed the terminal relay.
+    #[test]
+    fn unknown_server_tag_is_skipped_not_an_error() {
+        let framed = frame_raw(HIGHEST_KNOWN_SERVER_TAG + 1, &[0xAA, 0xBB]);
+        match read_server_message(&mut framed.as_slice()).unwrap() {
+            WireFrame::Unknown { tag, len } => {
+                assert_eq!(tag, HIGHEST_KNOWN_SERVER_TAG + 1);
+                assert_eq!(len, 3, "tag byte + 2 body bytes");
+            }
+            other => panic!("expected Unknown, got {other:?}"),
+        }
+    }
+
+    /// Skipping an unknown frame must consume it exactly, leaving the next frame
+    /// on the stream decodable — otherwise the relay desynchronises.
+    #[test]
+    fn stream_stays_aligned_after_skipping_unknown_frame() {
+        let known = ServerMessage::Clipboard {
+            data: "after".to_string(),
+        };
+        let known_payload =
+            bincode::serde::encode_to_vec(&known, bincode::config::standard()).unwrap();
+
+        let mut stream = frame_raw(HIGHEST_KNOWN_SERVER_TAG + 5, &[1, 2, 3, 4, 5]);
+        stream.extend_from_slice(&(known_payload.len() as u32).to_le_bytes());
+        stream.extend_from_slice(&known_payload);
+
+        let mut cursor = stream.as_slice();
+        assert!(matches!(
+            read_server_message(&mut cursor).unwrap(),
+            WireFrame::Unknown { .. }
+        ));
+        assert_eq!(
+            expect_message(read_server_message(&mut cursor).unwrap()),
+            known,
+            "the frame following an unknown one must still decode"
+        );
+    }
+
+    /// Unwrap a decoded frame, failing the test on an unexpected skip.
+    fn expect_message(frame: WireFrame) -> ServerMessage {
+        match frame {
+            WireFrame::Message(msg) => *msg,
+            WireFrame::Unknown { tag, len } => {
+                panic!("expected a decoded message, got Unknown {{ tag: {tag}, len: {len} }}")
+            }
+        }
     }
 }

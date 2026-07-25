@@ -18,6 +18,7 @@
 //! | test | exercises |
 //! |------|-----------|
 //! | `smoke_list_sessions`         | `HerdrBackend::list_sessions()` — JSON-API workspace list |
+//! | `smoke_discovers_wire_protocol` | protocol discovery via `ping` (regression: herdr 0.7.2+) |
 //! | `smoke_create_query_kill`     | `create_session` / `query_layout` / `kill_session` round-trip |
 //! | `smoke_open_attach_render_input` | `open_attach` → read `Render` frames → send input → teardown |
 //!
@@ -84,6 +85,52 @@ fn smoke_list_sessions() {
     for (name, age) in &sessions {
         println!("  workspace: {name:?}  age: {age:?}");
     }
+}
+
+// ─── smoke_discovers_wire_protocol ────────────────────────────────────────────
+
+/// Verify muxrd **discovers** the connected herdr's wire protocol instead of
+/// assuming one.
+///
+/// This is the regression guard for the herdr-0.7.2+ outage: muxrd hard-coded
+/// protocol 14 while herdr shipped 16 (v0.7.2) then 17 (v0.7.5), and herdr enforces
+/// strict equality on the handshake — rejecting clients that are older *or* newer —
+/// so every `AttachTerminal` failed. `backend_version()` reports the negotiated
+/// value, so a live server must yield a real protocol number here, never the
+/// "unknown" fallback and never a constant.
+///
+/// # Run
+/// ```text
+/// HERDR_SOCKET_PATH=/path/to/herdr.sock \
+///   cargo test -p muxrd --test herdr_integration smoke_discovers_wire_protocol -- --ignored
+/// ```
+#[test]
+#[ignore = "requires a live herdr instance (set HERDR_SOCKET_PATH)"]
+fn smoke_discovers_wire_protocol() {
+    let b = backend();
+    let version = b.backend_version();
+    println!("[herdr smoke] backend_version → {version}");
+
+    assert_ne!(
+        version, "herdr-wire-unknown",
+        "protocol discovery failed against a live herdr — `ping` did not return a protocol"
+    );
+    assert!(
+        version.starts_with("herdr-"),
+        "unexpected backend_version format: {version}"
+    );
+
+    // The reported protocol must be a real number the server told us, and at least
+    // the oldest herdr muxrd vendored layouts for.
+    let protocol: u32 = version
+        .rsplit("-wire-v")
+        .next()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("no parseable wire protocol in {version:?}"));
+    assert!(
+        protocol >= 14,
+        "discovered protocol {protocol} is older than any herdr muxrd supports"
+    );
 }
 
 // ─── smoke_create_query_kill ──────────────────────────────────────────────────

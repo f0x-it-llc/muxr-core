@@ -135,6 +135,22 @@ start_herdr() {
   fi
 }
 
+# Describe the herdr actually installed in this image, for the banner.
+#
+# The rig no longer pins a herdr version and muxrd no longer pins a wire protocol
+# (it discovers the server's via the JSON-API `ping`), so the banner must report
+# what is really running instead of a hard-coded number. Falls back gracefully when
+# an older herdr's `status server` does not print a protocol line.
+herdr_wire_desc() {
+  _hv="$(herdr --version 2>/dev/null | awk '{print $2}')"
+  _hp="$(herdr status server 2>/dev/null | sed -n 's/^[[:space:]]*protocol:[[:space:]]*//p' | head -1)"
+  if [ -n "${_hp}" ]; then
+    printf 'herdr %s, wire protocol %s negotiated at runtime' "${_hv:-unknown}" "${_hp}"
+  else
+    printf 'herdr %s, wire protocol negotiated at runtime' "${_hv:-unknown}"
+  fi
+}
+
 start_notify() {
   # muxr-notify: in-container push relay for e2e notification testing only.
   # FCM_MODE=log skips OAuth2 + the FCM HTTP call entirely and just logs the
@@ -156,10 +172,10 @@ start_notify() {
 
 # ── 3. Connection banner ─────────────────────────────────────────────────────
 if [ "${BACKEND}" = "both" ]; then
-  backend_line="both (zellij + herdr, wire protocol 14) — muxrd auto-detects & serves ALL (MUXRD_BACKEND unset)"
+  backend_line="both (zellij + $(herdr_wire_desc)) — muxrd auto-detects & serves ALL (MUXRD_BACKEND unset)"
   session_line="${SESSION} (zellij) · herdr spaces: main*, logs, api"
 elif [ "${BACKEND}" = "herdr" ]; then
-  backend_line="herdr  (wire protocol 14; muxrd restricted via MUXRD_BACKEND=herdr)"
+  backend_line="$(herdr_wire_desc); muxrd restricted via MUXRD_BACKEND=herdr"
   session_line="spaces: main*, logs, api"
 else
   backend_line="zellij"
