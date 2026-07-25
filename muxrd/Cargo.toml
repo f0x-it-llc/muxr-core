@@ -103,6 +103,17 @@ interprocess = "2.3"
 # bincode 2 API is bincode::serde::encode_to_vec / decode_from_slice.
 bincode = { version = "2", features = ["serde"] }
 
+# Outbound HTTP to the push-notification relay (task 05) — muxrd's FIRST-ever
+# outbound HTTP dependency. rustls only (no native-tls); JSON bodies only.
+# Kept strictly opt-in at runtime: no relay traffic unless a device is registered.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+
+# Advisory file locking for the push-device registry (src/notify/devices.rs):
+# serializes the read-modify-write cycle across concurrent muxrd tasks AND a
+# muxrctl editing the same sidecar while the daemon runs. `sync` selects the
+# std (blocking) FileExt API; no async runtime pulled in.
+fs4 = { version = "0.13", default-features = false, features = ["sync"] }
+
 # Utility
 anyhow = "1"
 log = "0.4"

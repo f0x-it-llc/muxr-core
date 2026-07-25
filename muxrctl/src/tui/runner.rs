@@ -195,6 +195,31 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
                 });
             }
 
+            // ── Device management ─────────────────────────────────────────────
+            UpdateAction::LoadDevices => {
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg = match crate::server::devices::list() {
+                        Ok(devices) => Message::DevicesLoaded {
+                            devices,
+                            relay_url: crate::server::devices::relay_url(),
+                        },
+                        Err(e) => Message::ActionFailed(format!("list devices failed: {e}")),
+                    };
+                    let _ = tx.blocking_send(msg);
+                });
+            }
+            UpdateAction::RemoveDevice(name) => {
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg = match crate::server::devices::remove(&name) {
+                        Ok(_) => Message::DevicesChanged,
+                        Err(e) => Message::ActionFailed(format!("remove device failed: {e}")),
+                    };
+                    let _ = tx.blocking_send(msg);
+                });
+            }
+
             // ── Dashboard ─────────────────────────────────────────────────────
             UpdateAction::LoadCertInfo => {
                 let tx = tx.clone();

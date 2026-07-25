@@ -6,6 +6,7 @@
 
 use std::net::Ipv4Addr;
 
+use crate::server::devices::DeviceRecord;
 use crate::server::tokens::TokenRecord;
 
 // ── App-layer infra mirrors ────────────────────────────────────────────────────
@@ -63,6 +64,17 @@ pub struct ServerInfo {
     pub uptime_secs: u64,
     /// Total number of mobile clients currently attached across all sessions.
     pub client_count: usize,
+    /// The configured push-notification relay URL, or `None` when push
+    /// notifications are disabled.
+    pub notify_relay_url: Option<String>,
+    /// Number of devices currently registered for push notifications.
+    ///
+    /// Not currently rendered anywhere (the Devices screen derives its own
+    /// count from the freshly loaded device list so it works whether or not
+    /// the daemon is running — see `server::devices::relay_url`) — kept as a
+    /// straight mirror of `StatusInfo` for parity / future use.
+    #[allow(dead_code)]
+    pub push_device_count: usize,
 }
 
 // ── Screen navigation ─────────────────────────────────────────────────────────
@@ -77,16 +89,18 @@ pub enum Screen {
     Config,
     Cert,
     Tokens,
+    Devices,
     Server,
 }
 
 impl Screen {
     /// All screens in navigation order. Drives the dashboard tab list.
-    pub const ALL: [Screen; 5] = [
+    pub const ALL: [Screen; 6] = [
         Screen::Dashboard,
         Screen::Config,
         Screen::Cert,
         Screen::Tokens,
+        Screen::Devices,
         Screen::Server,
     ];
 
@@ -97,6 +111,7 @@ impl Screen {
             Screen::Config => "Config",
             Screen::Cert => "Cert",
             Screen::Tokens => "Tokens",
+            Screen::Devices => "Devices",
             Screen::Server => "Server",
         }
     }
@@ -358,6 +373,34 @@ impl TokensState {
     }
 }
 
+// ── Devices screen state ──────────────────────────────────────────────────────
+
+/// State for the Devices screen.
+#[derive(Debug, Clone, Default)]
+pub struct DevicesState {
+    /// All registered push devices.
+    pub devices: Vec<DeviceRecord>,
+    /// Index of the highlighted row.
+    pub cursor: usize,
+    /// True while a load / remove task is in flight.
+    pub loading: bool,
+    /// Transient status / error line.
+    pub status: String,
+    /// The push-notification relay URL, or `None` when disabled. Resolved
+    /// from the running daemon's `StatusInfo` when up, or from the effective
+    /// config as a fallback when the daemon is stopped.
+    pub relay_url: Option<String>,
+}
+
+impl DevicesState {
+    /// The selected device's display name, if any.
+    pub fn selected_name(&self) -> Option<&str> {
+        self.devices
+            .get(self.cursor)
+            .map(|d| d.device_name.as_str())
+    }
+}
+
 // ── Token QR overlay state ────────────────────────────────────────────────────
 
 /// Phase of the app-level QR overlay shown for an already-created token.
@@ -436,6 +479,8 @@ pub struct AppState {
     pub server: ServerPanelState,
     /// Tokens screen state.
     pub tokens: TokensState,
+    /// Devices screen state.
+    pub devices: DevicesState,
     /// The app-level token QR overlay, when one is open (`None` otherwise).
     pub qr_overlay: Option<QrOverlay>,
     /// Process-monotonic sequence counter for the QR overlay. Bumped each time a
@@ -453,6 +498,7 @@ impl Default for AppState {
             cert: CertState::default(),
             server: ServerPanelState::default(),
             tokens: TokensState::default(),
+            devices: DevicesState::default(),
             qr_overlay: None,
             qr_seq: 0,
         }

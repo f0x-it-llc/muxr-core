@@ -54,23 +54,42 @@ impl MuxrService {
             });
         }
 
+        let mut capabilities = vec!["mouse-input".to_owned()];
+        // Additive capability flag — advertised only when push can ACTUALLY
+        // deliver: a relay URL is configured (`config::EffectiveConfig::
+        // notify_relay_url`) AND the herdr backend is present. The event kernel
+        // + outbound notifier spawn only in the herdr branch (`bin/muxrd.rs`),
+        // so a zellij-only server that merely has a relay URL configured could
+        // accept registrations it can never fulfil — gate on both so clients
+        // never see "push-notifications" (nor a non-empty
+        // `notification_relay_url`) unless a push would land.
+        let herdr_present = self.backends.get(crate::cli::BackendKind::Herdr).is_some();
+        let push_available = self.notify_relay_url.is_some() && herdr_present;
+        if push_available {
+            capabilities.push("push-notifications".to_owned());
+        }
+
         let info = VersionInfo {
             server_version: SERVER_VERSION.to_owned(),
             zellij_version,
             backends: backend_versions,
             available_backends,
-            // Additive capability flags (clients ignore unknown values).
-            // "mouse-input": ClientFrame.mouse is understood on AttachTerminal
-            // for every served backend (zellij Action::MouseEvent forwarding,
-            // herdr wire InputEvents).
-            capabilities: vec!["mouse-input".to_owned()],
+            capabilities,
+            // Empty (proto3 default) unless push is actually available — clients
+            // treat an empty field as "server does not support push".
+            notification_relay_url: if push_available {
+                self.notify_relay_url.clone().unwrap_or_default()
+            } else {
+                String::new()
+            },
         };
         log::debug!(
-            "GetVersion → server={} zellij={:?} backends={} available={:?}",
+            "GetVersion → server={} zellij={:?} backends={} available={:?} notify={}",
             info.server_version,
             info.zellij_version,
             info.backends.len(),
             info.available_backends,
+            !info.notification_relay_url.is_empty(),
         );
         Ok(Response::new(info))
     }
@@ -251,5 +270,98 @@ impl MuxrService {
             },
             info: String::new(),
         }))
+    }
+}
+
+// ─── Tests ────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cli::BackendKind;
+    use crate::multiplexer::{BackendSet, ZellijBackend};
+    use std::sync::Arc;
+
+    /// A [`BackendSet`] containing a herdr entry. Push delivery only needs the
+    /// herdr backend to be *present*; `get_version_impl` merely probes for its
+    /// key and calls `backend_version()`, so a trivially-constructable backend
+    /// (here `ZellijBackend`) registered under the `Herdr` kind is a faithful
+    /// stand-in for "herdr detected" without standing up a real herdr relay.
+    fn backends_with_herdr() -> BackendSet {
+        BackendSet::new(vec![
+            (BackendKind::Zellij, Arc::new(ZellijBackend) as _),
+            (BackendKind::Herdr, Arc::new(ZellijBackend) as _),
+        ])
+    }
+
+    /// No relay configured (the default) → neither the `"push-notifications"`
+    /// capability nor a non-empty `notification_relay_url` is advertised.
+    #[tokio::test]
+    async fn get_version_without_relay_has_no_push_capability() {
+        let service = MuxrService::with_backends(backends_with_herdr());
+
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+
+        assert!(
+            !info.capabilities.iter().any(|c| c == "push-notifications"),
+            "capabilities should not include push-notifications: {:?}",
+            info.capabilities
+        );
+        assert_eq!(
+            info.notification_relay_url, "",
+            "notification_relay_url should be empty (proto3 default) when unset"
+        );
+    }
+
+    /// A configured relay URL **and** herdr present → both the capability and
+    /// the field are populated.
+    #[tokio::test]
+    async fn get_version_with_relay_and_herdr_advertises_push_capability_and_url() {
+        let service = MuxrService::with_backends(backends_with_herdr())
+            .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()));
+
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+
+        assert!(
+            info.capabilities.iter().any(|c| c == "push-notifications"),
+            "capabilities should include push-notifications: {:?}",
+            info.capabilities
+        );
+        assert_eq!(info.notification_relay_url, "https://noti.muxr.app");
+    }
+
+    /// A relay URL configured but NO herdr backend (zellij-only server) → push
+    /// is unreachable, so neither the capability nor the URL is advertised even
+    /// though a relay is set. This is the M3 fix: don't dangle a capability the
+    /// server can never fulfil.
+    #[tokio::test]
+    async fn get_version_with_relay_but_no_herdr_does_not_advertise_push() {
+        // `MuxrService::new()` builds a zellij-only backend set.
+        let service =
+            MuxrService::new().with_notify_relay_url(Some("https://noti.muxr.app".to_owned()));
+
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+
+        assert!(
+            !info.capabilities.iter().any(|c| c == "push-notifications"),
+            "a zellij-only server must not advertise push even with a relay URL: {:?}",
+            info.capabilities
+        );
+        assert_eq!(
+            info.notification_relay_url, "",
+            "notification_relay_url must stay empty without a herdr backend"
+        );
     }
 }

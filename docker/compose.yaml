@@ -56,6 +56,10 @@ services:
       # BIND_ADDR so that `BIND_ADDR=<ip> docker compose up` is all that's
       # needed. Stays empty when the default loopback is used — safe/unchanged.
       MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
+      # In-container muxr-notify (FCM_MODE=log, e2e push-notification testing —
+      # never published to the host). See docker/entrypoint.sh start_notify().
+      NOTIFY_ENABLED: "${NOTIFY_ENABLED:-1}"
+      NOTIFY_PORT: "${NOTIFY_PORT:-8090}"
     volumes:
       # Persist token DB, cert, session state, and zellij config across restarts.
       # muxrd data lives under zellij's XDG share dir.
@@ -90,6 +94,10 @@ services:
       BACKEND: herdr
       SESSION: "${SESSION:-herdr-dev}"
       MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
+      # In-container muxr-notify (FCM_MODE=log, e2e push-notification testing —
+      # never published to the host). See docker/entrypoint.sh start_notify().
+      NOTIFY_ENABLED: "${NOTIFY_ENABLED:-1}"
+      NOTIFY_PORT: "${NOTIFY_PORT:-8090}"
     volumes:
       # muxrd's token DB + cert still live under the XDG share dir; herdr keeps its
       # own workspace/session state under ~/.config/herdr. Separate volumes from the
@@ -127,6 +135,10 @@ services:
       BACKEND: both
       SESSION: "${SESSION:-backend-dev}"
       MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
+      # In-container muxr-notify (FCM_MODE=log, e2e push-notification testing —
+      # never published to the host). See docker/entrypoint.sh start_notify().
+      NOTIFY_ENABLED: "${NOTIFY_ENABLED:-1}"
+      NOTIFY_PORT: "${NOTIFY_PORT:-8090}"
     volumes:
       # Dedicated volumes so the multi-backend rig doesn't share credential/session
       # state with the zellij-only or herdr-only rigs. muxrd's token DB + cert live

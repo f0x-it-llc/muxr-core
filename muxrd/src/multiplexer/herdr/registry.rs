@@ -107,6 +107,18 @@ impl HerdrPaneRegistry {
         id
     }
 
+    /// The stable `u32` already assigned to a herdr `pane_id`, if any — a
+    /// **read-only** lookup that never assigns a new id nor touches the stored
+    /// `terminal_id`.
+    ///
+    /// The event kernel ([`super::subscribe`]) uses this to translate a pushed
+    /// `pane_agent_status_changed` event — which may omit `terminal_id` — to a
+    /// neutral id without risking a clobber of a live pane's relay `terminal_id`
+    /// via [`Self::assign_or_get`] with an empty string.
+    pub fn id_for_herdr_pane(&self, herdr_pane_id: &str) -> Option<u32> {
+        lock(&self.inner).by_herdr.get(herdr_pane_id).copied()
+    }
+
     /// herdr `pane_id` for an assigned `u32`, if known.
     pub fn herdr_pane_id(&self, id: u32) -> Option<String> {
         lock(&self.inner)
@@ -232,6 +244,17 @@ mod tests {
         let reg = HerdrPaneRegistry::new();
         assert!(reg.herdr_pane_id(999).is_none());
         assert!(reg.terminal_id(999).is_none());
+    }
+
+    #[test]
+    fn id_for_herdr_pane_is_read_only_lookup() {
+        let reg = HerdrPaneRegistry::new();
+        assert!(reg.id_for_herdr_pane("pane-a").is_none());
+        let id = reg.assign_or_get("pane-a", "term-a");
+        assert_eq!(reg.id_for_herdr_pane("pane-a"), Some(id));
+        // A pure lookup must not have assigned a new id nor altered terminal_id.
+        assert_eq!(reg.terminal_id(id).as_deref(), Some("term-a"));
+        assert!(reg.id_for_herdr_pane("pane-unknown").is_none());
     }
 
     #[test]

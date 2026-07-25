@@ -25,12 +25,29 @@ use std::path::PathBuf;
 /// Default bind address used when nothing else overrides it.
 pub const DEFAULT_BIND: &str = "127.0.0.1:50051";
 
+/// Default push-notification relay URL used when nothing else overrides it.
+///
+/// Set `notify_relay_url = ""` in the config file (or `MUXRD_NOTIFY_RELAY_URL=`)
+/// to disable push notifications entirely — no outbound traffic to any relay
+/// is sent unless a device has actually been registered (privacy stance).
+pub const DEFAULT_NOTIFY_RELAY_URL: &str = "https://noti.muxr.app";
+
+/// Default notification payload verbosity.
+pub const DEFAULT_NOTIFY_VERBOSITY: &str = "normal";
+
 /// The raw on-disk config (all fields optional; missing → use defaults).
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct FileConfig {
     bind_addr: Option<String>,
     cert_dir: Option<String>,
     log_path: Option<String>,
+    /// Push-notification relay URL. `Some("")` (or the env var set to an empty
+    /// string) explicitly disables push notifications; `None` falls back to
+    /// [`DEFAULT_NOTIFY_RELAY_URL`].
+    notify_relay_url: Option<String>,
+    /// Notification payload verbosity: `"normal"` (default) or `"generic"`.
+    /// File-only (no env var) — invalid values are rejected at resolve time.
+    notify_verbosity: Option<String>,
 }
 
 /// The fully-resolved effective configuration.
@@ -46,20 +63,32 @@ pub struct EffectiveConfig {
     pub log_path: PathBuf,
     /// Path to the config file that was read (or would be written).
     pub config_file: PathBuf,
+    /// The push-notification relay URL to advertise to clients and use for
+    /// outbound device registration/send traffic. `None` means push
+    /// notifications are disabled (no relay configured) — advertised to
+    /// clients as an empty `VersionInfo.notification_relay_url` and the
+    /// absence of the `"push-notifications"` capability.
+    pub notify_relay_url: Option<String>,
+    /// Resolved notification payload verbosity: `"normal"` or `"generic"`.
+    pub notify_verbosity: String,
 }
 
 impl EffectiveConfig {
     /// Human-readable summary, one field per line.
     pub fn display(&self) -> String {
         format!(
-            "bind_addr  = {}\n\
-             cert_dir   = {}\n\
-             log_path   = {}\n\
-             config_file= {}",
+            "bind_addr        = {}\n\
+             cert_dir         = {}\n\
+             log_path         = {}\n\
+             config_file      = {}\n\
+             notify_relay_url = {}\n\
+             notify_verbosity = {}",
             self.bind_addr,
             self.cert_dir.display(),
             self.log_path.display(),
             self.config_file.display(),
+            self.notify_relay_url.as_deref().unwrap_or("(disabled)"),
+            self.notify_verbosity,
         )
     }
 }
@@ -360,12 +389,66 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
         .map(PathBuf::from)
         .unwrap_or_else(|| data_dir.join("muxrd.log"));
 
+    // notify_relay_url: MUXRD_NOTIFY_RELAY_URL env > config file > default.
+    // An empty string from ANY source means "disabled" — normalized to `None`
+    // below rather than passed through as `Some("")`.
+    let notify_relay_raw = std::env::var("MUXRD_NOTIFY_RELAY_URL")
+        .ok()
+        .or(file_cfg.notify_relay_url)
+        .unwrap_or_else(|| DEFAULT_NOTIFY_RELAY_URL.to_owned());
+    let notify_relay_url = resolve_notify_relay_url(&notify_relay_raw)?;
+
+    // notify_verbosity: config file > default. File-only — no env override.
+    let notify_verbosity = resolve_notify_verbosity(file_cfg.notify_verbosity.as_deref())?;
+
     Ok(EffectiveConfig {
         bind_addr,
         cert_dir,
         log_path,
         config_file,
+        notify_relay_url,
+        notify_verbosity,
     })
+}
+
+/// Normalize + validate a raw `notify_relay_url` value.
+///
+/// An empty (or all-whitespace) string means "disabled" → `Ok(None)`. A
+/// non-empty value must parse as an `http`/`https` URL with a host — this
+/// fails fast at resolve time rather than deferring the error to the first
+/// send attempt (task 05).
+fn resolve_notify_relay_url(raw: &str) -> Result<Option<String>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let uri: http::Uri = trimmed
+        .parse()
+        .with_context(|| format!("invalid notify_relay_url '{trimmed}': not a valid URL"))?;
+    match uri.scheme_str() {
+        Some("http") | Some("https") => {}
+        other => anyhow::bail!(
+            "notify_relay_url '{trimmed}' must use the http or https scheme (got {:?})",
+            other
+        ),
+    }
+    if uri.host().is_none_or(str::is_empty) {
+        anyhow::bail!("notify_relay_url '{trimmed}' must include a host");
+    }
+    Ok(Some(trimmed.to_owned()))
+}
+
+/// Validate a raw `notify_verbosity` value, defaulting to
+/// [`DEFAULT_NOTIFY_VERBOSITY`] when unset.
+fn resolve_notify_verbosity(raw: Option<&str>) -> Result<String> {
+    match raw {
+        None => Ok(DEFAULT_NOTIFY_VERBOSITY.to_owned()),
+        Some("normal") => Ok("normal".to_owned()),
+        Some("generic") => Ok("generic".to_owned()),
+        Some(other) => {
+            anyhow::bail!("notify_verbosity must be 'normal' or 'generic', got '{other}'")
+        }
+    }
 }
 
 /// Persist `bind_addr` into the config file (creating it from the template if
@@ -454,7 +537,12 @@ pub fn ensure_config_file() -> Result<PathBuf> {
              #\n\
              # bind_addr = \"{DEFAULT_BIND}\"\n\
              # cert_dir  = \"{}\"\n\
-             # log_path  = \"{}\"\n",
+             # log_path  = \"{}\"\n\
+             #\n\
+             # Push-notification relay. Set to \"\" to disable push notifications\n\
+             # entirely (no outbound traffic to any relay).\n\
+             # notify_relay_url = \"{DEFAULT_NOTIFY_RELAY_URL}\"\n\
+             # notify_verbosity = \"{DEFAULT_NOTIFY_VERBOSITY}\" # \"normal\" | \"generic\"\n",
             data_dir.display(),
             data_dir.join("muxrd.log").display(),
         );
@@ -554,6 +642,159 @@ mod tests {
             !has_plugin,
             "bar-less layout must not declare any plugin (tab-bar/status-bar) panes"
         );
+    }
+
+    // ── notify_relay_url / notify_verbosity: pure-function validation ────────
+
+    #[test]
+    fn notify_relay_url_empty_or_blank_disables() {
+        assert_eq!(resolve_notify_relay_url("").unwrap(), None);
+        assert_eq!(resolve_notify_relay_url("   ").unwrap(), None);
+    }
+
+    #[test]
+    fn notify_relay_url_valid_http_and_https_ok() {
+        assert_eq!(
+            resolve_notify_relay_url("https://noti.muxr.app").unwrap(),
+            Some("https://noti.muxr.app".to_owned())
+        );
+        assert_eq!(
+            resolve_notify_relay_url("http://localhost:8080").unwrap(),
+            Some("http://localhost:8080".to_owned())
+        );
+    }
+
+    #[test]
+    fn notify_relay_url_invalid_scheme_rejected() {
+        let err = resolve_notify_relay_url("ftp://example.com").unwrap_err();
+        assert!(
+            err.to_string().contains("http or https"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn notify_relay_url_malformed_rejected() {
+        let err = resolve_notify_relay_url("not a url at all").unwrap_err();
+        assert!(
+            err.to_string().contains("not a valid URL"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn notify_relay_url_missing_host_rejected() {
+        // A valid scheme + authority but an empty host component (port-only
+        // authority) parses successfully as a `Uri` with `host() == Some("")`.
+        let err = resolve_notify_relay_url("https://:8080").unwrap_err();
+        assert!(
+            err.to_string().contains("must include a host"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn notify_verbosity_defaults_to_normal() {
+        assert_eq!(resolve_notify_verbosity(None).unwrap(), "normal");
+    }
+
+    #[test]
+    fn notify_verbosity_accepts_normal_and_generic() {
+        assert_eq!(resolve_notify_verbosity(Some("normal")).unwrap(), "normal");
+        assert_eq!(
+            resolve_notify_verbosity(Some("generic")).unwrap(),
+            "generic"
+        );
+    }
+
+    #[test]
+    fn notify_verbosity_rejects_invalid_value() {
+        let err = resolve_notify_verbosity(Some("loud")).unwrap_err();
+        assert!(
+            err.to_string().contains("'normal' or 'generic'"),
+            "unexpected error: {err}"
+        );
+    }
+
+    // ── notify_relay_url / notify_verbosity: `resolve()` precedence ──────────
+
+    /// `resolve()`'s precedence for `notify_relay_url`: env > file > default.
+    /// Also covers empty-string-disables and the invalid-verbosity error path.
+    /// Writes to the real data-dir config file, guarded the same way as
+    /// `set_bind_addr_round_trips` (shared `CONFIG_FILE_LOCK` + a restore guard).
+    #[test]
+    fn resolve_notify_precedence_env_over_file_over_default() {
+        let _file_lock = CONFIG_FILE_LOCK.lock().unwrap();
+
+        let path = config_file_path().expect("config_file_path");
+        let original = std::fs::read_to_string(&path).ok();
+        let _restore = ConfigRestoreGuard {
+            path: path.clone(),
+            original,
+        };
+
+        // Ensure no stray env var from a previous failed test run.
+        // SAFETY: this test does not run concurrently with itself, and no other
+        // test in this crate touches MUXRD_NOTIFY_RELAY_URL.
+        unsafe { std::env::remove_var("MUXRD_NOTIFY_RELAY_URL") };
+
+        // 1. No file field, no env → default.
+        std::fs::write(&path, "bind_addr = \"127.0.0.1:50051\"\n").expect("write empty config");
+        let cfg = resolve(None).expect("resolve default");
+        assert_eq!(
+            cfg.notify_relay_url,
+            Some(DEFAULT_NOTIFY_RELAY_URL.to_owned()),
+            "no file/env override should fall back to the default relay URL"
+        );
+
+        // 2. File sets a value, no env → file wins over default.
+        std::fs::write(
+            &path,
+            "bind_addr = \"127.0.0.1:50051\"\nnotify_relay_url = \"https://file.example.com\"\n",
+        )
+        .expect("write file config");
+        let cfg = resolve(None).expect("resolve file override");
+        assert_eq!(
+            cfg.notify_relay_url,
+            Some("https://file.example.com".to_owned()),
+            "file value should win over the default"
+        );
+
+        // 3. Env set → env wins over file.
+        // SAFETY: serialised by CONFIG_FILE_LOCK (only this test touches this var).
+        unsafe { std::env::set_var("MUXRD_NOTIFY_RELAY_URL", "https://env.example.com") };
+        let cfg = resolve(None).expect("resolve env override");
+        assert_eq!(
+            cfg.notify_relay_url,
+            Some("https://env.example.com".to_owned()),
+            "env value should win over the file value"
+        );
+
+        // 4. Env set to empty string → disabled, even though the file has a value.
+        unsafe { std::env::set_var("MUXRD_NOTIFY_RELAY_URL", "") };
+        let cfg = resolve(None).expect("resolve env empty");
+        assert_eq!(
+            cfg.notify_relay_url, None,
+            "empty env value should disable push notifications"
+        );
+
+        // 5. Invalid verbosity in the file → resolve() must error.
+        unsafe { std::env::remove_var("MUXRD_NOTIFY_RELAY_URL") };
+        std::fs::write(
+            &path,
+            "bind_addr = \"127.0.0.1:50051\"\nnotify_verbosity = \"loud\"\n",
+        )
+        .expect("write invalid verbosity config");
+        let err = resolve(None).expect_err("invalid notify_verbosity must be rejected");
+        assert!(
+            err.to_string().contains("'normal' or 'generic'"),
+            "unexpected error: {err}"
+        );
+
+        // Cleanup env for subsequent tests (also handled by test isolation, but
+        // explicit is cheap).
+        unsafe { std::env::remove_var("MUXRD_NOTIFY_RELAY_URL") };
+        // Restore guard runs automatically when this scope exits.
     }
 
     // ── resolve_cert_source tests ─────────────────────────────────────────────

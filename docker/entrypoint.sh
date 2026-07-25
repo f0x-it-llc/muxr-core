@@ -21,11 +21,18 @@
 #              mode BOTH backends expose a session with this same name on purpose,
 #              so you can verify same-name cross-backend routing (the app tells
 #              them apart by the backend badge: zellij = green, herdr = blue).
+#   NOTIFY_ENABLED — start muxr-notify in-container for e2e push-notification
+#              testing (default: 1). Runs in FCM_MODE=log (no Firebase artifacts
+#              needed) on loopback only; muxrd's MUXRD_NOTIFY_RELAY_URL is
+#              pointed at it automatically. Set 0 to skip.
+#   NOTIFY_PORT — loopback port muxr-notify listens on (default: 8090).
 set -euo pipefail
 
 BACKEND="${BACKEND:-zellij}"
 SESSION="${SESSION:-backend-dev}"
 HERDR_SOCKET_PATH="${HERDR_SOCKET_PATH:-/root/.config/herdr/herdr.sock}"
+NOTIFY_ENABLED="${NOTIFY_ENABLED:-1}"
+NOTIFY_PORT="${NOTIFY_PORT:-8090}"
 
 case "${BACKEND}" in
   zellij|herdr|both) ;;
@@ -52,20 +59,30 @@ want_zellij=0; want_herdr=0
 #                                     serves them all simultaneously.
 # HERDR_SOCKET_PATH is exported whenever herdr is in play (herdr/both) so muxrd's
 # herdr probe + the headless herdr server agree on the socket location.
+#
+# MUXRD_NOTIFY_RELAY_URL points muxrd at the in-container muxr-notify instance
+# (started below by start_notify) so the notifier has a local e2e target
+# instead of the production default (https://noti.muxr.app). Only exported
+# when NOTIFY_ENABLED=1 (the default).
 restrict_backend=""
 [ "${BACKEND}" = "zellij" ] && restrict_backend="zellij"
 [ "${BACKEND}" = "herdr" ]  && restrict_backend="herdr"
+
+notify_relay_url=""
+[ "${NOTIFY_ENABLED}" = "1" ] && notify_relay_url="http://127.0.0.1:${NOTIFY_PORT}"
 
 {
   printf 'MUXRD_BIND=%s\nMUXRD_SAN=%s\n' \
     "${MUXRD_BIND:-}" "${MUXRD_SAN:-}"
   [ -n "${restrict_backend}" ] && printf 'MUXRD_BACKEND=%s\n' "${restrict_backend}"
   [ "${want_herdr}" -eq 1 ] && printf 'HERDR_SOCKET_PATH=%s\n' "${HERDR_SOCKET_PATH}"
+  [ -n "${notify_relay_url}" ] && printf 'MUXRD_NOTIFY_RELAY_URL=%s\n' "${notify_relay_url}"
 } > /etc/environment
 {
   printf "export MUXRD_BIND='%s'\nexport MUXRD_SAN='%s'\n" \
     "${MUXRD_BIND:-}" "${MUXRD_SAN:-}"
   [ -n "${restrict_backend}" ] && printf "export MUXRD_BACKEND='%s'\n" "${restrict_backend}"
+  [ -n "${notify_relay_url}" ] && printf "export MUXRD_NOTIFY_RELAY_URL='%s'\n" "${notify_relay_url}"
   [ "${want_herdr}" -eq 1 ] && printf "export HERDR_SOCKET_PATH='%s'\n" "${HERDR_SOCKET_PATH}"
 } > /etc/profile.d/muxrd-env.sh
 chmod 0644 /etc/profile.d/muxrd-env.sh
@@ -118,8 +135,24 @@ start_herdr() {
   fi
 }
 
+start_notify() {
+  # muxr-notify: in-container push relay for e2e notification testing only.
+  # FCM_MODE=log skips OAuth2 + the FCM HTTP call entirely and just logs the
+  # would-be message — no Firebase service-account JSON needed. Loopback-only
+  # (never published to the host); muxrd's MUXRD_NOTIFY_RELAY_URL (exported
+  # above) is the only consumer. The DB lives under the persisted zellij data
+  # volume so registered push-handles survive a rig restart.
+  mkdir -p /root/.local/share/zellij/muxr-notify
+  echo "[rig] starting muxr-notify (FCM_MODE=log) on 127.0.0.1:${NOTIFY_PORT}…"
+  NOTIFY_LISTEN="127.0.0.1:${NOTIFY_PORT}" \
+    NOTIFY_DB="/root/.local/share/zellij/muxr-notify/notify.db" \
+    FCM_MODE=log \
+    muxr-notify > /var/log/muxr-notify.log 2>&1 &
+}
+
 [ "${want_zellij}" -eq 1 ] && start_zellij
 [ "${want_herdr}" -eq 1 ] && start_herdr
+[ "${NOTIFY_ENABLED}" = "1" ] && start_notify
 
 # ── 3. Connection banner ─────────────────────────────────────────────────────
 if [ "${BACKEND}" = "both" ]; then
@@ -131,6 +164,12 @@ elif [ "${BACKEND}" = "herdr" ]; then
 else
   backend_line="zellij"
   session_line="${SESSION}"
+fi
+
+if [ "${NOTIFY_ENABLED}" = "1" ]; then
+  notify_line="muxr-notify (FCM_MODE=log) on 127.0.0.1:${NOTIFY_PORT} — MUXRD_NOTIFY_RELAY_URL set"
+else
+  notify_line="disabled (NOTIFY_ENABLED=0) — muxrd falls back to its configured/default relay"
 fi
 
 cat <<BANNER
@@ -147,6 +186,7 @@ cat <<BANNER
 
   backend        : ${backend_line}
   session/space  : ${session_line}
+  push relay     : ${notify_line}
   gRPC port      : 50051 (published once you start the server)
 ╚══════════════════════════════════════════════════════════════════╝
 

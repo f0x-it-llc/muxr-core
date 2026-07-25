@@ -57,6 +57,15 @@ pub enum UpdateAction {
     /// Posts `Message::TokensChanged` on completion.
     RevokeToken(String),
 
+    // ── Device management actions ─────────────────────────────────────────────
+    /// Load the push-device list + relay URL and post `Message::DevicesLoaded`.
+    LoadDevices,
+
+    /// Remove the device with the given display name.
+    ///
+    /// Posts `Message::DevicesChanged` on completion.
+    RemoveDevice(String),
+
     // ── Token QR overlay ──────────────────────────────────────────────────────
     /// Build a pairing QR URI from an **existing** plaintext token (no mint, no
     /// revoke).

@@ -39,4 +39,5 @@ pub mod control;
 pub mod paths;
 pub mod registry;
 pub mod relay;
+pub mod subscribe;
 pub mod wire;

@@ -463,8 +463,12 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
     }
 
     // ── Construct each detected backend into the ordered BackendSet ──────────
+    // A concrete `Arc<HerdrBackend>` is retained (when present) so `serve()` can
+    // start the herdr event kernel (task 01) sharing the backend's id registries;
+    // the same `Arc` is also stored in the set as `Arc<dyn MuxBackend>`.
     let mut backend_entries: Vec<(BackendKind, Arc<dyn MuxBackend>)> =
         Vec::with_capacity(resolved_kinds.len());
+    let mut herdr_backend: Option<Arc<HerdrBackend>> = None;
     for kind in &resolved_kinds {
         match kind {
             BackendKind::Zellij => {
@@ -472,9 +476,10 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
                 backend_entries.push((BackendKind::Zellij, Arc::new(ZellijBackend)));
             }
             BackendKind::Herdr => {
-                let b = HerdrBackend::from_env();
+                let b = Arc::new(HerdrBackend::from_env());
                 log::info!("backend: herdr ({})", b.backend_version());
-                backend_entries.push((BackendKind::Herdr, Arc::new(b)));
+                herdr_backend = Some(Arc::clone(&b));
+                backend_entries.push((BackendKind::Herdr, b as Arc<dyn MuxBackend>));
             }
         }
     }
@@ -611,6 +616,9 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         extra_sans,
         cert_source,
         backends,
+        herdr_backend,
+        cfg.notify_relay_url.clone(),
+        cfg.notify_verbosity.clone(),
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -667,7 +675,16 @@ fn cert_identity(
 ///
 /// `backends` is the resolved [`BackendSet`] (every detected backend: zellij
 /// and/or herdr), constructed and logged by [`cmd_start`] before the runtime is
-/// entered.
+/// entered. `herdr_backend` is the concrete `Arc<HerdrBackend>` when herdr is in
+/// the set (else `None`); it is used only to start the herdr event kernel (task
+/// 01) so it shares the backend's id registries.
+///
+/// `notify_relay_url` is the resolved push-notification relay URL (or `None`
+/// when disabled); it is advertised via `GetVersion`
+/// (`MuxrService::with_notify_relay_url`) and reported over the control
+/// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
+/// `"generic"`) drives the outbound notifier's payload text (task 05).
+#[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
 async fn serve(
     addr: std::net::SocketAddr,
     bind_addr: String,
@@ -675,6 +692,9 @@ async fn serve(
     extra_sans: Vec<SanEntry>,
     cert_source: CertSource,
     backends: BackendSet,
+    herdr_backend: Option<Arc<HerdrBackend>>,
+    notify_relay_url: Option<String>,
+    notify_verbosity: String,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -712,19 +732,99 @@ async fn serve(
         }
     };
 
-    let service = MuxrService::with_backends(backends);
+    // Push-device registry: standard data-dir location (construction is
+    // infallible/side-effect-free — see `PushDeviceStore::new`). Cloned into
+    // both the gRPC service (RegisterPushTarget/ListPushTargets/RemovePushTarget)
+    // and the control-socket listener (StatusInfo.push_device_count).
+    let push_devices = muxrd::notify::devices::PushDeviceStore::new();
+
+    let service = MuxrService::with_backends(backends)
+        .with_notify_relay_url(notify_relay_url.clone())
+        .with_push_device_store(push_devices.clone());
+
+    // Retained inputs for the task-05 outbound notifier, spawned in the herdr
+    // branch below AFTER `spawn_listener` consumes the originals. Built only when
+    // herdr is present (the event bus — and hence the notifier — exists only
+    // then), so a zellij-only server allocates nothing here. Capturing
+    // `notify_verbosity` in the closure also keeps the param "used" on the
+    // zellij-only path (no dead-code warning).
+    let notifier_seed = herdr_backend.as_ref().map(|_| {
+        (
+            notify_relay_url.clone(),
+            push_devices.clone(),
+            notify_verbosity.clone(),
+        )
+    });
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    // Pass the cert_mode so `status` can report the active transport mode.
+    // A clone-able shutdown signal (task 01): the control-socket oneshot drives
+    // `serve_with_shutdown` exactly as before; when it fires we also flip this
+    // `watch` so long-lived background tasks (the herdr event kernel) observe the
+    // same shutdown and exit cleanly.
+    let (kernel_shutdown_tx, kernel_shutdown_rx) = tokio::sync::watch::channel(false);
+    // Pass the cert_mode + notify_relay_url so `status` can report the active
+    // transport mode and push-notification configuration; push_devices lets the
+    // listener report a live (not snapshotted) device count.
     control::spawn_listener(
         bind_addr.clone(),
         Instant::now(),
         shutdown_tx,
         service.clients(),
         cert_mode,
+        notify_relay_url,
+        push_devices,
     )
     .context("failed to start control socket")?;
+
+    // ── herdr event kernel (task 01) ─────────────────────────────────────────
+    // When a herdr backend is present, spawn the persistent `events.subscribe`
+    // consumer, publishing agent-status transitions onto a process-local
+    // broadcast bus. The bus handle is kept in scope so the notifications
+    // notifier (task 05) can consume it later; today it has no consumer and the
+    // kernel's sends are simply dropped. A zellij-only server spawns nothing and
+    // creates no bus (zero behaviour change).
+    let _event_bus: Option<muxrd::multiplexer::events::EventBus> = match herdr_backend {
+        Some(backend) => {
+            let (bus, _rx0) =
+                tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY);
+            muxrd::multiplexer::spawn_event_kernel(
+                backend.as_ref(),
+                bus.clone(),
+                kernel_shutdown_rx,
+            );
+
+            // ── Outbound push notifier (task 05) ────────────────────────────
+            // Consume the same bus, but only when a relay URL is configured.
+            // A fresh shutdown receiver off the same watch channel winds the
+            // notifier down alongside the kernel. A build failure (reqwest
+            // client) is logged and non-fatal — the daemon still serves.
+            if let Some((relay_url, store, verbosity)) = notifier_seed {
+                match relay_url.as_deref() {
+                    Some(url) => {
+                        if let Err(e) = muxrd::notify::sender::spawn_notifier(
+                            &bus,
+                            kernel_shutdown_tx.subscribe(),
+                            store,
+                            url,
+                            verbosity,
+                        ) {
+                            log::warn!("notify: failed to start outbound notifier: {e:#}");
+                        }
+                    }
+                    None => {
+                        log::info!(
+                            "notify: relay disabled — outbound notifier not started \
+                             (herdr events still published to the bus)"
+                        );
+                    }
+                }
+            }
+
+            Some(bus)
+        }
+        None => None,
+    };
 
     let transport_desc = match cert_mode {
         muxrd::config::CertMode::SelfSigned => "TLS (self-signed)",
@@ -752,6 +852,10 @@ async fn serve(
         .serve_with_shutdown(addr, async move {
             let _ = shutdown_rx.await;
             log::info!("muxrd: graceful shutdown initiated");
+            // Fan the shutdown out to background tasks (herdr event kernel). This
+            // keeps `serve_with_shutdown`'s own behaviour identical — it still
+            // resolves the instant the control-socket oneshot fires.
+            let _ = kernel_shutdown_tx.send(true);
         })
         .await
         .context("gRPC server error")?;
@@ -772,6 +876,10 @@ fn cmd_status(_bind_override: Option<&str>) -> Result<()> {
             println!("  pid       : {}", info.pid);
             println!("  uptime    : {}s", info.uptime_secs);
             println!("  clients   : {}", info.client_count);
+            match &info.notify_relay_url {
+                Some(url) => println!("  notify    : {url} ({} device(s))", info.push_device_count),
+                None => println!("  notify    : disabled"),
+            }
             Ok(())
         }
         Ok(other) => {

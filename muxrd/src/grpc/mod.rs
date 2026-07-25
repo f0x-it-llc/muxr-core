@@ -17,7 +17,8 @@ use tonic::{Request, Response, Status, Streaming};
 use crate::proto::muxr_server::Muxr;
 use crate::proto::{
     ActionAck as ProtoAck, ClientFrame, CloseSpaceReq, CreateSessionReq, CreateSpaceReq, Empty,
-    Layout, LoginRequest, LoginResponse, NewPaneReq, NewTabReq, PaneTarget, RenamePaneReq,
+    Layout, ListPushTargetsReq, ListPushTargetsResp, LoginRequest, LoginResponse, NewPaneReq,
+    NewTabReq, PaneTarget, RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq,
     RenameSessionReq, RenameSpaceReq, RenameTabReq, ResizePaneReq, ScrollReq, SessionList,
     SessionRef, SpaceList, SwitchSpaceReq, TabTarget, ToggleFullscreenReq, VersionInfo,
     WriteToPaneReq,
@@ -26,6 +27,7 @@ use crate::proto::{
 pub mod helpers;
 mod layout;
 mod pane_ops;
+mod push_ops;
 mod session_ops;
 mod space_ops;
 mod tab_ops;
@@ -75,6 +77,24 @@ pub struct MuxrService {
     /// the sole backend when `BACKEND_UNSPECIFIED`). No `backend()` shim exists.
     /// Cheap to clone (`Arc`s).
     backends: crate::multiplexer::BackendSet,
+    /// The push-notification relay URL to advertise on `GetVersion`
+    /// (`VersionInfo.notification_relay_url` + the `"push-notifications"`
+    /// capability). `None` when the operator has no relay configured
+    /// (`config::EffectiveConfig::notify_relay_url`) — advertised to clients
+    /// as an empty field and the absence of that capability. Set via
+    /// [`MuxrService::with_notify_relay_url`]; a small seam rather than a new
+    /// constructor parameter so the existing `with_backends`/`new` call sites
+    /// (including every test in `session_ops.rs`/`space_ops.rs`) stay
+    /// unchanged.
+    notify_relay_url: Option<String>,
+    /// Handle to the on-disk push-device registry (`RegisterPushTarget` /
+    /// `ListPushTargets` / `RemovePushTarget`). Cheap to clone (see
+    /// [`crate::notify::devices::PushDeviceStore`] — every method does its
+    /// own fresh read/write, no in-memory cache). Defaults to the standard
+    /// data-dir location; overridable via
+    /// [`MuxrService::with_push_device_store`] (tests point it at a temp
+    /// path instead of the real data dir).
+    push_devices: crate::notify::devices::PushDeviceStore,
 }
 
 impl Default for MuxrService {
@@ -106,6 +126,8 @@ impl MuxrService {
                 crate::cli::BackendKind::Zellij,
                 std::sync::Arc::new(crate::multiplexer::ZellijBackend),
             ),
+            notify_relay_url: None,
+            push_devices: crate::notify::devices::PushDeviceStore::new(),
         }
     }
 
@@ -131,7 +153,33 @@ impl MuxrService {
             control: crate::relay::ControlRegistry::default(),
             view_state: crate::relay::ViewStateRegistry::default(),
             backends,
+            notify_relay_url: None,
+            push_devices: crate::notify::devices::PushDeviceStore::new(),
         }
+    }
+
+    /// Set the push-notification relay URL this service advertises on
+    /// `GetVersion` (see the `notify_relay_url` field doc). Builder-style so
+    /// callers chain it onto [`MuxrService::new`]/[`MuxrService::with_backends`]
+    /// without touching either constructor's signature.
+    #[must_use]
+    pub fn with_notify_relay_url(mut self, notify_relay_url: Option<String>) -> Self {
+        self.notify_relay_url = notify_relay_url;
+        self
+    }
+
+    /// Set the push-device registry handle this service uses for
+    /// `RegisterPushTarget`/`ListPushTargets`/`RemovePushTarget` (see the
+    /// `push_devices` field doc). Builder-style, chainable with
+    /// [`MuxrService::with_notify_relay_url`]. Tests use this to point the
+    /// store at a temp path instead of the real data dir.
+    #[must_use]
+    pub fn with_push_device_store(
+        mut self,
+        push_devices: crate::notify::devices::PushDeviceStore,
+    ) -> Self {
+        self.push_devices = push_devices;
+        self
     }
 
     /// Resolve an opaque session `id` (`"<backend>:<bare>"`) to the backend that
@@ -445,5 +493,35 @@ impl Muxr for MuxrService {
         request: Request<CloseSpaceReq>,
     ) -> Result<Response<ProtoAck>, Status> {
         self.close_space_impl(request).await
+    }
+
+    // ── Push-notification device registry ───────────────────────────────────
+    //
+    // ADMIN-gated (read-only rejected) — see `push_ops` for the store and
+    // validation. RegisterPushTarget additionally rejects when the server has
+    // no relay configured.
+
+    /// Register (or refresh) a device's push handle. MUTATING (read-only rejected).
+    async fn register_push_target(
+        &self,
+        request: Request<RegisterPushTargetReq>,
+    ) -> Result<Response<ProtoAck>, Status> {
+        self.register_push_target_impl(request).await
+    }
+
+    /// List registered devices (metadata + handle prefix only). Read-only rejected.
+    async fn list_push_targets(
+        &self,
+        request: Request<ListPushTargetsReq>,
+    ) -> Result<Response<ListPushTargetsResp>, Status> {
+        self.list_push_targets_impl(request).await
+    }
+
+    /// Remove a registered device by name. MUTATING (read-only rejected).
+    async fn remove_push_target(
+        &self,
+        request: Request<RemovePushTargetReq>,
+    ) -> Result<Response<ProtoAck>, Status> {
+        self.remove_push_target_impl(request).await
     }
 }
