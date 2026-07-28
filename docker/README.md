@@ -64,17 +64,24 @@ docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr
 # LAN/phone: add --host / BIND_ADDR exactly like the zellij rig.
 ```
 
-This builds the `runtime-herdr` image (a pinned, **unmodified** upstream herdr
-binary — `HERDR_VERSION`, default `0.7.1`), starts a headless `herdr server`,
+This builds the `runtime-herdr` image (an **unmodified** upstream herdr binary —
+`HERDR_VERSION`, default `latest`), starts a headless `herdr server`,
 seeds a demo workspace, and exports `MUXRD_BACKEND=herdr` so the `muxrctl`-started
 daemon selects herdr automatically. Then SSH in and drive `muxrctl` exactly as for
 zellij (Configure → Cert → Tokens → **Server (start)** → Pair). The container is
 **`muxr-herdr-rig`**.
 
-> **herdr is pinned to a wire-protocol-14 release (v0.7.1)** — the version muxrd's
-> herdr backend targets. muxrd asserts the version on the wire handshake and fails
-> clearly on a mismatch, so do not bump `HERDR_VERSION` without confirming muxrd's
-> `HERDR_PROTOCOL_VERSION`.
+> **herdr is deliberately NOT pinned** — `HERDR_VERSION` defaults to `latest`, so the
+> rig always exercises the herdr release real users are running. muxrd discovers the
+> server's wire protocol version at runtime (JSON-API `ping`) and echoes it in the
+> relay handshake, so there is no version to keep in sync. Set
+> `HERDR_VERSION=<x.y.z>` to reproduce a specific release.
+>
+> muxrd logs a warning when herdr reports a protocol newer than
+> `HERDR_MAX_TESTED_PROTOCOL` (`muxrd/src/multiplexer/herdr/wire.rs`) but still
+> attaches — herdr's protocol changes have been additive so far. If terminal output
+> ever misbehaves after a herdr release, that warning is the first thing to check;
+> re-run the herdr integration smoke tests and bump the constant once verified.
 
 > **AGPL-3.0:** herdr is a separate, unmodified, user-installed binary that muxrd
 > drives only over its public `0600` Unix sockets. The rig downloads the official

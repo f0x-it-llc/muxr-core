@@ -225,17 +225,32 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # boundary; herdr runs same-user/same-host (its sockets are 0600, no auth).
 FROM runtime AS runtime-herdr
 
-# Pin to the herdr release whose wire PROTOCOL_VERSION muxrd targets (14 → v0.7.1).
-# muxrd asserts the version on the wire handshake and fails clearly on a mismatch,
-# so do NOT bump this without confirming muxrd's HERDR_PROTOCOL_VERSION (multiplexer/herdr/wire.rs).
-ARG HERDR_VERSION=0.7.1
+# The rig tracks the LATEST herdr release and is deliberately NOT pinned.
+#
+# muxrd discovers herdr's wire protocol version at runtime (JSON-API `ping`) and
+# echoes it in the relay handshake, so it is compatible with whatever herdr the
+# operator is running. Pinning here would only hide that: the rig would keep
+# testing one frozen protocol while real users moved on — which is exactly how
+# muxrd came to be stuck on protocol 14 after herdr shipped 16 and 17.
+#
+# `latest` resolves to the newest non-prerelease tag (herdr's `preview-*` builds are
+# flagged as prereleases, so they are correctly skipped). Override to reproduce a
+# specific version:  --build-arg HERDR_VERSION=0.7.4
+ARG HERDR_VERSION=latest
 RUN set -eux; \
+    if [ "${HERDR_VERSION}" = "latest" ]; then \
+      resolved="$(curl -fsSL https://api.github.com/repos/ogulcancelik/herdr/releases/latest \
+        | jq -r .tag_name | sed 's/^v//')"; \
+      [ -n "${resolved}" ] && [ "${resolved}" != "null" ]; \
+    else \
+      resolved="${HERDR_VERSION}"; \
+    fi; \
     curl -fsSL -o /usr/local/bin/herdr \
-      "https://github.com/ogulcancelik/herdr/releases/download/v${HERDR_VERSION}/herdr-linux-x86_64"; \
+      "https://github.com/ogulcancelik/herdr/releases/download/v${resolved}/herdr-linux-x86_64"; \
     chmod +x /usr/local/bin/herdr; \
     # Sanity: the download is a real Linux ELF (curl -f already failed on 404).
     head -c 64 /usr/local/bin/herdr | grep -q ELF; \
-    echo "herdr ${HERDR_VERSION} installed (wire protocol 14)"
+    echo "herdr ${resolved} installed (wire protocol negotiated at runtime)"
 
 # Default this image to the herdr-only backend; compose overrides BACKEND per
 # service (`herdr` or `both`). The entrypoint propagates HERDR_SOCKET_PATH to SSH

@@ -57,8 +57,9 @@ cargo run -p muxrctl
 
 For the **zellij** backend, requires the matching `zellij` binary on `PATH` (the
 server pins a Zellij version and refuses to start against a different one). For the
-**herdr** backend, requires a running `herdr` instance (wire protocol 14, e.g.
-v0.7.1) — a separate, unmodified, user-installed binary (AGPL-3.0). muxrd
+**herdr** backend, requires a running `herdr` instance — a separate, unmodified,
+user-installed binary (AGPL-3.0). muxrd discovers herdr's wire protocol version at
+runtime rather than pinning one, so it works across herdr releases. muxrd
 auto-detects which backends are available and serves all of them; pass `--backend`
 / `MUXRD_BACKEND` to restrict to one.
 

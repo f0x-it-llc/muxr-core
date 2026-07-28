@@ -43,11 +43,12 @@ use serde::Serialize;
 use crate::multiplexer::types::{ActionAck, LayoutSnapshot, PaneSnapshot, TabSnapshot};
 
 use super::api::{
-    ApiRequest, ApiResponseBody, ApiResult, LayoutDescription, PaneCloseParams, PaneDirection,
-    PaneFocusDirectionParams, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot, PaneRenameParams,
-    PaneSplitParams, PaneZoomMode, PaneZoomParams, SplitDirection, TabCloseParams, TabCreateParams,
-    TabFocusParams, TabInfo, TabRenameParams, WorkspaceCloseParams, WorkspaceCreateParams,
-    WorkspaceInfo, WorkspaceListParams, WorkspaceRenameParams,
+    ApiRequest, ApiResponseBody, ApiResult, HerdrServerInfo, LayoutDescription, PaneCloseParams,
+    PaneDirection, PaneFocusDirectionParams, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
+    PaneRenameParams, PaneSplitParams, PaneZoomMode, PaneZoomParams, PingParams, SplitDirection,
+    TabCloseParams, TabCreateParams, TabFocusParams, TabInfo, TabRenameParams,
+    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo, WorkspaceListParams,
+    WorkspaceRenameParams,
 };
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 
@@ -205,6 +206,26 @@ impl HerdrControl {
 
     fn to_params<P: Serialize>(method: &str, params: P) -> Result<serde_json::Value> {
         serde_json::to_value(params).with_context(|| format!("serialize herdr {method} params"))
+    }
+
+    // ── Server discovery ──────────────────────────────────────────────────────
+
+    /// `ping` — discover the connected server's version and wire protocol.
+    ///
+    /// This is how muxrd learns which protocol version to send in the binary relay
+    /// `Hello`. herdr enforces **strict equality** on that handshake — it rejects
+    /// clients that are older *or* newer than itself — so the version must be
+    /// discovered per connection rather than compiled in. The JSON-API socket
+    /// queried here is stable across herdr releases; `ping` has reported
+    /// `protocol` since at least 0.7.1.
+    pub fn ping(&self) -> Result<HerdrServerInfo> {
+        let params = Self::to_params("ping", PingParams {})?;
+        match self.call_typed("ping", params)? {
+            ApiResult::Pong {
+                version, protocol, ..
+            } => Ok(HerdrServerInfo { version, protocol }),
+            other => Err(unexpected("ping", &other)),
+        }
     }
 
     // ── Workspace lifecycle ───────────────────────────────────────────────────
