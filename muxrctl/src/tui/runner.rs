@@ -600,8 +600,8 @@ mod tests {
         // externally-reachable IP. The pairing QR host must be that advertise IP —
         // NOT a discovered container-internal interface IP — so the phone can dial
         // it. An unspecified/loopback advertise entry is skipped.
-        let adv = vec!["0.0.0.0".to_string(), "100.71.31.57".to_string()];
-        assert_eq!(choose_advertise_host("0.0.0.0", &adv), "100.71.31.57");
+        let adv = vec!["0.0.0.0".to_string(), "100.64.0.7".to_string()];
+        assert_eq!(choose_advertise_host("0.0.0.0", &adv), "100.64.0.7");
     }
 
     #[test]
