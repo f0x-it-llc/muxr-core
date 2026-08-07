@@ -18,6 +18,10 @@
 #   --both          Run the MULTI-backend rig: zellij AND herdr at once. muxrd
 #                   auto-detects and serves BOTH simultaneously (Phase 3 serve-all
 #                   — the on-device multi-backend test rig). Run ONE rig at a time.
+#   --fresh         Rebuild the image with --no-cache before starting, so a stale
+#                   cached cargo-build layer can never serve an old muxrd binary.
+#                   (For a full state reset — tokens/cert/volumes too — use
+#                   ./docker/stop.sh first.)
 #   -h, --help      Show this help and exit.
 #
 # Examples:
@@ -40,8 +44,8 @@
 #   ./docker/run.sh --host 192.168.1.50 -- --no-deps
 #
 # Once it is up, SSH in (no password) and start the server with muxrctl:
-#   ssh -t root@<host> -p 2222
-#   muxrctl
+#   ./docker/ssh.sh [<host>] [<ssh-port>]   # wraps ssh -t; skips known_hosts, so
+#   muxrctl                                 # rebuilds never trip the host-key check
 
 set -euo pipefail
 
@@ -56,6 +60,7 @@ usage() {
 BIND_ADDR="127.0.0.1"
 HERDR=0
 BOTH=0
+FRESH=0
 EXTRA_ARGS=()
 
 while [[ $# -gt 0 ]]; do
@@ -93,6 +98,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --both)
       BOTH=1
+      shift
+      ;;
+    --fresh)
+      FRESH=1
       shift
       ;;
     -h|--help)
@@ -135,15 +144,28 @@ backend_label=zellij
 
 echo "[run.sh] BIND_ADDR=${BIND_ADDR}  backend=${backend_label}"
 echo "[run.sh] publishing  gRPC ${BIND_ADDR}:${GRPC_PORT:-50051}  +  SSH ${BIND_ADDR}:${SSH_PORT:-2222}"
-echo "[run.sh] after boot:  ssh -t root@${BIND_ADDR} -p ${SSH_PORT:-2222}  then run  muxrctl"
+echo "[run.sh] after boot:  ./docker/ssh.sh ${BIND_ADDR} ${SSH_PORT:-2222}  then run  muxrctl"
 echo ""
 
 # Profile-gated services are named explicitly so the default zellij service isn't
 # also started (it would clash on the published ports).
 if [[ "${BOTH}" -eq 1 ]]; then
-  exec "${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile both up --build muxrd-both "${EXTRA_ARGS[@]}"
+  COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile both)
+  SERVICE=muxrd-both
 elif [[ "${HERDR}" -eq 1 ]]; then
-  exec "${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile herdr up --build muxrd-herdr "${EXTRA_ARGS[@]}"
+  COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile herdr)
+  SERVICE=muxrd-herdr
 else
-  exec "${DOCKER[@]}" compose -f "${COMPOSE_FILE}" up --build "${EXTRA_ARGS[@]}"
+  COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}")
+  SERVICE=muxrd
 fi
+
+# --fresh: force a from-scratch image build first (`up --build` alone reuses the
+# layer cache, which is how a stale muxrd binary can survive a "rebuild"). The
+# subsequent `up --build` then hits the just-warmed cache and is a no-op.
+if [[ "${FRESH}" -eq 1 ]]; then
+  echo "[run.sh] --fresh: rebuilding ${SERVICE} with --no-cache…"
+  "${COMPOSE[@]}" build --no-cache "${SERVICE}"
+fi
+
+exec "${COMPOSE[@]}" up --build "${SERVICE}" "${EXTRA_ARGS[@]}"

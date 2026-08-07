@@ -39,13 +39,21 @@ docker compose -f docker/compose.yaml up --build
 ./docker/run.sh
 ```
 
-The container boots a zellij session + sshd and prints a banner. SSH in (a TTY
-is required for the TUI — note the `-t`) and start the server with `muxrctl`:
+The container boots a zellij session + sshd and prints a banner. SSH in (no
+password) and start the server with `muxrctl`:
 
 ```bash
-ssh -t root@127.0.0.1 -p 2222      # no password
+./docker/ssh.sh                  # loopback; or: ./docker/ssh.sh <host> <ssh-port>
 muxrctl                          # Configure → Cert → Tokens → Server → Pair
 ```
+
+`ssh.sh` wraps `ssh -t` with `-o StrictHostKeyChecking=no -o
+UserKnownHostsFile=/dev/null`. The rig's SSH host keys are generated at image
+**build** time, so every `stop.sh` + rebuild presents a new host identity —
+plain `ssh` would pin the old key in `~/.ssh/known_hosts` and fail the next
+rebuild with `REMOTE HOST IDENTIFICATION HAS CHANGED`. The wrapper never
+records the key (dev rig only). If you already hit that error, clear the stale
+entry once: `ssh-keygen -R '[<host>]:<ssh-port>'`.
 
 In `muxrctl`: generate the cert, create a token, **start** the server, then
 open **Pair** to scan the QR from the app (or copy the token + cert manually).
@@ -199,12 +207,36 @@ cargo run --example read_client -- \
 ## run.sh flags
 
 ```
-./docker/run.sh [--host <IP>] [-- EXTRA_COMPOSE_ARGS...]
+./docker/run.sh [OPTIONS] [-- EXTRA_COMPOSE_ARGS...]
 ```
 
-| Flag          | Default     | Description                                  |
-|---------------|-------------|----------------------------------------------|
-| `--host <IP>` | `127.0.0.1` | Publish the gRPC + SSH ports on this address |
+| Flag             | Default     | Description                                        |
+|------------------|-------------|----------------------------------------------------|
+| `--host <IP>`    | `127.0.0.1` | Publish the gRPC + SSH ports on this address       |
+| `--port <N>`     | `50051`     | Host port to publish gRPC on                       |
+| `--ssh-port <N>` | `2222`      | Host port to publish SSH on                        |
+| `--herdr`        | —           | Run the herdr-backend rig instead of zellij        |
+| `--both`         | —           | Run the multi-backend rig (zellij + herdr at once) |
+| `--fresh`        | —           | `--no-cache` rebuild first — never a stale binary  |
+
+## Teardown — stop.sh
+
+The rig is a **throwaway environment**: spin it up with `run.sh`, tear it down
+completely with `stop.sh`. With no flags it stops **all** rig variants and
+removes their containers, named volumes (token DB, TLS cert, zellij/herdr
+session state, muxr-notify DB) **and** the built images — the next `run.sh`
+rebuilds and re-pairs from a clean slate:
+
+```bash
+./docker/stop.sh               # full reset (tokens + images gone)
+./docker/stop.sh --keep-data   # stop, but keep tokens/cert (phone stays paired)
+./docker/stop.sh --keep-image  # stop + wipe tokens, keep the built image
+./docker/stop.sh --purge       # full reset + prune the Docker build cache
+```
+
+If a "rebuild" ever serves an old `muxrd` binary, that's the Docker layer
+cache: use `./docker/run.sh --fresh` (scoped `--no-cache` rebuild) or
+`./docker/stop.sh --purge` (daemon-wide build-cache prune).
 
 ## Notes
 
@@ -214,9 +246,11 @@ cargo run --example read_client -- \
   deployments — see [TLS modes & deployment](../README.md#tls-modes--deployment) in the main README.
   Those modes are not exercised by this rig.
 - **Named volumes** persist the token DB, cert, and zellij config across
-  restarts. Use `docker compose down -v` to reset everything.
+  restarts. Use `./docker/stop.sh` (see above) to reset everything.
 - **SSH:** passwordless root login (the entrypoint clears root's password —
   dev-rig only). `SSH_PORT` changes the published SSH port (default `2222`).
+  Connect via `./docker/ssh.sh` — host keys change on every rebuild, so plain
+  `ssh` trips the known_hosts check (see Quickstart).
 - **Zellij version:** must remain 0.44.3. Upgrading zellij without recompiling
   muxrd will cause a version-mismatch error at startup.
 - **muxr-notify:** `NOTIFY_ENABLED` (default `1`) and `NOTIFY_PORT` (default `8090`)

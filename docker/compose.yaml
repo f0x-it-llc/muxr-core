@@ -23,8 +23,9 @@
 # Or use the helper wrapper:
 #   ./docker/run.sh --host <lan-ip>
 #
-# Then SSH in and drive it with muxrctl (a TTY is required — note the -t):
-#   ssh -t root@<host> -p 2222     # no password
+# Then SSH in and drive it with muxrctl (host keys rotate per rebuild — use the
+# known_hosts-free wrapper):
+#   ./docker/ssh.sh <host> 2222    # no password
 #   muxrctl                      # Configure → Cert → Tokens → Server → Pair
 #
 # muxrctl starts the gRPC server on :50051; the cert is self-signed (pair by
