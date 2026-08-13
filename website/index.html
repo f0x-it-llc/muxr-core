@@ -8,15 +8,12 @@
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/css/tokens.css">
-  <link rel="stylesheet" href="assets/css/base.css">
-  <link rel="stylesheet" href="assets/css/device.css">
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/glyph.css">
   <script src="assets/js/main.js" defer></script>
 </head>
 <body>
 
-  <!-- ═══════════════ SITE NAV (canonical shell — copied verbatim by docs.html / guide.html) ═══════════════ -->
   <header class="site-nav">
     <nav class="nav-inner" aria-label="Primary">
       <a class="nav-brand" href="index.html" aria-label="Muxr home">
@@ -64,7 +61,7 @@
             <p class="hero-sub">A Flutter client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
 
             <div class="ascii-box">┌──────────────────────────────┐
-│  muxr · remote attach │
+│  muxr · remote attach        │
 │  TLS + bearer · QR pairing   │
 └──────────────────────────────┘</div>
 
@@ -79,36 +76,12 @@
             </div>
           </div>
 
-          <!-- Full-fidelity CSS phone preview — Terminal screen (multi-pane) -->
+          <!-- Hero device preview — reuses the same Glyph terminal-card component as the app itself -->
           <div class="hero-preview">
             <div class="device">
               <div class="phone-frame" aria-hidden="true">
-                <div class="phone-notch">
-                  <div class="camera"></div>
-                  <div class="speaker"></div>
-                  <div class="camera"></div>
-                </div>
-                <div class="status-bar">
-                  <span class="time">9:41</span>
-                  <div class="status-icons">
-                    <svg viewBox="0 0 17 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <rect x="0" y="3" width="3" height="9" rx="1" fill="currentColor" opacity="0.4"/>
-                      <rect x="4.5" y="2" width="3" height="10" rx="1" fill="currentColor" opacity="0.6"/>
-                      <rect x="9" y="0" width="3" height="12" rx="1" fill="currentColor"/>
-                      <rect x="13.5" y="0" width="3" height="12" rx="1" fill="currentColor"/>
-                    </svg>
-                    <svg viewBox="0 0 16 12" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
-                      <path d="M8 2.4C5.6 2.4 3.4 3.4 1.8 5L0 3.2C2.2 1.2 5 0 8 0s5.8 1.2 8 3.2L14.2 5C12.6 3.4 10.4 2.4 8 2.4z" opacity="0.4"/>
-                      <path d="M8 5.6C6.4 5.6 5 6.2 3.9 7.2L2.1 5.4C3.6 4 5.7 3.2 8 3.2s4.4.8 5.9 2.2L12.1 7.2C11 6.2 9.6 5.6 8 5.6z" opacity="0.7"/>
-                      <circle cx="8" cy="11" r="1.5"/>
-                    </svg>
-                    <svg viewBox="0 0 25 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <rect x="0.5" y="0.5" width="21" height="11" rx="3.5" stroke="currentColor" opacity="0.35"/>
-                      <rect x="2" y="2" width="19" height="8" rx="2" fill="currentColor"/>
-                      <path d="M23 4v4a2 2 0 0 0 0-4z" fill="currentColor" opacity="0.4"/>
-                    </svg>
-                  </div>
-                </div>
+                <div class="phone-notch"></div>
+                <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
                 <div class="app-topbar">
                   <div class="logo">
                     <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
@@ -119,109 +92,21 @@
                     </svg>
                     muxr
                   </div>
-                  <div class="topbar-center">terminal</div>
-                  <div class="topbar-action">
-                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" xmlns="http://www.w3.org/2000/svg">
-                      <circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="4" r="1.5"/><circle cx="10" cy="16" r="1.5"/>
-                    </svg>
-                  </div>
                 </div>
-                <div class="screen-content">
-                  <div class="terminal-screen">
-                    <!-- Zellij tab bar (reconciled with the live app) -->
-                    <div class="tab-bar">
-                      <div class="tab-item">
-                        <span class="tab-num">1</span>
-                        editor
-                        <span class="tab-fs">(FS)</span>
-                      </div>
-                      <div class="tab-item active">
-                        <span class="tab-num">2</span>
-                        shell
-                      </div>
-                      <div class="tab-item">
-                        <span class="tab-num">3</span>
-                        logs
-                      </div>
-                      <div class="tab-item">
-                        <span class="tab-num">4</span>
-                        float
-                      </div>
-                      <div class="tab-add-btn">+</div>
-                    </div>
-                    <!-- pane strip -->
-                    <div class="pane-info-strip">
-                      <span class="pane-title">Pane #1</span>
-                      <span>·</span>
-                      <span class="pane-cwd">/root/projects/api</span>
-                      <span class="pane-fs-icon">
-                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" xmlns="http://www.w3.org/2000/svg">
-                          <path d="M1 4V1h3M11 4V1H8M1 8v3h3M11 8v3H8"/>
-                        </svg>
-                      </span>
-                    </div>
-                    <!-- Multi-pane terminal: focused nvim editor over htop -->
-                    <div class="terminal-output">
-                      <div class="term-pane editor">
-                        <div class="vim-statusline-top">
-                          <span class="mode">NORMAL</span>
-                          <span>main.rs</span>
-                          <span class="spacer">utf-8</span>
-                        </div>
-                        <div class="code-body"><span class="t-dim">  1 </span><span class="t-purple">use</span> <span class="t-teal">axum</span><span class="t-muted">::{Router, routing::get};</span>
-<span class="t-dim">  2 </span><span class="t-purple">use</span> <span class="t-teal">tokio</span><span class="t-muted">::net::TcpListener;</span>
-<span class="t-dim">  3 </span>
-<span class="t-dim">  4 </span><span class="t-orange t-bold">#[tokio::main]</span>
-<span class="t-dim">  5 </span><span class="t-purple">async fn</span> <span class="t-green">main</span><span class="t-muted">() {</span>
-<span class="t-bg-raised t-teal">  6 </span>  <span class="t-purple">let</span> app <span class="t-muted">=</span> Router::new<span class="t-muted">()</span>
-<span class="t-dim">  7 </span>    .route<span class="t-muted">(</span><span class="t-yellow">"/"</span><span class="t-muted">, get(</span>handler<span class="t-muted">));</span>
-<span class="t-dim">  8 </span>
-<span class="t-dim">  9 </span>  <span class="t-purple">let</span> l <span class="t-muted">=</span> TcpListener::bind<span class="t-muted">(</span>
-<span class="t-dim"> 10 </span>    <span class="t-yellow">"0.0.0.0:50051"</span><span class="t-muted">).await?;</span>
-<span class="t-dim"> 11 </span>  axum::serve<span class="t-muted">(l, app).await?;</span>
-<span class="t-dim"> 12 </span><span class="t-muted">}</span><span class="cursor-block"></span></div>
-                        <div class="vim-statusline-bottom">
-                          <span>main.rs</span>
-                          <span class="spacer">Ln 6, Col 4</span>
-                          <span>Rust</span>
-                        </div>
-                      </div>
-                      <div class="term-pane monitor">
-                        <div class="htop-body"><div class="htop-bar"><span class="cpu-label t-dim">1</span><span class="htop-meter"><span class="fill green dev-flex-2"></span><span class="fill yellow dev-flex-1"></span></span><span class="t-green">61%</span></div>
-<div class="htop-bar"><span class="cpu-label t-dim">2</span><span class="htop-meter"><span class="fill green dev-flex-1"></span></span><span class="t-green">24%</span></div>
-<div class="htop-bar"><span class="cpu-label t-dim">Mem</span><span class="htop-meter"><span class="fill orange dev-flex-2"></span></span><span class="t-orange">3.1G</span></div>
-<div class="htop-procs"><span class="t-teal">  PID</span> <span class="t-muted">USER   CPU%  COMMAND</span>
-<span class="t-green"> 1042</span> <span class="t-muted">root   18.2  </span><span class="t-teal">zellij</span>
-<span class="t-green"> 2210</span> <span class="t-muted">root    9.4  </span><span class="t-yellow">cargo</span>
-<span class="t-green"> 2233</span> <span class="t-muted">root    4.1  htop</span></div></div>
-                      </div>
-                    </div>
-                    <!-- Terminal FAB (command center) -->
-                    <div class="term-fab">
-                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" xmlns="http://www.w3.org/2000/svg">
-                        <path d="M3 6h9M16 6h1M3 14h1M8 14h9"/><circle cx="14" cy="6" r="2"/><circle cx="6" cy="14" r="2"/>
-                      </svg>
-                    </div>
-                    <!-- Mobile keyboard bar -->
-                    <div class="keyboard-bar">
-                      <div class="key-btn active-key">Ctrl</div>
-                      <div class="key-btn">Alt</div>
-                      <div class="key-btn">Esc</div>
-                      <div class="key-sep"></div>
-                      <div class="key-btn">Tab</div>
-                      <div class="key-btn">↑</div>
-                      <div class="key-btn">↓</div>
-                      <div class="key-btn">←</div>
-                      <div class="key-btn">→</div>
-                      <div class="key-sep"></div>
-                      <div class="key-btn">PgUp</div>
-                      <div class="key-btn">PgDn</div>
-                      <div class="key-sep"></div>
-                      <div class="key-btn danger">Del</div>
-                    </div>
+                <div class="screen-body">
+                  <div class="mini-tabs">
+                    <span class="t">1 btop</span><span class="t">2 minefit-api</span><span class="t active">3 devbox</span>
                   </div>
-                  <div class="home-indicator"><div class="home-bar"></div></div>
+                  <div class="mini-pathbar">ed@devbox: ~</div>
+                  <div class="mini-term">
+                    <span class="p">$</span> zellij attach dev-main<br>
+                    <span class="out">attached to session "dev-main" · 3 panes</span><br>
+                    <span class="cm"># full session control, from your pocket</span><br>
+                    <span class="p">ed@devbox:~$</span> <span class="cur"></span>
+                  </div>
+                  <div class="mini-fab">▤</div>
                 </div>
+                <div class="home-indicator"><div class="home-bar"></div></div>
               </div>
             </div>
           </div>
@@ -308,7 +193,7 @@
 
     <!-- ═══════════════ HOW IT WORKS ═══════════════ -->
     <section class="section">
-      <div class="container">
+      <div class="container container-narrow">
         <div class="section-head">
           <span class="eyebrow">// three steps</span>
           <h2>From bare server to pocket terminal</h2>
@@ -357,23 +242,22 @@
             <span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span>
             <span class="tdot-label">muxrctl · server</span>
           </div>
-          <div class="terminal-body"><span class="t-dim">$</span> muxrd start <span class="t-purple">--daemonize --bind</span> 0.0.0.0:50051
-<span class="t-teal">→</span> zellij <span class="t-green">0.44.3</span> detected <span class="t-muted">(version match ok)</span>
-<span class="t-teal">→</span> TLS cert loaded <span class="t-muted">~/.local/share/zellij/muxrd/</span>
-<span class="t-teal">→</span> listening on <span class="t-orange">0.0.0.0:50051</span> <span class="t-muted">(SAN: 192.168.0.42)</span>
-
-<span class="t-dim">$</span> muxrd create-token <span class="t-purple">--name</span> mobile
-<span class="t-green">✓</span> token created  <span class="t-yellow">3f9a2c1b-7e44-4d02-9c6a-1b8e5f0d2a77</span>  <span class="t-muted">read-write</span>
-
-<span class="t-dim">$</span> muxrctl <span class="t-muted"># launch the setup TUI → Tokens → Enter for QR</span>
-<span class="t-teal">●</span> client <span class="t-green">attached</span>  <span class="t-purple">phone · iPhone</span>  <span class="t-muted">3 sessions, 7 panes</span><span class="cursor-block"></span></div>
+          <div class="terminal-body"><span class="term-line"><span class="t-dim">$</span> muxrd start <span class="t-purple">--daemonize --bind</span> 0.0.0.0:50051</span>
+<span class="term-line"><span class="t-teal">→</span> zellij <span class="t-green">0.44.3</span> detected <span class="t-muted">(version match ok)</span></span>
+<span class="term-line"><span class="t-teal">→</span> TLS cert loaded <span class="t-muted">~/.local/share/zellij/muxrd/</span></span>
+<span class="term-line"><span class="t-teal">→</span> listening on <span class="t-orange">0.0.0.0:50051</span> <span class="t-muted">(SAN: 192.168.0.42)</span></span>
+<span class="term-line">&nbsp;</span>
+<span class="term-line"><span class="t-dim">$</span> muxrd create-token <span class="t-purple">--name</span> mobile</span>
+<span class="term-line"><span class="t-green">✓</span> token created&nbsp; <span class="t-yellow">3f9a2c1b-7e44-4d02-9c6a-1b8e5f0d2a77</span>&nbsp; <span class="t-muted">read-write</span></span>
+<span class="term-line">&nbsp;</span>
+<span class="term-line"><span class="t-dim">$</span> muxrctl <span class="t-muted"># launch the setup TUI → Tokens → Enter for QR</span></span>
+<span class="term-line"><span class="t-teal">●</span> client <span class="t-green">attached</span>&nbsp; <span class="t-purple">phone · iPhone</span>&nbsp; <span class="t-muted">3 sessions, 7 panes</span><span class="cursor-block"></span></span></div>
         </div>
       </div>
     </section>
 
   </main>
 
-  <!-- ═══════════════ FOOTER (canonical shell — copied verbatim by other pages) ═══════════════ -->
   <footer class="site-footer">
     <div class="footer-inner">
       <a class="footer-brand" href="index.html" aria-label="Muxr home">
