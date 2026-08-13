@@ -76,35 +76,59 @@
             </div>
           </div>
 
-          <!-- Hero device preview — reuses the same Glyph terminal-card component as the app itself -->
+          <!-- Hero device preview — a miniature of the app's real Terminal screen:
+               app bar, connection row, tab strip, terminal card. Example data only. -->
           <div class="hero-preview">
             <div class="device">
               <div class="phone-frame" aria-hidden="true">
                 <div class="phone-notch"></div>
                 <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
-                <div class="app-topbar">
-                  <div class="logo">
-                    <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
-                      <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
-                      <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
-                      <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
-                      <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
-                    </svg>
-                    muxr
+                <div class="screen-body pm-screen-term">
+
+                  <div class="pm-topbar">
+                    <div class="pm-brand"><span class="pm-brand-mark"><span></span><span></span><span></span><span></span></span>muxr</div>
+                    <div class="pm-topbar-title">192.168.0.42</div>
+                    <span class="pm-topbar-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3.2"/>
+                        <path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2 5.4 5.4"/>
+                      </svg>
+                    </span>
                   </div>
-                </div>
-                <div class="screen-body">
-                  <div class="mini-tabs">
-                    <span class="t">1 btop</span><span class="t">2 minefit-api</span><span class="t active">3 devbox</span>
+
+                  <div class="pm-conn-row">
+                    <span class="pm-dot-ok"></span>
+                    <span class="addr">192.168.0.42:50051</span>
+                    <span class="meta">zellij 0.44.3</span>
+                    <span class="pm-badge-ok">TLS ✓</span>
                   </div>
-                  <div class="mini-pathbar">ed@devbox: ~</div>
-                  <div class="mini-term">
-                    <span class="p">$</span> zellij attach dev-main<br>
-                    <span class="out">attached to session "dev-main" · 3 panes</span><br>
-                    <span class="cm"># full session control, from your pocket</span><br>
-                    <span class="p">ed@devbox:~$</span> <span class="cur"></span>
+
+                  <div class="pm-tabs">
+                    <span class="pm-tab"><span class="idx">1</span>btop</span>
+                    <span class="pm-tab"><span class="idx">2</span>api</span>
+                    <span class="pm-tab active"><span class="idx">3</span>devbox</span>
                   </div>
-                  <div class="mini-fab">▤</div>
+
+                  <div class="pm-term-wrap">
+                    <div class="pm-term-card">
+                      <div class="pm-term-statusrow">
+                        <div class="pm-pane-title">ed@devbox: ~</div>
+                        <span class="pm-expand">
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                            <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>
+                          </svg>
+                        </span>
+                      </div>
+                      <div class="pm-term-body">
+                        <span class="pm-line"><span class="p">ed@devbox:~$</span> zellij attach dev</span>
+                        <span class="pm-line"><span class="out">attached · session "dev" · 3 panes</span></span>
+                        <span class="pm-line"><span class="out">tls ok · cert fingerprint pinned</span></span>
+                        <span class="pm-line"><span class="cm"># full control, from your pocket</span></span>
+                        <span class="pm-line"><span class="p">ed@devbox:~$</span> <span class="pm-cur"></span></span>
+                      </div>
+                    </div>
+                  </div>
+
                 </div>
                 <div class="home-indicator"><div class="home-bar"></div></div>
               </div>

@@ -103,19 +103,29 @@
               <p>The <strong>Remember me</strong> toggle extends the server-side session-token TTL to 28 days (default is approximately 5 minutes without it).</p>
             </div>
             <div class="device">
+              <!-- Connect screen: manual fields, remember-me toggle, QR-scan FAB, saved server -->
               <div class="phone-frame sm" aria-hidden="true">
                 <div class="phone-notch"></div>
                 <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
-                <div class="app-topbar"><div class="logo"><svg viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/><rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/><rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/><rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/></svg>muxr</div></div>
                 <div class="screen-body">
-                  <div class="mini-connect">
-                    <div class="mini-mark"><span></span><span></span><span></span><span></span></div>
-                    <div class="mini-h">Connect to server</div>
-                    <div class="mini-field"><label>server url</label><div class="v">dev.home.local:50051</div></div>
-                    <div class="mini-field"><label>login token</label><div class="v">••••••••••••</div></div>
-                    <div class="mini-btn-primary">→ connect</div>
-                    <div class="mini-saved"><span class="mini-dot"></span><span>dev.home.local · 2h ago</span></div>
+                  <div class="pm-connect">
+                    <div class="pm-mark"><span></span><span></span><span></span><span></span></div>
+                    <div class="pm-h2">Connect to server</div>
+                    <div class="pm-field"><label>server url</label><div class="v">192.168.0.42:50051</div></div>
+                    <div class="pm-field"><label>login token</label><div class="v">••••••••••••</div></div>
+                    <div class="pm-toggle-row"><span>Remember me</span><span class="pm-toggle on"></span></div>
+                    <div class="pm-btn">→ connect</div>
+                    <div class="pm-hdr">saved servers</div>
+                    <div class="pm-saved-row">
+                      <span class="pm-dot-ok"></span>
+                      <span><span class="addr">192.168.0.42:50051</span><span class="meta">cert-pinned TLS · 2h ago</span></span>
+                    </div>
                   </div>
+                  <span class="pm-fab">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 21v.01M17 21h.01M21 17h.01"/>
+                    </svg>
+                  </span>
                 </div>
                 <div class="home-indicator"><div class="home-bar"></div></div>
               </div>
@@ -136,16 +146,48 @@
               <p>To create a new session, use the <strong>new-session</strong> affordance (the dashed &ldquo;+ new session&rdquo; button on phone, or the create button on the tablet sessions view) and enter a name in the dialog.</p>
             </div>
             <div class="device">
+              <!-- Sessions screen: connection row, session cards with state chips, + new session -->
               <div class="phone-frame sm" aria-hidden="true">
                 <div class="phone-notch"></div>
                 <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
-                <div class="app-topbar"><div class="logo"><svg viewBox="0 0 20 20" fill="none"><rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/><rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/><rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/><rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/></svg>muxr</div><div class="topbar-center">dev.home.local</div></div>
                 <div class="screen-body">
-                  <div class="mini-sessions">
-                    <div class="mini-conn-row"><span class="mini-dot"></span>dev.home.local:50051 · TLS ✓</div>
-                    <div class="mini-sess-card"><div class="n">dev</div><div class="m">9 panes · 4 tabs · running</div></div>
-                    <div class="mini-sess-card"><div class="n">herdr</div><div class="m">3 panes · 2 tabs · running</div></div>
+
+                  <div class="pm-topbar">
+                    <div class="pm-brand"><span class="pm-brand-mark"><span></span><span></span><span></span><span></span></span>muxr</div>
+                    <div class="pm-topbar-title">192.168.0.42</div>
+                    <span class="pm-topbar-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3.2"/>
+                        <path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2 5.4 5.4"/>
+                      </svg>
+                    </span>
                   </div>
+
+                  <div class="pm-conn-row">
+                    <span class="pm-dot-ok"></span>
+                    <span class="addr">192.168.0.42:50051</span>
+                    <span class="pm-badge-ok">TLS ✓</span>
+                  </div>
+
+                  <div class="pm-scroll">
+                    <div class="pm-sess-list">
+                      <div class="pm-sess-card running">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">D</span><span class="pm-sess-name">dev</span><span class="pm-chip run">running</span></div>
+                        <div class="pm-sess-meta"><span>▣ 9 panes</span><span>◧ 4 tabs</span></div>
+                        <div class="pm-pane-pills"><span class="pm-pane-pill">btop</span><span class="pm-pane-pill">ed@devbox:~</span></div>
+                      </div>
+                      <div class="pm-sess-card running">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">H</span><span class="pm-sess-name">herdr</span><span class="pm-chip run">running</span></div>
+                        <div class="pm-sess-meta"><span>▣ 3 panes</span><span>◧ 2 tabs</span><span>◆ 5 spaces</span></div>
+                      </div>
+                      <div class="pm-sess-card idle">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">B</span><span class="pm-sess-name">build</span><span class="pm-chip neutral">resurrectible</span></div>
+                        <div class="pm-sess-meta"><span>▣ 0 panes</span><span>◧ 0 tabs</span></div>
+                      </div>
+                      <div class="pm-new-btn"><b>+</b> new session</div>
+                    </div>
+                  </div>
+
                 </div>
                 <div class="home-indicator"><div class="home-bar"></div></div>
               </div>
