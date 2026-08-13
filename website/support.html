@@ -118,11 +118,12 @@
           <p>This is by design. Mutating RPCs — creating, renaming, or closing sessions, tabs, and panes, and server-side pane fullscreen — fail closed on read-only tokens; the app also hides those affordances entirely when connected read-only. If you need to make changes, mint a read-write token instead: <code>muxrd create-token --name mobile</code> (omit <code>--read-only</code>).</p>
 
           <h3>Push notifications aren't arriving</h3>
-          <p>Notifications are an optional feature, and only arrive once your device is registered with a relay — device registration is a capability arriving with app-side push support. A few things to check:</p>
+          <p>Notifications are an optional feature, and only arrive once your device is registered with a relay — device registration is a capability arriving with app-side push support. Whether push is available at all is decided by <strong>your server</strong>, and the app learns it from the server — there is no app-side relay setting. Things to check, in order:</p>
           <ul>
-            <li>Confirm the app is pointed at a relay at all — either the <strong>hosted Muxr Push relay</strong>, or your own <strong>self-hosted</strong> <code>muxr-notify</code> instance.</li>
-            <li>The hosted relay is what a <strong>Muxr Push subscription</strong> pays for; a self-hosted relay is free and needs no subscription.</li>
-            <li>If you're self-hosting, confirm <code>muxr-notify</code> is running and reachable from the app.</li>
+            <li><strong>Your server runs the herdr backend.</strong> Push requires herdr's event kernel — a zellij-only <code>muxrd</code> refuses device registration and reports push as unsupported.</li>
+            <li><strong>Your server has a relay configured.</strong> <code>muxrd</code>'s <code>notify_relay_url</code> setting (or the <code>MUXRD_NOTIFY_RELAY_URL</code> environment variable) points at the hosted Muxr Push relay by default; setting it empty disables push entirely.</li>
+            <li><strong>Your server can reach the relay.</strong> Notifications are sent by <code>muxrd</code> to the relay — not by your phone — so check the server's network and firewall if sends fail. Your phone only contacts the relay once, at registration time. If you're self-hosting <code>muxr-notify</code>, confirm it is running and reachable from the server.</li>
+            <li><strong>The hosted relay currently supports Android devices only</strong> (see the Privacy Policy). It is what a <strong>Muxr Push subscription</strong> pays for; a self-hosted relay is free and needs no subscription.</li>
           </ul>
           <p>See the <a href="privacy.html#push">Privacy Policy's Muxr Push section</a> for what a notification does and doesn't contain.</p>
         </section>
@@ -133,7 +134,7 @@
           <ul>
             <li><strong>App version</strong> — found in the app's Settings screen.</li>
             <li><strong>Server version</strong> — run <code>muxrd --version</code>, or check the Connection info panel in the app's Settings, which shows the connected server's version.</li>
-            <li><strong>A relevant <code>muxrd</code> log snippet</strong> — copy the lines around when the problem occurred. If you ran the server in the foreground with <code>muxrd start</code>, this is in your terminal; as a daemon, check <code>muxrd status</code> for the log location.</li>
+            <li><strong>A relevant <code>muxrd</code> log snippet</strong> — copy the lines around when the problem occurred. If you ran the server in the foreground with <code>muxrd start</code>, this is in your terminal; as a daemon, check <code>muxrd status</code> for the log location. Skim the snippet before sending and redact anything sensitive — hostnames, tokens, or session content.</li>
           </ul>
           <p>Questions about data instead of a technical issue? See the <a href="privacy.html">Privacy Policy</a> and the <a href="terms.html">Terms of Use</a>.</p>
         </section>

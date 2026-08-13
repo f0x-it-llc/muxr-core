@@ -184,10 +184,11 @@
           <h3>How long registrations are kept</h3>
           <p>A registration record is kept until it is deleted. It is deleted when:</p>
           <ul>
-            <li>You <strong>unregister the device</strong> in the App — the relay removes the record, token included, from its database immediately.</li>
+            <li>The App <strong>deletes its registration with the relay</strong> — a capability arriving together with app-side push support — at which point the relay removes the record, token included, from its database immediately.</li>
             <li>You <strong>ask us to delete it</strong> by emailing <a href="mailto:support@muxr.app">support@muxr.app</a>.</li>
           </ul>
-          <p>If Google <strong>reports the token as invalid or expired</strong> (for example, the App was uninstalled), the relay <strong>marks the registration inactive and stops sending to it</strong> — every later notification request for that handle is refused, and the stored token is undeliverable. That flag does not by itself erase the record: the row, token included, stays in the database until one of the two deletions above happens. If you want it gone, unregister in the App or email us.</p>
+          <p>One distinction worth knowing: removing a device on your own server (for example in the <code>muxrctl</code> Devices screen) deletes it from <em>your server's</em> registry and stops your server sending notifications to that device — but it does not delete the relay-side registration record. Email us if you want that record removed as well.</p>
+          <p>If Google <strong>reports the token as invalid or expired</strong> (for example, the App was uninstalled), the relay <strong>marks the registration inactive and stops sending to it</strong> — every later notification request for that handle is refused, and the stored token is undeliverable. That flag does not by itself erase the record: the row, token included, stays in the database until one of the two deletions above happens. If you want it gone, email us.</p>
           <p>There is no other schedule: while a device stays registered, its record stays. With no registered devices, the relay sends no outbound traffic at all.</p>
         </section>
 
@@ -206,7 +207,7 @@
         <section id="security">
           <h2>How data is protected</h2>
           <ul>
-            <li><strong>Credentials</strong> are held in the operating system's secure storage — iOS Keychain or Android Keystore — released only after a biometric prompt, and wiped from memory after use.</li>
+            <li><strong>Credentials</strong> are held in the operating system's secure storage — iOS Keychain or Android Keystore — released only after a biometric prompt.</li>
             <li><strong>Connections to your server</strong> use TLS. When you pair by QR against a self-signed server, the App pins the certificate's SHA-256 fingerprint, so a CA-valid impostor cannot take its place.</li>
             <li><strong>The hosted relay</strong> stores only the minimal registration record described above, on infrastructure we control, and talks to Firebase Cloud Messaging over encrypted connections.</li>
           </ul>
