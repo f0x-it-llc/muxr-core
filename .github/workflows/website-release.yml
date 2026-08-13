@@ -7,11 +7,27 @@ on:
         description: "Extra image tag to publish alongside `latest` and `sha-<short-commit>` (e.g. 0.4.0). Leave empty to skip."
         required: false
         type: string
+      allow_non_main:
+        description: "Allow building from a non-main ref. The build then publishes sha-<short-commit> (+ the extra tag) ONLY — never `latest`."
+        required: false
+        default: false
+        type: boolean
+      fonts_base_url:
+        description: "Disaster recovery: override the font download origin (any https mirror serving the same filenames, e.g. https://backup.example.com/muxr-fonts). Leave empty for the script default (https://muxr.app/fonts)."
+        required: false
+        type: string
 
 # Least privilege: read by default; only the job that pushes to GHCR gets
 # packages: write (set per-job below).
 permissions:
   contents: read
+
+# Serialize dispatches: `latest` is a mutable tag, so two concurrent runs would
+# race to decide which commit production pulls. Never cancel a run mid-push —
+# that could leave the tag set published only in part.
+concurrency:
+  group: website-release
+  cancel-in-progress: false
 
 jobs:
   # ── Build the static website image and publish it to GHCR ───────────
@@ -23,18 +39,71 @@ jobs:
       packages: write
 
     steps:
+      - name: Guard release ref
+        id: guard
+        shell: bash
+        env:
+          # Context values are read through env, never interpolated into the
+          # script body (see "Validate dispatch inputs" for the rationale).
+          BUILD_REF: ${{ github.ref }}
+          ALLOW_NON_MAIN: ${{ inputs.allow_non_main }}
+        run: |
+          # INVARIANT: `:latest` is what production pulls, so it may only ever be
+          # moved by a build of refs/heads/main — mirroring release.yml, which
+          # pins `ref: main` for the same reason. A non-main build must be opted
+          # into explicitly and then publishes immutable sha-<short-commit>
+          # (+ optional extra tag) tags only; `:latest` stays where it is.
+          if [ "$BUILD_REF" = "refs/heads/main" ]; then
+            echo "Building from main — will publish latest + sha-<short-commit>."
+            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
+          elif [ "$ALLOW_NON_MAIN" = "true" ]; then
+            echo "::warning::Building from '$BUILD_REF' with allow_non_main=true — publishing sha-<short-commit> (+ extra tag) only, NOT latest."
+            echo "publish_latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Refusing to build the website image from '$BUILD_REF'. This workflow releases from refs/heads/main; re-dispatch with allow_non_main=true to build another ref (sha-tagged only, latest untouched)."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # Nothing in this job talks to git after checkout, but fetch_fonts.sh
+          # does hit the network — don't leave the job's GITHUB_TOKEN sitting in
+          # .git/config while that runs.
+          persist-credentials: false
 
-      - name: Validate optional tag input
-        id: tag
+      - name: Validate dispatch inputs
+        id: dispatch
+        # `shell: bash` is the ubuntu-latest default, but state it explicitly:
+        # the validation below relies on bash's [[ =~ ]].
+        shell: bash
         env:
-          # Pass the dispatch input via env (not raw ${{ }} in the script) to
-          # avoid shell injection and to validate it before use.
+          # Dispatch inputs reach the script through env, never as raw ${{ }}:
+          # this job holds packages: write plus GITHUB_TOKEN, and workflow_dispatch
+          # inputs are attacker-influenceable (the REST API accepts arbitrary
+          # strings), so a raw interpolation would be a command-injection sink.
           TAG_INPUT: ${{ inputs.tag }}
+          FONTS_BASE_URL_INPUT: ${{ inputs.fonts_base_url }}
         run: |
+          # Anchored bash regexes, NOT `grep -E`: grep matches line by line, so a
+          # multi-line input passes as long as ANY single line matches, and the
+          # embedded newline then smuggles a second `key=value` pair into
+          # $GITHUB_OUTPUT (last assignment wins) — escaping the character class
+          # entirely. [[ =~ ]] matches the whole string, and the explicit
+          # newline/CR rejection below runs first so nothing multi-line is ever
+          # pattern-checked in the first place.
+          if [[ "$TAG_INPUT" == *[$'\n\r']* ]]; then
+            echo "::error::Invalid tag — input must be a single line (no newline or carriage return)."
+            exit 1
+          fi
+          if [[ "$FONTS_BASE_URL_INPUT" == *[$'\n\r']* ]]; then
+            echo "::error::Invalid fonts_base_url — input must be a single line (no newline or carriage return)."
+            exit 1
+          fi
+
           if [ -n "$TAG_INPUT" ]; then
-            if ! printf '%s' "$TAG_INPUT" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+            tag_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+            if [[ ! "$TAG_INPUT" =~ $tag_re ]]; then
               echo "::error::Invalid tag '$TAG_INPUT' — expected [A-Za-z0-9][A-Za-z0-9._-]*, up to 128 chars."
               exit 1
             fi
@@ -45,6 +114,26 @@ jobs:
             echo "tag=" >> "$GITHUB_OUTPUT"
           fi
 
+          if [ -n "$FONTS_BASE_URL_INPUT" ]; then
+            if [ "${#FONTS_BASE_URL_INPUT}" -gt 200 ]; then
+              echo "::error::Invalid fonts_base_url — longer than 200 characters."
+              exit 1
+            fi
+            # https only (the fonts are integrity-checked against the committed
+            # manifest afterwards, but don't hand an attacker a plaintext hop),
+            # host + path only: no userinfo, port, query or fragment characters.
+            url_re='^https://[A-Za-z0-9.-]+(/[A-Za-z0-9._/-]*)?$'
+            if [[ ! "$FONTS_BASE_URL_INPUT" =~ $url_re ]]; then
+              echo "::error::Invalid fonts_base_url '$FONTS_BASE_URL_INPUT' — expected https://<host>[/<path>] with no query or fragment."
+              exit 1
+            fi
+            echo "Overriding font source: $FONTS_BASE_URL_INPUT"
+            echo "fonts_base_url=$FONTS_BASE_URL_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "Using the default font source (https://muxr.app/fonts)."
+            echo "fonts_base_url=" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Fetch fonts
         # Fonts are NOT committed to git (website/fonts/ is gitignored build
         # context). fetch_fonts.sh downloads them from the live site at
@@ -53,47 +142,82 @@ jobs:
         # a hash mismatch fails the build, so a bad or partial download can
         # never reach the image. Uses only curl + python3 (no gh CLI, no
         # auth needed).
+        #
+        # FONTS_BASE_URL exists for disaster recovery / bootstrap: the default
+        # origin (https://muxr.app/fonts) is served by the very image this
+        # pipeline publishes, so if the site is down or being stood up from
+        # scratch the default is unreachable and the release deadlocks. The
+        # .ttf files are not in git either (fonts/.gitignore), so the escape
+        # hatch is to point the override at any https mirror serving the same
+        # filenames — the manifest sha256 check still gates what lands in the
+        # image, so an untrusted mirror cannot smuggle a different font in.
+        # Empty => script default.
         working-directory: website
+        env:
+          FONTS_BASE_URL: ${{ steps.dispatch.outputs.fonts_base_url }}
         run: ./fetch_fonts.sh
 
       - name: Compute image name and tags
         id: image
+        shell: bash
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
         run: |
           # GHCR requires an all-lowercase repository path; github.repository_owner
           # reflects the owner's display casing and is not guaranteed lowercase,
           # so normalize it here rather than assume.
-          OWNER=$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          OWNER=$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
           IMAGE="ghcr.io/${OWNER}/muxr-web"
           SHORT_SHA_TAG="sha-${GITHUB_SHA:0:7}"
           echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
           echo "short_sha_tag=$SHORT_SHA_TAG" >> "$GITHUB_OUTPUT"
 
       - name: Build and tag image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SHORT_SHA_TAG: ${{ steps.image.outputs.short_sha_tag }}
+          EXTRA_TAG: ${{ steps.dispatch.outputs.tag }}
+          PUBLISH_LATEST: ${{ steps.guard.outputs.publish_latest }}
         run: |
-          IMAGE="${{ steps.image.outputs.image }}"
-          docker build website/ -f website/Dockerfile -t "${IMAGE}:latest"
-          docker tag "${IMAGE}:latest" "${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
-          if [ -n "${{ steps.tag.outputs.tag }}" ]; then
-            docker tag "${IMAGE}:latest" "${IMAGE}:${{ steps.tag.outputs.tag }}"
+          # Build under the immutable sha tag and only ever *alias* latest onto
+          # it, so the non-main path simply never creates a latest tag.
+          docker build website/ -f website/Dockerfile -t "${IMAGE}:${SHORT_SHA_TAG}"
+          if [ -n "$EXTRA_TAG" ]; then
+            docker tag "${IMAGE}:${SHORT_SHA_TAG}" "${IMAGE}:${EXTRA_TAG}"
+          fi
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            docker tag "${IMAGE}:${SHORT_SHA_TAG}" "${IMAGE}:latest"
           fi
 
       - name: Log in to GHCR
+        shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+          ACTOR: ${{ github.actor }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
 
       - name: Push image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SHORT_SHA_TAG: ${{ steps.image.outputs.short_sha_tag }}
+          EXTRA_TAG: ${{ steps.dispatch.outputs.tag }}
+          PUBLISH_LATEST: ${{ steps.guard.outputs.publish_latest }}
         run: |
-          IMAGE="${{ steps.image.outputs.image }}"
-          REFS="${IMAGE}:latest"
-          docker push "${IMAGE}:latest"
+          docker push "${IMAGE}:${SHORT_SHA_TAG}"
+          REFS="${IMAGE}:${SHORT_SHA_TAG}"
 
-          docker push "${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
-          REFS="$REFS ${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
+          if [ -n "$EXTRA_TAG" ]; then
+            docker push "${IMAGE}:${EXTRA_TAG}"
+            REFS="$REFS ${IMAGE}:${EXTRA_TAG}"
+          fi
 
-          if [ -n "${{ steps.tag.outputs.tag }}" ]; then
-            docker push "${IMAGE}:${{ steps.tag.outputs.tag }}"
-            REFS="$REFS ${IMAGE}:${{ steps.tag.outputs.tag }}"
+          # Pushed last: latest only moves once the immutable tags are safely up,
+          # and only for a main build (see the ref guard).
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            docker push "${IMAGE}:latest"
+            REFS="$REFS ${IMAGE}:latest"
           fi
 
           echo "Pushed: $REFS"
@@ -102,4 +226,8 @@ jobs:
             for ref in $REFS; do
               echo "- \`$ref\`"
             done
+            if [ "$PUBLISH_LATEST" != "true" ]; then
+              echo ""
+              echo "_Non-main build: \`latest\` was left untouched._"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
