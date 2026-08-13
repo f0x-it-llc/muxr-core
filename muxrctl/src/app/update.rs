@@ -1890,7 +1890,7 @@ mod tests {
         let mut state = AppState::new();
         state.config.host = "0.0.0.0".to_string();
         state.config.reachable_ips = vec![Ipv4Addr::new(172, 19, 0, 2)];
-        state.config.advertise_sans = vec!["100.71.31.57".to_string(), "172.19.0.2".to_string()];
+        state.config.advertise_sans = vec!["100.64.0.7".to_string(), "172.19.0.2".to_string()];
         let values: Vec<String> = build_sans_from_config(&state)
             .iter()
             .map(|s| s.value().to_string())
@@ -1900,7 +1900,7 @@ mod tests {
             "reachable IP missing: {values:?}"
         );
         assert!(
-            values.iter().any(|v| v.as_str() == "100.71.31.57"),
+            values.iter().any(|v| v.as_str() == "100.64.0.7"),
             "advertise SAN (tailnet IP) missing: {values:?}"
         );
         // 0.0.0.0 (wildcard bind host) must never become a SAN.

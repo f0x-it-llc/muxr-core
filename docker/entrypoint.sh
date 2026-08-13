@@ -193,8 +193,12 @@ cat <<BANNER
 ╔══════════════════════════════════════════════════════════════════╗
 ║  Muxr dev rig is up — drive it with muxrctl over SSH     ║
 ╠══════════════════════════════════════════════════════════════════╣
-  1. SSH in — no password (a TTY is required for the TUI — note the -t):
-       ssh -t root@<host> -p <ssh-port>
+  1. SSH in — no password:
+       ./docker/ssh.sh <host> <ssh-port>
+     (wrapper for: ssh -t -o StrictHostKeyChecking=no \
+        -o UserKnownHostsFile=/dev/null root@<host> -p <ssh-port>
+      — host keys are minted per image build, so plain ssh trips the
+      REMOTE HOST IDENTIFICATION HAS CHANGED check after every rebuild)
 
   2. Run the control TUI and start the server:
        muxrctl
