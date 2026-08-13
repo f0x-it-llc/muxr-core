@@ -46,7 +46,7 @@ All six pages share the same `.site-nav` header and `.site-footer` footer (Home,
 
 ## Font Catalog (`/fonts/`)
 
-The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large; `muxr.app/fonts/` (this site's own nginx `/fonts/` location) is the canonical, immutable hosting location, pinned by the checked-in `../fonts/manifest.json`. There is no GitHub release involved — the fonts used to be distributed as `muxr-core` `fonts-v1` release assets, but GitHub's anonymous release-download edge blocks non-browser clients, so hosting moved to muxr.app and the release is gone.
+The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large; `muxr.app/fonts/` (this site's own nginx `/fonts/` location) is the canonical, immutable hosting location, pinned by the checked-in `../fonts/manifest.json`. The fonts used to be distributed as `muxr-core` `fonts-v1` release assets, but GitHub's anonymous release-download edge blocks non-browser clients, so hosting moved to muxr.app. The `fonts-v1` release is being retired but has **not** been deleted yet — deletion is a separate, pending step.
 
 Before building the Docker image, populate `fonts/` from muxr.app:
 
@@ -54,7 +54,7 @@ Before building the Docker image, populate `fonts/` from muxr.app:
 cd website && ./fetch_fonts.sh
 ```
 
-The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the local `../fonts/manifest.json` from `$FONTS_BASE_URL` (default `https://muxr.app/fonts`), skipping any file already present with a matching sha256, and hard-verifies every file's sha256 against the manifest — a mismatch or missing file fails the script before anything reaches an image build.
+The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the local `../fonts/manifest.json` from that entry's own `url` (pointing at muxr.app), or from `$FONTS_BASE_URL/<filename>` if that env var is set (disaster recovery / migration override — https-only, enforced per file). It skips any file already present with a matching sha256, downloads to a temp file and only renames it into place once the sha256 verifies, prunes any stray binary not listed in the manifest, and hard-verifies every file before exiting 0 — a mismatch, a non-https source, or a missing file fails the script before anything reaches an image build. See `../fonts/README.md`'s "Bootstrap & disaster recovery" section for the circular-origin caveat (the default font source is this site itself) and how to recover if muxr.app is down.
 
 ## nginx & CSP
 

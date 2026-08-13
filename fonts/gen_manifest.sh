@@ -17,6 +17,14 @@
 #   1. Drop the Regular + Bold .ttf (or .otf) files into this directory.
 #   2. Add a row to the FONT_META table below.
 #   3. Run ./gen_manifest.sh.
+#
+# Fail-closed on missing binaries: every family in the metadata table below
+# must match at least one file on disk, or the script errors out and exits 1
+# instead of silently writing a manifest.json missing that family's files —
+# a truncated manifest committed by accident is a supply-chain incident, not
+# a cosmetic bug. To intentionally regenerate a partial manifest (e.g. only
+# a subset of binaries are checked out locally), set SKIP_MISSING=1 to
+# downgrade the error to a loud warning and omit the family instead.
 
 set -euo pipefail
 cd "$(dirname "$0")"
@@ -39,6 +47,7 @@ FONTS_BASE_URL="${FONTS_BASE_URL:-https://muxr.app/fonts}"
 # isNerdFont   = "true" or "false"
 #
 declare -A META_ID META_DISPLAY META_FAMILY META_LICENSE META_ISNF
+declare -a ALL_PREFIXES
 
 add_meta() {
     local prefix="$1" id="$2" display="$3" family="$4" license="$5" isnf="$6"
@@ -47,6 +56,7 @@ add_meta() {
     META_FAMILY["$prefix"]="$family"
     META_LICENSE["$prefix"]="$license"
     META_ISNF["$prefix"]="$isnf"
+    ALL_PREFIXES+=("$prefix")
 }
 
 # ── Original catalog ──────────────────────────────────────────────────────────
@@ -365,6 +375,26 @@ for font in $(ls *.ttf *.otf 2>/dev/null | sort); do
         PREFIX_ORDER+=("$prefix")
     fi
 done
+
+# ─── Guard: every known family must have matching binaries on disk ──────────
+# The inverse check (files with no metadata) already warns above; this one
+# catches a family that's registered but has ZERO files on disk, which the
+# scan above would otherwise skip silently — the family just wouldn't appear
+# in the emitted manifest.json at all.
+missing=0
+for prefix in "${ALL_PREFIXES[@]}"; do
+    if [[ -z "${SEEN_PREFIXES[$prefix]+_}" ]]; then
+        if [[ "${SKIP_MISSING:-0}" == "1" ]]; then
+            echo "WARNING: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — SKIP_MISSING=1, omitting from manifest.json" >&2
+        else
+            echo "ERROR: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — refusing to write a truncated manifest.json. Set SKIP_MISSING=1 to intentionally regenerate a subset." >&2
+            missing=1
+        fi
+    fi
+done
+if [[ "$missing" == "1" ]]; then
+    exit 1
+fi
 
 # Emit JSON
 {

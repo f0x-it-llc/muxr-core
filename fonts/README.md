@@ -50,7 +50,9 @@ where `<path>` is the `path` field from `manifest.json` (relative to this direct
 ```
 
 `url` is hosted at `https://muxr.app/fonts/` (this website's own nginx `/fonts/` location,
-cached as long-lived immutable) — not a GitHub release. `gen_manifest.sh` builds it from
+cached as long-lived immutable). The `fonts-v1` GitHub release that used to back this is
+being retired — hosting has moved to muxr.app — but the release has NOT been deleted yet;
+deletion is a separate, pending step. `gen_manifest.sh` builds each entry's `url` from
 `FONTS_BASE_URL` (default `https://muxr.app/fonts`); see "Regenerating manifest.json" below.
 
 **Important:** `family` must be the font's internal PostScript/name-table family string —
@@ -172,7 +174,7 @@ Notes:
 cd muxr-core/fonts && ./gen_manifest.sh
 ```
 
-The script is idempotent and deterministic: it scans `*.ttf` in this directory,
+The script is idempotent and deterministic: it scans `*.ttf`/`*.otf` in this directory,
 recomputes `bytes` and `sha256` from the actual files, and rewrites `manifest.json`.
 Run it any time after adding, removing, or replacing font files.
 
@@ -180,6 +182,35 @@ Each file's `url` is built as `$FONTS_BASE_URL/<filename>`, where `FONTS_BASE_UR
 defaults to `https://muxr.app/fonts` (the canonical hosting location) and can be
 overridden — `FONTS_BASE_URL=... ./gen_manifest.sh` — if the hosting location ever
 changes.
+
+**Fail-closed on missing binaries:** every family in the metadata table must match at
+least one file on disk, or the script errors out naming the family and exits 1 rather
+than silently writing a `manifest.json` that's missing that family's files. To
+intentionally regenerate a manifest from a partial local checkout, set `SKIP_MISSING=1`
+to downgrade the error to a warning and omit the missing families instead.
+
+---
+
+## Bootstrap & disaster recovery
+
+The font catalog has a circular origin: the default download source for every file is
+`https://muxr.app/fonts/`, which is served by the very website image this catalog builds.
+Two consequences follow directly:
+
+- **Adding a new font:** `fetch_fonts.sh`'s skip-if-valid check accepts pre-seeded files,
+  so place the new Regular/Bold binaries in `website/fonts/` locally first, regenerate
+  `manifest.json` (above), then build + deploy the image — locally, or via CI with the new
+  file already present in the build context. Only once that image is live does the new
+  file become fetchable from muxr.app; dispatching a build before the binary is seeded
+  locally deadlocks (the site can't serve what it doesn't have yet).
+- **Recovering when muxr.app is down:** any machine holding a valid `website/fonts/`
+  directory (all files matching the committed manifest) can rebuild and redeploy directly
+  — no fetch needed. Without one, pull the *previous* image and extract it:
+  `docker create` the image, then `docker cp <container>:/usr/share/nginx/html/fonts
+  website/fonts`. For a CI rebuild specifically, the `website-release.yml` workflow's
+  `fonts_base_url` dispatch input (or the `FONTS_BASE_URL` env var directly) points
+  `fetch_fonts.sh` at a temporary https mirror serving the same filenames instead of the
+  unreachable default — the manifest sha256 check still gates what lands in the image.
 
 ---
 
