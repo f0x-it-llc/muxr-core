@@ -8,8 +8,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "0xProtoNerdFontMono-Bold.ttf", "bytes": 2411088, "sha256": "aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/0xProtoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "0xProtoNerdFontMono-Regular.ttf", "bytes": 2412316, "sha256": "e98bf52027a5895c1cad6101b8ef5905e8acc5309bb264eaff9063bf94d99848", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/0xProtoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "0xProtoNerdFontMono-Bold.ttf", "bytes": 2411088, "sha256": "aa8bbe93f5dfa90381a80ad90ee3118b36d34c1140575ee1fefca20de00c6689", "url": "https://muxr.app/fonts/0xProtoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "0xProtoNerdFontMono-Regular.ttf", "bytes": 2412316, "sha256": "e98bf52027a5895c1cad6101b8ef5905e8acc5309bb264eaff9063bf94d99848", "url": "https://muxr.app/fonts/0xProtoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -19,7 +19,7 @@
       "license": "CC-BY-SA-4.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 400, "style": "normal", "path": "BigBlueTerm437NerdFontMono-Regular.ttf", "bytes": 2278376, "sha256": "f89f27225795feba3ee5184052da69532966d950512106a5e859d85765835442", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BigBlueTerm437NerdFontMono-Regular.ttf" }
+        { "weight": 400, "style": "normal", "path": "BigBlueTerm437NerdFontMono-Regular.ttf", "bytes": 2278376, "sha256": "f89f27225795feba3ee5184052da69532966d950512106a5e859d85765835442", "url": "https://muxr.app/fonts/BigBlueTerm437NerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -29,7 +29,7 @@
       "license": "CC-BY-SA-4.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 400, "style": "normal", "path": "BigBlueTermPlusNerdFontMono-Regular.ttf", "bytes": 2323528, "sha256": "13fa5ffb4cb26a44b2bb6ba859ed81c82c6fa134180767404e2462bd807be251", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BigBlueTermPlusNerdFontMono-Regular.ttf" }
+        { "weight": 400, "style": "normal", "path": "BigBlueTermPlusNerdFontMono-Regular.ttf", "bytes": 2323528, "sha256": "13fa5ffb4cb26a44b2bb6ba859ed81c82c6fa134180767404e2462bd807be251", "url": "https://muxr.app/fonts/BigBlueTermPlusNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -39,8 +39,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "BlexMonoNerdFontMono-Bold.ttf", "bytes": 2355496, "sha256": "565b42d837b5121627d57cfd57338be32254c58a1b770468c3380b1f78de2aa4", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BlexMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "BlexMonoNerdFontMono-Regular.ttf", "bytes": 2353588, "sha256": "f9892505b7cd6e9d29f9ba0924da73df023714adf6dbe6d8f920d47b8930fcef", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/BlexMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "BlexMonoNerdFontMono-Bold.ttf", "bytes": 2355496, "sha256": "565b42d837b5121627d57cfd57338be32254c58a1b770468c3380b1f78de2aa4", "url": "https://muxr.app/fonts/BlexMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "BlexMonoNerdFontMono-Regular.ttf", "bytes": 2353588, "sha256": "f9892505b7cd6e9d29f9ba0924da73df023714adf6dbe6d8f920d47b8930fcef", "url": "https://muxr.app/fonts/BlexMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -50,8 +50,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "CaskaydiaCoveNerdFontMono-Bold.ttf", "bytes": 2866368, "sha256": "3b7960d16d56bc3e0fd109c3f0e18b0ef547c863144dbf79e2ec71ab6ff3dd1e", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CaskaydiaCoveNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "CaskaydiaCoveNerdFontMono-Regular.ttf", "bytes": 2864668, "sha256": "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CaskaydiaCoveNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "CaskaydiaCoveNerdFontMono-Bold.ttf", "bytes": 2866368, "sha256": "3b7960d16d56bc3e0fd109c3f0e18b0ef547c863144dbf79e2ec71ab6ff3dd1e", "url": "https://muxr.app/fonts/CaskaydiaCoveNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "CaskaydiaCoveNerdFontMono-Regular.ttf", "bytes": 2864668, "sha256": "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea", "url": "https://muxr.app/fonts/CaskaydiaCoveNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -61,8 +61,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "CommitMonoNerdFontMono-Bold.otf", "bytes": 2300416, "sha256": "328ff46a89d01f9983466534f6f3c4ba9631689c8e891c58c3d319e06c05a373", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CommitMonoNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "CommitMonoNerdFontMono-Regular.otf", "bytes": 2300636, "sha256": "a126774b8756e383df4f94849e59808c089361c8171cc3820d10ee5a6a561c82", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CommitMonoNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "CommitMonoNerdFontMono-Bold.otf", "bytes": 2300416, "sha256": "328ff46a89d01f9983466534f6f3c4ba9631689c8e891c58c3d319e06c05a373", "url": "https://muxr.app/fonts/CommitMonoNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "CommitMonoNerdFontMono-Regular.otf", "bytes": 2300636, "sha256": "a126774b8756e383df4f94849e59808c089361c8171cc3820d10ee5a6a561c82", "url": "https://muxr.app/fonts/CommitMonoNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -72,8 +72,8 @@
       "license": "Apache-2.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "CousineNerdFontMono-Bold.ttf", "bytes": 2654380, "sha256": "54eecbbde0abdc6a7b6a839b17a168a2883f2a1b36cdc8be2a3bda64cdefa986", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CousineNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "CousineNerdFontMono-Regular.ttf", "bytes": 2666156, "sha256": "c08b276b3e795e6726aac7d3d99ff35d93223a99430b67c6e00f90528655ee22", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/CousineNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "CousineNerdFontMono-Bold.ttf", "bytes": 2654380, "sha256": "54eecbbde0abdc6a7b6a839b17a168a2883f2a1b36cdc8be2a3bda64cdefa986", "url": "https://muxr.app/fonts/CousineNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "CousineNerdFontMono-Regular.ttf", "bytes": 2666156, "sha256": "c08b276b3e795e6726aac7d3d99ff35d93223a99430b67c6e00f90528655ee22", "url": "https://muxr.app/fonts/CousineNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -83,8 +83,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "D2CodingLigatureNerdFontMono-Bold.ttf", "bytes": 6668244, "sha256": "ec1ff10f7702e01f83969ba094e753f0f50f11d94628d25e358e514b894c9499", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/D2CodingLigatureNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "D2CodingLigatureNerdFontMono-Regular.ttf", "bytes": 6450104, "sha256": "0429ed7b44056de04adc073e11f2a6dde9507cd691fce8c851f8cec9a1065893", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/D2CodingLigatureNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "D2CodingLigatureNerdFontMono-Bold.ttf", "bytes": 6668244, "sha256": "ec1ff10f7702e01f83969ba094e753f0f50f11d94628d25e358e514b894c9499", "url": "https://muxr.app/fonts/D2CodingLigatureNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "D2CodingLigatureNerdFontMono-Regular.ttf", "bytes": 6450104, "sha256": "0429ed7b44056de04adc073e11f2a6dde9507cd691fce8c851f8cec9a1065893", "url": "https://muxr.app/fonts/D2CodingLigatureNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -94,8 +94,8 @@
       "license": "custom",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "DejaVuSansMNerdFontMono-Bold.ttf", "bytes": 2693092, "sha256": "9b95baa96d08dc32a2880e2a7fdeff8282b5cf6827fe3bd40e036b24bb5eb5b0", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/DejaVuSansMNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "DejaVuSansMNerdFontMono-Regular.ttf", "bytes": 2701812, "sha256": "f0ad5d5e932a02c7c0169b67bb4a7a1d8ecde33ab42c7d584b4c91cebef98300", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/DejaVuSansMNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "DejaVuSansMNerdFontMono-Bold.ttf", "bytes": 2693092, "sha256": "9b95baa96d08dc32a2880e2a7fdeff8282b5cf6827fe3bd40e036b24bb5eb5b0", "url": "https://muxr.app/fonts/DejaVuSansMNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "DejaVuSansMNerdFontMono-Regular.ttf", "bytes": 2701812, "sha256": "f0ad5d5e932a02c7c0169b67bb4a7a1d8ecde33ab42c7d584b4c91cebef98300", "url": "https://muxr.app/fonts/DejaVuSansMNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -105,8 +105,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "FiraCodeNerdFontMono-Bold.ttf", "bytes": 2677400, "sha256": "bd014a21f3cd64203dd0850437091d716e929a4518b0e5848d6d3ad6af12b21d", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/FiraCodeNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "FiraCodeNerdFontMono-Regular.ttf", "bytes": 2647492, "sha256": "ad88c69cb6a497db9f2714e4b414817aabbee621484a1560bfdb3fd73abdd564", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/FiraCodeNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "FiraCodeNerdFontMono-Bold.ttf", "bytes": 2677400, "sha256": "bd014a21f3cd64203dd0850437091d716e929a4518b0e5848d6d3ad6af12b21d", "url": "https://muxr.app/fonts/FiraCodeNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "FiraCodeNerdFontMono-Regular.ttf", "bytes": 2647492, "sha256": "ad88c69cb6a497db9f2714e4b414817aabbee621484a1560bfdb3fd73abdd564", "url": "https://muxr.app/fonts/FiraCodeNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -116,8 +116,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "GeistMonoNerdFontMono-Bold.otf", "bytes": 2251544, "sha256": "eb9a2b2a81b94b795200a3d5b6baa4b4b379c8c2f5285c31b9b6f7185b780f3c", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/GeistMonoNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "GeistMonoNerdFontMono-Regular.otf", "bytes": 2244660, "sha256": "58659ba839f49dbd0867dce44ea692a21e5a54fb145d17b066165fdd7699ca2c", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/GeistMonoNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "GeistMonoNerdFontMono-Bold.otf", "bytes": 2251544, "sha256": "eb9a2b2a81b94b795200a3d5b6baa4b4b379c8c2f5285c31b9b6f7185b780f3c", "url": "https://muxr.app/fonts/GeistMonoNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "GeistMonoNerdFontMono-Regular.otf", "bytes": 2244660, "sha256": "58659ba839f49dbd0867dce44ea692a21e5a54fb145d17b066165fdd7699ca2c", "url": "https://muxr.app/fonts/GeistMonoNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -127,8 +127,8 @@
       "license": "BSD-3-Clause",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "GoMonoNerdFontMono-Bold.ttf", "bytes": 2543376, "sha256": "fbbdd1d089b896ff0702cf08f7ed3f0db21f9a0a2e935725cd88d49b2fc9ae5e", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/GoMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "GoMonoNerdFontMono-Regular.ttf", "bytes": 2537660, "sha256": "d576c32170a0f157ba4b34ce504e6dddc27ac2599c1d1581b9485a7702729194", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/GoMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "GoMonoNerdFontMono-Bold.ttf", "bytes": 2543376, "sha256": "fbbdd1d089b896ff0702cf08f7ed3f0db21f9a0a2e935725cd88d49b2fc9ae5e", "url": "https://muxr.app/fonts/GoMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "GoMonoNerdFontMono-Regular.ttf", "bytes": 2537660, "sha256": "d576c32170a0f157ba4b34ce504e6dddc27ac2599c1d1581b9485a7702729194", "url": "https://muxr.app/fonts/GoMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -138,8 +138,8 @@
       "license": "MIT",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "HackNerdFontMono-Bold.ttf", "bytes": 2674696, "sha256": "711084fdea9f9eb4e5dbca372a19e6a5af996fc88bfce55918eeef560f0f6722", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/HackNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "HackNerdFontMono-Regular.ttf", "bytes": 2666460, "sha256": "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/HackNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "HackNerdFontMono-Bold.ttf", "bytes": 2674696, "sha256": "711084fdea9f9eb4e5dbca372a19e6a5af996fc88bfce55918eeef560f0f6722", "url": "https://muxr.app/fonts/HackNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "HackNerdFontMono-Regular.ttf", "bytes": 2666460, "sha256": "03e60d3c1a9f8bef4e1f78836f80aacb9ec005260a6b094f5bfc10043bb115ab", "url": "https://muxr.app/fonts/HackNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -149,8 +149,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "HasklugNerdFontMono-Bold.otf", "bytes": 2309584, "sha256": "be68e62b603380109bc7c878082894db2202cc629747b6b28b4de520f70146cc", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/HasklugNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "HasklugNerdFontMono-Regular.otf", "bytes": 2306076, "sha256": "686846a30e8bbe3a4fb30461631f23af84b6ea353d242c3aeed14cbe0852204d", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/HasklugNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "HasklugNerdFontMono-Bold.otf", "bytes": 2309584, "sha256": "be68e62b603380109bc7c878082894db2202cc629747b6b28b4de520f70146cc", "url": "https://muxr.app/fonts/HasklugNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "HasklugNerdFontMono-Regular.otf", "bytes": 2306076, "sha256": "686846a30e8bbe3a4fb30461631f23af84b6ea353d242c3aeed14cbe0852204d", "url": "https://muxr.app/fonts/HasklugNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -160,8 +160,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "InconsolataNerdFontMono-Bold.ttf", "bytes": 2293812, "sha256": "83bc7e6eded91f77690759b51b92aed221a7703fa0357e1ea29cca79b4446954", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/InconsolataNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "InconsolataNerdFontMono-Regular.ttf", "bytes": 2293224, "sha256": "21d0866a3858daabb1ca0c481c662b64d2d16e5287c5c632d879553ef07d09e1", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/InconsolataNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "InconsolataNerdFontMono-Bold.ttf", "bytes": 2293812, "sha256": "83bc7e6eded91f77690759b51b92aed221a7703fa0357e1ea29cca79b4446954", "url": "https://muxr.app/fonts/InconsolataNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "InconsolataNerdFontMono-Regular.ttf", "bytes": 2293224, "sha256": "21d0866a3858daabb1ca0c481c662b64d2d16e5287c5c632d879553ef07d09e1", "url": "https://muxr.app/fonts/InconsolataNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -171,8 +171,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "IntoneMonoNerdFontMono-Bold.ttf", "bytes": 2345296, "sha256": "1168df0bfcfe17777cf1bb9c16f073dc2a0e4d0e768a5c4a11a7fe687c8b99b6", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/IntoneMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "IntoneMonoNerdFontMono-Regular.ttf", "bytes": 2346432, "sha256": "89a38ad95f87d8cbc49b2015662b0080a45fd0ac94a788f38bb06c63ef9700fc", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/IntoneMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "IntoneMonoNerdFontMono-Bold.ttf", "bytes": 2345296, "sha256": "1168df0bfcfe17777cf1bb9c16f073dc2a0e4d0e768a5c4a11a7fe687c8b99b6", "url": "https://muxr.app/fonts/IntoneMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "IntoneMonoNerdFontMono-Regular.ttf", "bytes": 2346432, "sha256": "89a38ad95f87d8cbc49b2015662b0080a45fd0ac94a788f38bb06c63ef9700fc", "url": "https://muxr.app/fonts/IntoneMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -182,8 +182,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "IosevkaTermNerdFontMono-Bold.ttf", "bytes": 13183424, "sha256": "a4c8f2ae0b9b7d8098f234cef578ca8fed3ded77cbfdad9a3c5a2a4d953e4e4f", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/IosevkaTermNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "IosevkaTermNerdFontMono-Regular.ttf", "bytes": 13134980, "sha256": "7ecc07f7af0d9d3829a6d6a1beeeafeda0074332d94ce8ba49c7f675b63b770e", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/IosevkaTermNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "IosevkaTermNerdFontMono-Bold.ttf", "bytes": 13183424, "sha256": "a4c8f2ae0b9b7d8098f234cef578ca8fed3ded77cbfdad9a3c5a2a4d953e4e4f", "url": "https://muxr.app/fonts/IosevkaTermNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "IosevkaTermNerdFontMono-Regular.ttf", "bytes": 13134980, "sha256": "7ecc07f7af0d9d3829a6d6a1beeeafeda0074332d94ce8ba49c7f675b63b770e", "url": "https://muxr.app/fonts/IosevkaTermNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -193,8 +193,8 @@
       "license": "OFL-1.1",
       "isNerdFont": false,
       "files": [
-        { "weight": 700, "style": "normal", "path": "JetBrainsMono-Bold.ttf", "bytes": 277828, "sha256": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/JetBrainsMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "JetBrainsMono-Regular.ttf", "bytes": 273900, "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/JetBrainsMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "JetBrainsMono-Bold.ttf", "bytes": 277828, "sha256": "5590990c82e097397517f275f430af4546e1c45cff408bde4255dad142479dcb", "url": "https://muxr.app/fonts/JetBrainsMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "JetBrainsMono-Regular.ttf", "bytes": 273900, "sha256": "a0bf60ef0f83c5ed4d7a75d45838548b1f6873372dfac88f71804491898d138f", "url": "https://muxr.app/fonts/JetBrainsMono-Regular.ttf" }
       ]
     },
     {
@@ -204,8 +204,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "JetBrainsMonoNerdFontMono-Bold.ttf", "bytes": 2473884, "sha256": "5bdd4a873f3cd32f882d2c55545089123926e27707d5880fc9eaf84eb01b6686", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/JetBrainsMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "JetBrainsMonoNerdFontMono-Regular.ttf", "bytes": 2470116, "sha256": "f01031f40e48dc29e1112e6b0b0450a2c6cd097f3f35cfff05c55cb311f8034c", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/JetBrainsMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "JetBrainsMonoNerdFontMono-Bold.ttf", "bytes": 2473884, "sha256": "5bdd4a873f3cd32f882d2c55545089123926e27707d5880fc9eaf84eb01b6686", "url": "https://muxr.app/fonts/JetBrainsMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "JetBrainsMonoNerdFontMono-Regular.ttf", "bytes": 2470116, "sha256": "f01031f40e48dc29e1112e6b0b0450a2c6cd097f3f35cfff05c55cb311f8034c", "url": "https://muxr.app/fonts/JetBrainsMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -215,8 +215,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "LilexNerdFontMono-Bold.ttf", "bytes": 2431728, "sha256": "ed04509148c6c0339296935c2465af429faf4368a98a21f09e41e1ab9e2b74d4", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/LilexNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "LilexNerdFontMono-Regular.ttf", "bytes": 2433024, "sha256": "fc920440014ab4f8664a037655e03afe9328a1c8db6eb36e54bff4541c99d9bc", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/LilexNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "LilexNerdFontMono-Bold.ttf", "bytes": 2431728, "sha256": "ed04509148c6c0339296935c2465af429faf4368a98a21f09e41e1ab9e2b74d4", "url": "https://muxr.app/fonts/LilexNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "LilexNerdFontMono-Regular.ttf", "bytes": 2433024, "sha256": "fc920440014ab4f8664a037655e03afe9328a1c8db6eb36e54bff4541c99d9bc", "url": "https://muxr.app/fonts/LilexNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -226,8 +226,8 @@
       "license": "Apache-2.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MesloLGSNerdFontMono-Bold.ttf", "bytes": 2848772, "sha256": "f7124d4cbd6465f261d6b4dca25070084971a525002c0ae913f5f74b84ff1f6d", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MesloLGSNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "MesloLGSNerdFontMono-Regular.ttf", "bytes": 2831664, "sha256": "3cb52e923ca3981cecca9ea7307186e424e8521cbc5643fd0b5b5b1d7daa53d9", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MesloLGSNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "MesloLGSNerdFontMono-Bold.ttf", "bytes": 2848772, "sha256": "f7124d4cbd6465f261d6b4dca25070084971a525002c0ae913f5f74b84ff1f6d", "url": "https://muxr.app/fonts/MesloLGSNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "MesloLGSNerdFontMono-Regular.ttf", "bytes": 2831664, "sha256": "3cb52e923ca3981cecca9ea7307186e424e8521cbc5643fd0b5b5b1d7daa53d9", "url": "https://muxr.app/fonts/MesloLGSNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -237,8 +237,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MonaspiceArNerdFontMono-Bold.otf", "bytes": 2394724, "sha256": "3559794b0916bf8ca8ee2eddbd036e6f22fd3e71e9c7de4c6d51fe5aafbdbff4", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceArNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "MonaspiceArNerdFontMono-Regular.otf", "bytes": 2393712, "sha256": "74daed7483c41ca6e8ec720b0373d913d34d00648be4f7b4cc5f0b376bc4de98", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceArNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "MonaspiceArNerdFontMono-Bold.otf", "bytes": 2394724, "sha256": "3559794b0916bf8ca8ee2eddbd036e6f22fd3e71e9c7de4c6d51fe5aafbdbff4", "url": "https://muxr.app/fonts/MonaspiceArNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "MonaspiceArNerdFontMono-Regular.otf", "bytes": 2393712, "sha256": "74daed7483c41ca6e8ec720b0373d913d34d00648be4f7b4cc5f0b376bc4de98", "url": "https://muxr.app/fonts/MonaspiceArNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -248,8 +248,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MonaspiceKrNerdFontMono-Bold.otf", "bytes": 2381276, "sha256": "7321fd3f6209297a1cb6250bfb3a720e8fbc3d1032c64ad65b1b918283fcc428", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceKrNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "MonaspiceKrNerdFontMono-Regular.otf", "bytes": 2381280, "sha256": "045d2d144cc890283a21011b370f7fc982998bde8592dcab78cd63f3bcf9467f", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceKrNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "MonaspiceKrNerdFontMono-Bold.otf", "bytes": 2381276, "sha256": "7321fd3f6209297a1cb6250bfb3a720e8fbc3d1032c64ad65b1b918283fcc428", "url": "https://muxr.app/fonts/MonaspiceKrNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "MonaspiceKrNerdFontMono-Regular.otf", "bytes": 2381280, "sha256": "045d2d144cc890283a21011b370f7fc982998bde8592dcab78cd63f3bcf9467f", "url": "https://muxr.app/fonts/MonaspiceKrNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -259,8 +259,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MonaspiceNeNerdFontMono-Bold.otf", "bytes": 2394780, "sha256": "71195d69e34cdb91a68d80ea85156d5fbef22980c76252155bb2a2ffbcd0be47", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceNeNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "MonaspiceNeNerdFontMono-Regular.otf", "bytes": 2395672, "sha256": "e7aeec5f9aba00736ca14a40ea9460cc0286add26bdb9f61105030b9339fe895", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceNeNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "MonaspiceNeNerdFontMono-Bold.otf", "bytes": 2394780, "sha256": "71195d69e34cdb91a68d80ea85156d5fbef22980c76252155bb2a2ffbcd0be47", "url": "https://muxr.app/fonts/MonaspiceNeNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "MonaspiceNeNerdFontMono-Regular.otf", "bytes": 2395672, "sha256": "e7aeec5f9aba00736ca14a40ea9460cc0286add26bdb9f61105030b9339fe895", "url": "https://muxr.app/fonts/MonaspiceNeNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -270,8 +270,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MonaspiceRnNerdFontMono-Bold.otf", "bytes": 2413020, "sha256": "dd5b63112e0f0991a96a358de98f9e960c4b967bde8223ce1c1da59e3a17d6eb", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceRnNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "MonaspiceRnNerdFontMono-Regular.otf", "bytes": 2413664, "sha256": "ca6dc255c1028a17f8aa109d30b95fd1b88cd56c8413035d319d377609393f8d", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceRnNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "MonaspiceRnNerdFontMono-Bold.otf", "bytes": 2413020, "sha256": "dd5b63112e0f0991a96a358de98f9e960c4b967bde8223ce1c1da59e3a17d6eb", "url": "https://muxr.app/fonts/MonaspiceRnNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "MonaspiceRnNerdFontMono-Regular.otf", "bytes": 2413664, "sha256": "ca6dc255c1028a17f8aa109d30b95fd1b88cd56c8413035d319d377609393f8d", "url": "https://muxr.app/fonts/MonaspiceRnNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -281,8 +281,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "MonaspiceXeNerdFontMono-Bold.otf", "bytes": 2402232, "sha256": "08e5112db80d58b0ba545f8b780c8e386c1ddbba9a627b151b9a07279bf2dc31", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceXeNerdFontMono-Bold.otf" },
-        { "weight": 400, "style": "normal", "path": "MonaspiceXeNerdFontMono-Regular.otf", "bytes": 2402204, "sha256": "b851f3408c07c24989e168fc3762b495fab209e5cf02a1b20a627d3eed41aaae", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/MonaspiceXeNerdFontMono-Regular.otf" }
+        { "weight": 700, "style": "normal", "path": "MonaspiceXeNerdFontMono-Bold.otf", "bytes": 2402232, "sha256": "08e5112db80d58b0ba545f8b780c8e386c1ddbba9a627b151b9a07279bf2dc31", "url": "https://muxr.app/fonts/MonaspiceXeNerdFontMono-Bold.otf" },
+        { "weight": 400, "style": "normal", "path": "MonaspiceXeNerdFontMono-Regular.otf", "bytes": 2402204, "sha256": "b851f3408c07c24989e168fc3762b495fab209e5cf02a1b20a627d3eed41aaae", "url": "https://muxr.app/fonts/MonaspiceXeNerdFontMono-Regular.otf" }
       ]
     },
     {
@@ -292,7 +292,7 @@
       "license": "MIT",
       "isNerdFont": true,
       "files": [
-        { "weight": 400, "style": "normal", "path": "ProFontIIxNerdFontMono-Regular.ttf", "bytes": 2286984, "sha256": "98844baf3b6c815e8f0e5d56a588807a9a4e2b59b4dc697c8500db5fdebf5619", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/ProFontIIxNerdFontMono-Regular.ttf" }
+        { "weight": 400, "style": "normal", "path": "ProFontIIxNerdFontMono-Regular.ttf", "bytes": 2286984, "sha256": "98844baf3b6c815e8f0e5d56a588807a9a4e2b59b4dc697c8500db5fdebf5619", "url": "https://muxr.app/fonts/ProFontIIxNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -302,7 +302,7 @@
       "license": "MIT",
       "isNerdFont": true,
       "files": [
-        { "weight": 400, "style": "normal", "path": "ProFontWindowsNerdFontMono-Regular.ttf", "bytes": 2265628, "sha256": "aac5bf5fc59f77dc2eccf0c3d8980d02eb616c19677b257926b5792d1a09cbec", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/ProFontWindowsNerdFontMono-Regular.ttf" }
+        { "weight": 400, "style": "normal", "path": "ProFontWindowsNerdFontMono-Regular.ttf", "bytes": 2265628, "sha256": "aac5bf5fc59f77dc2eccf0c3d8980d02eb616c19677b257926b5792d1a09cbec", "url": "https://muxr.app/fonts/ProFontWindowsNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -312,8 +312,8 @@
       "license": "Apache-2.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "RobotoMonoNerdFontMono-Bold.ttf", "bytes": 2460324, "sha256": "6ee21e0e6fae4efa1cf6294fa1e53a021d6a21c98bab4c2022790d0156e83082", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/RobotoMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "RobotoMonoNerdFontMono-Regular.ttf", "bytes": 2460180, "sha256": "b34b5b95d78fb5788d52af55339adb2e2ca91279c2043c60d0fb1208b88c7533", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/RobotoMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "RobotoMonoNerdFontMono-Bold.ttf", "bytes": 2460324, "sha256": "6ee21e0e6fae4efa1cf6294fa1e53a021d6a21c98bab4c2022790d0156e83082", "url": "https://muxr.app/fonts/RobotoMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "RobotoMonoNerdFontMono-Regular.ttf", "bytes": 2460180, "sha256": "b34b5b95d78fb5788d52af55339adb2e2ca91279c2043c60d0fb1208b88c7533", "url": "https://muxr.app/fonts/RobotoMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -323,8 +323,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "SauceCodeProNerdFontMono-Bold.ttf", "bytes": 2388728, "sha256": "8cd3f451c85b9d656b4e4c47ca9f8a9704ee0f4e711c8b399fa29494865cf678", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/SauceCodeProNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "SauceCodeProNerdFontMono-Regular.ttf", "bytes": 2392200, "sha256": "6d687bfc41b42de0984ff58c43bf98115472027337a2e0980e8b1ecabe466099", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/SauceCodeProNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "SauceCodeProNerdFontMono-Bold.ttf", "bytes": 2388728, "sha256": "8cd3f451c85b9d656b4e4c47ca9f8a9704ee0f4e711c8b399fa29494865cf678", "url": "https://muxr.app/fonts/SauceCodeProNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "SauceCodeProNerdFontMono-Regular.ttf", "bytes": 2392200, "sha256": "6d687bfc41b42de0984ff58c43bf98115472027337a2e0980e8b1ecabe466099", "url": "https://muxr.app/fonts/SauceCodeProNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -334,8 +334,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "SpaceMonoNerdFontMono-Bold.ttf", "bytes": 2298536, "sha256": "1f91138bd2d19cc94ef798a68c0e4d7befc49b17bcfee9fc89fbb169b9cc25be", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/SpaceMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "SpaceMonoNerdFontMono-Regular.ttf", "bytes": 2302728, "sha256": "7bebc46f7def4cd65b32759e0c09ed00c596930b38ebb961185be865bdea6118", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/SpaceMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "SpaceMonoNerdFontMono-Bold.ttf", "bytes": 2298536, "sha256": "1f91138bd2d19cc94ef798a68c0e4d7befc49b17bcfee9fc89fbb169b9cc25be", "url": "https://muxr.app/fonts/SpaceMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "SpaceMonoNerdFontMono-Regular.ttf", "bytes": 2302728, "sha256": "7bebc46f7def4cd65b32759e0c09ed00c596930b38ebb961185be865bdea6118", "url": "https://muxr.app/fonts/SpaceMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -345,8 +345,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "TerminessNerdFontMono-Bold.ttf", "bytes": 2665872, "sha256": "cd6d9ae8d055e7edaa29abc6fa46a23f3a03b73184d48ae2c36acd7408e3a5ce", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/TerminessNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "TerminessNerdFontMono-Regular.ttf", "bytes": 2665032, "sha256": "fe0885bbed456ff953b87ad414b0eefd77a6d5e6774528b8440880a64a127d2c", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/TerminessNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "TerminessNerdFontMono-Bold.ttf", "bytes": 2665872, "sha256": "cd6d9ae8d055e7edaa29abc6fa46a23f3a03b73184d48ae2c36acd7408e3a5ce", "url": "https://muxr.app/fonts/TerminessNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "TerminessNerdFontMono-Regular.ttf", "bytes": 2665032, "sha256": "fe0885bbed456ff953b87ad414b0eefd77a6d5e6774528b8440880a64a127d2c", "url": "https://muxr.app/fonts/TerminessNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -356,8 +356,8 @@
       "license": "UFL-1.0",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "UbuntuMonoNerdFontMono-Bold.ttf", "bytes": 2355232, "sha256": "a2cce1caf25d3696e4f4fabee3aa2c99b1da63026211c446668b3b9a0bafe10f", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/UbuntuMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "UbuntuMonoNerdFontMono-Regular.ttf", "bytes": 2371120, "sha256": "f01237df39c57100093de60da74f8520f8829590961a34006c8f6df12542ef8d", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/UbuntuMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "UbuntuMonoNerdFontMono-Bold.ttf", "bytes": 2355232, "sha256": "a2cce1caf25d3696e4f4fabee3aa2c99b1da63026211c446668b3b9a0bafe10f", "url": "https://muxr.app/fonts/UbuntuMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "UbuntuMonoNerdFontMono-Regular.ttf", "bytes": 2371120, "sha256": "f01237df39c57100093de60da74f8520f8829590961a34006c8f6df12542ef8d", "url": "https://muxr.app/fonts/UbuntuMonoNerdFontMono-Regular.ttf" }
       ]
     },
     {
@@ -367,8 +367,8 @@
       "license": "OFL-1.1",
       "isNerdFont": true,
       "files": [
-        { "weight": 700, "style": "normal", "path": "VictorMonoNerdFontMono-Bold.ttf", "bytes": 2429168, "sha256": "6d0087b7c25d3fefd504d6e9a276cb32f7d67ce11e0b07fe403c1c5bc541f54b", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/VictorMonoNerdFontMono-Bold.ttf" },
-        { "weight": 400, "style": "normal", "path": "VictorMonoNerdFontMono-Regular.ttf", "bytes": 2423696, "sha256": "bad3a8b6a85f6e4843864248e257af39645d5ca73ce06a73f0485e33d8569a86", "url": "https://github.com/f0x-it-llc/muxr-core/releases/download/fonts-v1/VictorMonoNerdFontMono-Regular.ttf" }
+        { "weight": 700, "style": "normal", "path": "VictorMonoNerdFontMono-Bold.ttf", "bytes": 2429168, "sha256": "6d0087b7c25d3fefd504d6e9a276cb32f7d67ce11e0b07fe403c1c5bc541f54b", "url": "https://muxr.app/fonts/VictorMonoNerdFontMono-Bold.ttf" },
+        { "weight": 400, "style": "normal", "path": "VictorMonoNerdFontMono-Regular.ttf", "bytes": 2423696, "sha256": "bad3a8b6a85f6e4843864248e257af39645d5ca73ce06a73f0485e33d8569a86", "url": "https://muxr.app/fonts/VictorMonoNerdFontMono-Regular.ttf" }
       ]
     }
   ]

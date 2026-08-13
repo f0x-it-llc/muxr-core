@@ -46,15 +46,15 @@ All six pages share the same `.site-nav` header and `.site-footer` footer (Home,
 
 ## Font Catalog (`/fonts/`)
 
-The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large and versioned independently on the `muxr-core` `fonts-v1` GitHub release.
+The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large; `muxr.app/fonts/` (this site's own nginx `/fonts/` location) is the canonical, immutable hosting location, pinned by the checked-in `../fonts/manifest.json`. There is no GitHub release involved — the fonts used to be distributed as `muxr-core` `fonts-v1` release assets, but GitHub's anonymous release-download edge blocks non-browser clients, so hosting moved to muxr.app and the release is gone.
 
-Before building the Docker image, populate `fonts/` from that release:
+Before building the Docker image, populate `fonts/` from muxr.app:
 
 ```bash
 cd website && ./fetch_fonts.sh
 ```
 
-The script uses the authenticated `gh` CLI (GitHub's anonymous release-download edge blocks non-browser clients), then verifies every downloaded file against the sha256 checksums in the muxr-core font manifest — a mismatch fails the script before anything reaches an image build.
+The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the local `../fonts/manifest.json` from `$FONTS_BASE_URL` (default `https://muxr.app/fonts`), skipping any file already present with a matching sha256, and hard-verifies every file's sha256 against the manifest — a mismatch or missing file fails the script before anything reaches an image build.
 
 ## nginx & CSP
 

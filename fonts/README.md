@@ -39,7 +39,8 @@ where `<path>` is the `path` field from `manifest.json` (relative to this direct
           "style": "normal",          // "normal" | "italic"
           "path": "FiraCodeNerdFontMono-Regular.ttf",
           "bytes": 2647492,           // exact file size — verified by the app
-          "sha256": "<lowercase hex>" // SHA-256 of the file — verified by the app
+          "sha256": "<lowercase hex>", // SHA-256 of the file — verified by the app
+          "url": "https://muxr.app/fonts/FiraCodeNerdFontMono-Regular.ttf" // absolute download URL
         },
         { "weight": 700, "style": "normal", "path": "FiraCodeNerdFontMono-Bold.ttf", ... }
       ]
@@ -47,6 +48,10 @@ where `<path>` is the `path` field from `manifest.json` (relative to this direct
   ]
 }
 ```
+
+`url` is hosted at `https://muxr.app/fonts/` (this website's own nginx `/fonts/` location,
+cached as long-lived immutable) — not a GitHub release. `gen_manifest.sh` builds it from
+`FONTS_BASE_URL` (default `https://muxr.app/fonts`); see "Regenerating manifest.json" below.
 
 **Important:** `family` must be the font's internal PostScript/name-table family string —
 the exact string Flutter's `FontLoader` registers. Verify it with:
@@ -170,6 +175,11 @@ cd muxr-core/fonts && ./gen_manifest.sh
 The script is idempotent and deterministic: it scans `*.ttf` in this directory,
 recomputes `bytes` and `sha256` from the actual files, and rewrites `manifest.json`.
 Run it any time after adding, removing, or replacing font files.
+
+Each file's `url` is built as `$FONTS_BASE_URL/<filename>`, where `FONTS_BASE_URL`
+defaults to `https://muxr.app/fonts` (the canonical hosting location) and can be
+overridden — `FONTS_BASE_URL=... ./gen_manifest.sh` — if the hosting location ever
+changes.
 
 ---
 

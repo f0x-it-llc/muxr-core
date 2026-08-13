@@ -21,12 +21,13 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ─── Release-asset hosting ─────────────────────────────────────────────────────
-# Font binaries are NOT committed in-tree; they are uploaded as assets to a
-# GitHub Release and the app downloads each file from its absolute "url".
-# Override the tag with FONTS_RELEASE_TAG=... when cutting a new release.
-RELEASE_TAG="${FONTS_RELEASE_TAG:-fonts-v1}"
-RELEASE_BASE="https://github.com/f0x-it-llc/muxr-core/releases/download/${RELEASE_TAG}"
+# ─── Hosting ────────────────────────────────────────────────────────────────
+# Font binaries are NOT committed in-tree; they are hosted at
+# https://muxr.app/fonts/ (the website's own nginx `/fonts/` location, cached
+# as long-lived immutable) and each entry's absolute "url" points there.
+# Override the base with FONTS_BASE_URL=... if the hosting location ever
+# changes.
+FONTS_BASE_URL="${FONTS_BASE_URL:-https://muxr.app/fonts}"
 
 # ─── Metadata table ──────────────────────────────────────────────────────────
 # Columns (tab-separated):
@@ -409,7 +410,7 @@ for prefix in "${PREFIX_ORDER[@]}"; do
         fi
 
         printf '        { "weight": %s, "style": "%s", "path": "%s", "bytes": %s, "sha256": "%s", "url": "%s" }' \
-               "$weight" "$style" "$font" "$bytes" "$sha" "$RELEASE_BASE/$font"
+               "$weight" "$style" "$font" "$bytes" "$sha" "$FONTS_BASE_URL/$font"
     done
     printf '\n'
     printf '      ]\n'
