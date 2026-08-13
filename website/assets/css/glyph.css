@@ -161,7 +161,9 @@ strong{ color:var(--fg); font-weight:600; }
 
 /* ============ feature grid ============ */
 .feature-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }
-.feature-card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-lg); padding:24px 22px; opacity:0; transform:translateY(14px); transition:opacity .5s var(--ease-out), transform .5s var(--ease-out); }
+.feature-card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-lg); padding:24px 22px; transition:opacity .5s var(--ease-out), transform .5s var(--ease-out); }
+/* Reveal-on-scroll only applies once main.js has tagged <html class="js">; without JS the cards stay visible. */
+.js .feature-card:not(.in){ opacity:0; transform:translateY(14px); }
 .feature-card.in{ opacity:1; transform:translateY(0); }
 .feature-icon{ width:38px; height:38px; border-radius:var(--radius-sm); background:var(--amber-faint); border:1px solid var(--amber-border); display:flex; align-items:center; justify-content:center; margin-bottom:18px; color:var(--amber); }
 .feature-icon svg{ width:19px; height:19px; }
@@ -187,7 +189,9 @@ strong{ color:var(--fg); font-weight:600; }
 .tdot.r{ background:var(--error); } .tdot.y{ background:var(--warning); } .tdot.g{ background:var(--success); }
 .tdot-label{ margin-left:8px; font-size:11px; color:#8a8171; }
 .terminal-body{ padding:22px 24px; font-size:13px; line-height:2; white-space:pre-wrap; }
-.terminal-body .term-line{ display:block; opacity:0; transform:translateY(4px); transition:opacity .18s var(--ease-out), transform .18s var(--ease-out); }
+.terminal-body .term-line{ display:block; transition:opacity .18s var(--ease-out), transform .18s var(--ease-out); }
+/* Same JS-gated reveal pattern as .feature-card — visible by default, animated only under html.js. */
+.js .terminal-body .term-line:not(.show){ opacity:0; transform:translateY(4px); }
 .terminal-body .term-line.show{ opacity:1; transform:translateY(0); }
 .t-dim{ color:#726a58; } .t-muted{ color:#9b917a; } .t-teal{ color:var(--cyan); } .t-green{ color:var(--success); }
 .t-orange{ color:var(--amber); } .t-purple{ color:#b79df0; } .t-yellow{ color:var(--warning); }
@@ -220,9 +224,14 @@ strong{ color:var(--fg); font-weight:600; }
 .doc-content a{ color:var(--amber); border-bottom:1px solid var(--amber-border); }
 .doc-content a:hover{ color:#ffc247; }
 
-.code-block{ background:var(--bg-void); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:14px 16px; margin:14px 0 18px; overflow-x:auto; }
+.code-block{ position:relative; background:var(--bg-void); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:14px 56px 14px 16px; margin:14px 0 18px; overflow-x:auto; }
 .code-block pre{ margin:0; }
 .code-block code{ background:none; border:none; padding:0; font-size:12.5px; color:var(--amber); line-height:1.7; white-space:pre; }
+
+.copy-btn{ position:absolute; top:9px; right:9px; font-family:var(--font-mono); font-size:10.5px; letter-spacing:0.03em; color:var(--fg-dim); background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:5px 10px; cursor:pointer; transition:color .15s, border-color .15s, background .15s; }
+.copy-btn:hover{ color:var(--fg); border-color:var(--amber-border); background:var(--bg-raised); }
+.copy-btn:focus-visible{ outline:2px solid var(--amber); outline-offset:2px; }
+.copy-btn.copied{ color:var(--amber); border-color:var(--amber-border); background:var(--amber-faint); }
 
 .data-table{ width:100%; border-collapse:collapse; margin:16px 0 22px; font-size:12.5px; }
 .data-table th{ text-align:left; color:var(--fg-dim); font-weight:500; padding:9px 12px; border-bottom:1px solid var(--border-bright); text-transform:uppercase; font-size:10px; letter-spacing:0.05em; }
