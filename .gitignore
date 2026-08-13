@@ -7,3 +7,5 @@
 # Dart test client build artifacts.
 **/.dart_tool/
 **/build/
+/website/fonts
+/workflow

@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muxr — your terminal multiplexer, from your phone or tablet</title>
+  <meta name="description" content="Muxr is a Flutter client that attaches to your remote herdr and zellij terminal-multiplexer sessions over TLS-secured gRPC. Self-hosted, open-source backend, QR device pairing, full session/tab/pane control.">
+  <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,300;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/tokens.css">
+  <link rel="stylesheet" href="assets/css/base.css">
+  <link rel="stylesheet" href="assets/css/device.css">
+  <script src="assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <!-- ═══════════════ SITE NAV (canonical shell — copied verbatim by docs.html / guide.html) ═══════════════ -->
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link active" href="index.html">Home</a>
+        <a class="nav-link" href="docs.html">Docs</a>
+        <a class="nav-link" href="guide.html">Guide</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+
+    <!-- ═══════════════ HERO ═══════════════ -->
+    <section class="hero">
+      <div class="container">
+        <div class="hero-inner">
+          <div class="hero-copy">
+            <span class="eyebrow">self-hosted · open-source backend</span>
+            <h1>Mu<span>xr</span></h1>
+            <p class="hero-tagline">Attach to your remote herdr and zellij sessions from your phone or tablet.</p>
+            <p class="hero-sub">A Flutter client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
+
+            <div class="ascii-box">┌──────────────────────────────┐
+│  muxr · remote attach │
+│  TLS + bearer · QR pairing   │
+└──────────────────────────────┘</div>
+
+            <div class="hero-cta">
+              <a class="btn btn-primary" href="docs.html">Get started →</a>
+              <a class="btn btn-ghost" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">
+                <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+                  <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+                </svg>
+                View on GitHub
+              </a>
+            </div>
+          </div>
+
+          <!-- Full-fidelity CSS phone preview — Terminal screen (multi-pane) -->
+          <div class="hero-preview">
+            <div class="device">
+              <div class="phone-frame" aria-hidden="true">
+                <div class="phone-notch">
+                  <div class="camera"></div>
+                  <div class="speaker"></div>
+                  <div class="camera"></div>
+                </div>
+                <div class="status-bar">
+                  <span class="time">9:41</span>
+                  <div class="status-icons">
+                    <svg viewBox="0 0 17 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0" y="3" width="3" height="9" rx="1" fill="currentColor" opacity="0.4"/>
+                      <rect x="4.5" y="2" width="3" height="10" rx="1" fill="currentColor" opacity="0.6"/>
+                      <rect x="9" y="0" width="3" height="12" rx="1" fill="currentColor"/>
+                      <rect x="13.5" y="0" width="3" height="12" rx="1" fill="currentColor"/>
+                    </svg>
+                    <svg viewBox="0 0 16 12" fill="currentColor" xmlns="http://www.w3.org/2000/svg">
+                      <path d="M8 2.4C5.6 2.4 3.4 3.4 1.8 5L0 3.2C2.2 1.2 5 0 8 0s5.8 1.2 8 3.2L14.2 5C12.6 3.4 10.4 2.4 8 2.4z" opacity="0.4"/>
+                      <path d="M8 5.6C6.4 5.6 5 6.2 3.9 7.2L2.1 5.4C3.6 4 5.7 3.2 8 3.2s4.4.8 5.9 2.2L12.1 7.2C11 6.2 9.6 5.6 8 5.6z" opacity="0.7"/>
+                      <circle cx="8" cy="11" r="1.5"/>
+                    </svg>
+                    <svg viewBox="0 0 25 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="0.5" y="0.5" width="21" height="11" rx="3.5" stroke="currentColor" opacity="0.35"/>
+                      <rect x="2" y="2" width="19" height="8" rx="2" fill="currentColor"/>
+                      <path d="M23 4v4a2 2 0 0 0 0-4z" fill="currentColor" opacity="0.4"/>
+                    </svg>
+                  </div>
+                </div>
+                <div class="app-topbar">
+                  <div class="logo">
+                    <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                      <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+                      <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+                      <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+                      <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+                    </svg>
+                    muxr
+                  </div>
+                  <div class="topbar-center">terminal</div>
+                  <div class="topbar-action">
+                    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5" xmlns="http://www.w3.org/2000/svg">
+                      <circle cx="10" cy="10" r="1.5"/><circle cx="10" cy="4" r="1.5"/><circle cx="10" cy="16" r="1.5"/>
+                    </svg>
+                  </div>
+                </div>
+                <div class="screen-content">
+                  <div class="terminal-screen">
+                    <!-- Zellij tab bar (reconciled with the live app) -->
+                    <div class="tab-bar">
+                      <div class="tab-item">
+                        <span class="tab-num">1</span>
+                        editor
+                        <span class="tab-fs">(FS)</span>
+                      </div>
+                      <div class="tab-item active">
+                        <span class="tab-num">2</span>
+                        shell
+                      </div>
+                      <div class="tab-item">
+                        <span class="tab-num">3</span>
+                        logs
+                      </div>
+                      <div class="tab-item">
+                        <span class="tab-num">4</span>
+                        float
+                      </div>
+                      <div class="tab-add-btn">+</div>
+                    </div>
+                    <!-- pane strip -->
+                    <div class="pane-info-strip">
+                      <span class="pane-title">Pane #1</span>
+                      <span>·</span>
+                      <span class="pane-cwd">/root/projects/api</span>
+                      <span class="pane-fs-icon">
+                        <svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.2" xmlns="http://www.w3.org/2000/svg">
+                          <path d="M1 4V1h3M11 4V1H8M1 8v3h3M11 8v3H8"/>
+                        </svg>
+                      </span>
+                    </div>
+                    <!-- Multi-pane terminal: focused nvim editor over htop -->
+                    <div class="terminal-output">
+                      <div class="term-pane editor">
+                        <div class="vim-statusline-top">
+                          <span class="mode">NORMAL</span>
+                          <span>main.rs</span>
+                          <span class="spacer">utf-8</span>
+                        </div>
+                        <div class="code-body"><span class="t-dim">  1 </span><span class="t-purple">use</span> <span class="t-teal">axum</span><span class="t-muted">::{Router, routing::get};</span>
+<span class="t-dim">  2 </span><span class="t-purple">use</span> <span class="t-teal">tokio</span><span class="t-muted">::net::TcpListener;</span>
+<span class="t-dim">  3 </span>
+<span class="t-dim">  4 </span><span class="t-orange t-bold">#[tokio::main]</span>
+<span class="t-dim">  5 </span><span class="t-purple">async fn</span> <span class="t-green">main</span><span class="t-muted">() {</span>
+<span class="t-bg-raised t-teal">  6 </span>  <span class="t-purple">let</span> app <span class="t-muted">=</span> Router::new<span class="t-muted">()</span>
+<span class="t-dim">  7 </span>    .route<span class="t-muted">(</span><span class="t-yellow">"/"</span><span class="t-muted">, get(</span>handler<span class="t-muted">));</span>
+<span class="t-dim">  8 </span>
+<span class="t-dim">  9 </span>  <span class="t-purple">let</span> l <span class="t-muted">=</span> TcpListener::bind<span class="t-muted">(</span>
+<span class="t-dim"> 10 </span>    <span class="t-yellow">"0.0.0.0:50051"</span><span class="t-muted">).await?;</span>
+<span class="t-dim"> 11 </span>  axum::serve<span class="t-muted">(l, app).await?;</span>
+<span class="t-dim"> 12 </span><span class="t-muted">}</span><span class="cursor-block"></span></div>
+                        <div class="vim-statusline-bottom">
+                          <span>main.rs</span>
+                          <span class="spacer">Ln 6, Col 4</span>
+                          <span>Rust</span>
+                        </div>
+                      </div>
+                      <div class="term-pane monitor">
+                        <div class="htop-body"><div class="htop-bar"><span class="cpu-label t-dim">1</span><span class="htop-meter"><span class="fill green dev-flex-2"></span><span class="fill yellow dev-flex-1"></span></span><span class="t-green">61%</span></div>
+<div class="htop-bar"><span class="cpu-label t-dim">2</span><span class="htop-meter"><span class="fill green dev-flex-1"></span></span><span class="t-green">24%</span></div>
+<div class="htop-bar"><span class="cpu-label t-dim">Mem</span><span class="htop-meter"><span class="fill orange dev-flex-2"></span></span><span class="t-orange">3.1G</span></div>
+<div class="htop-procs"><span class="t-teal">  PID</span> <span class="t-muted">USER   CPU%  COMMAND</span>
+<span class="t-green"> 1042</span> <span class="t-muted">root   18.2  </span><span class="t-teal">zellij</span>
+<span class="t-green"> 2210</span> <span class="t-muted">root    9.4  </span><span class="t-yellow">cargo</span>
+<span class="t-green"> 2233</span> <span class="t-muted">root    4.1  htop</span></div></div>
+                      </div>
+                    </div>
+                    <!-- Terminal FAB (command center) -->
+                    <div class="term-fab">
+                      <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.6" xmlns="http://www.w3.org/2000/svg">
+                        <path d="M3 6h9M16 6h1M3 14h1M8 14h9"/><circle cx="14" cy="6" r="2"/><circle cx="6" cy="14" r="2"/>
+                      </svg>
+                    </div>
+                    <!-- Mobile keyboard bar -->
+                    <div class="keyboard-bar">
+                      <div class="key-btn active-key">Ctrl</div>
+                      <div class="key-btn">Alt</div>
+                      <div class="key-btn">Esc</div>
+                      <div class="key-sep"></div>
+                      <div class="key-btn">Tab</div>
+                      <div class="key-btn">↑</div>
+                      <div class="key-btn">↓</div>
+                      <div class="key-btn">←</div>
+                      <div class="key-btn">→</div>
+                      <div class="key-sep"></div>
+                      <div class="key-btn">PgUp</div>
+                      <div class="key-btn">PgDn</div>
+                      <div class="key-sep"></div>
+                      <div class="key-btn danger">Del</div>
+                    </div>
+                  </div>
+                  <div class="home-indicator"><div class="home-bar"></div></div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-divider"><span class="divider-label">what you get</span></div>
+
+    <!-- ═══════════════ FEATURE GRID ═══════════════ -->
+    <section class="section">
+      <div class="container">
+        <div class="section-head">
+          <span class="eyebrow">// features</span>
+          <h2>Built for remote terminal control</h2>
+          <p>Everything you need to drive a herdr or zellij server from a touch device — secured, self-hosted, and open at the boundary.</p>
+        </div>
+
+        <div class="feature-grid">
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">TLS + bearer auth</h3>
+            <p class="feature-desc">Every connection is encrypted and authenticated. The gRPC boundary speaks the <code>muxr.v1</code> protobuf contract over fingerprint-pinned TLS with bearer-token auth.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 21v.01M17 21h.01M21 17h.01"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">QR-code device pairing</h3>
+            <p class="feature-desc">Pair from the setup TUI by scanning a QR. The code pins the server's TLS certificate fingerprint — cert-pinned trust, no manual cert wrangling.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="18" height="16" rx="2"/><line x1="3" y1="9" x2="21" y2="9"/><line x1="11" y1="9" x2="11" y2="20"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">Full session, tab &amp; pane control</h3>
+            <p class="feature-desc">Create, rename, and close sessions, tabs, and panes — or switch spaces on herdr. Drive the whole multiplexer, not just a single attached pane.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 11V5a2 2 0 0 1 4 0v6"/><path d="M13 11V7a2 2 0 0 1 4 0v6a7 7 0 0 1-7 7h-1a7 7 0 0 1-6-4l-2-4a1.5 1.5 0 0 1 2.7-1.3L7 14"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">Touch-native gestures</h3>
+            <p class="feature-desc">Tap to focus, tap again for the keyboard, long-press to fullscreen a pane, swipe back to peel immersive layers. A modifier key bar covers Ctrl, Alt, Esc, arrows.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="2" y="4" width="20" height="16" rx="2"/><line x1="9" y1="4" x2="9" y2="20"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">Tablet split-pane rail</h3>
+            <p class="feature-desc">On tablets a persistent 220&nbsp;px pane rail lists tabs and panes alongside the terminal — collapsing to a 56&nbsp;px icon mini-rail in immersive mode.</p>
+          </article>
+
+          <article class="feature-card">
+            <div class="feature-icon">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M12 2l8 4v6c0 5-3.5 8.5-8 10-4.5-1.5-8-5-8-10V6l8-4z"/><path d="M9 12l2 2 4-4"/>
+              </svg>
+            </div>
+            <h3 class="feature-title">Read-only tokens &amp; biometrics</h3>
+            <p class="feature-desc">Mint per-device tokens, read-only or read-write — mutating RPCs fail closed on read-only. Saved credentials are gated behind a biometric unlock for one-tap reconnect.</p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-divider"><span class="divider-label">how it works</span></div>
+
+    <!-- ═══════════════ HOW IT WORKS ═══════════════ -->
+    <section class="section">
+      <div class="container">
+        <div class="section-head">
+          <span class="eyebrow">// three steps</span>
+          <h2>From bare server to pocket terminal</h2>
+          <p>Self-host the open-source backend, pair once, and you are driving herdr or zellij from anywhere on your network.</p>
+        </div>
+
+        <div class="flow-steps">
+          <div class="flow-step">
+            <div class="flow-step-num">01</div>
+            <div class="flow-step-body">
+              <div class="flow-step-title">Run the server</div>
+              <div class="flow-step-desc">Build or Docker-run <code>muxrd</code> next to your herdr or zellij install — it auto-detects whichever is present. It generates a self-signed TLS cert and binds <code>127.0.0.1:50051</code> by default — add a SAN to expose it on your LAN.</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-step-num">02</div>
+            <div class="flow-step-body">
+              <div class="flow-step-title">Pair with a QR code</div>
+              <div class="flow-step-desc">Open the <code>muxrctl</code> setup TUI, create a token, and scan the QR. It encodes the host, port, and token; for a self-signed server it also pins the cert fingerprint, and for a CA-signed server it uses system trust — no further prompts.</div>
+            </div>
+          </div>
+          <div class="flow-step">
+            <div class="flow-step-num">03</div>
+            <div class="flow-step-body">
+              <div class="flow-step-title">Control from your phone</div>
+              <div class="flow-step-desc">Attach to any session and drive tabs, panes, and the keyboard. A biometric prompt offers to save the credential for one-tap reconnect later.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <div class="section-divider"><span class="divider-label">in the terminal</span></div>
+
+    <!-- ═══════════════ TERMINAL SHOWCASE ═══════════════ -->
+    <section class="section">
+      <div class="container container-narrow">
+        <div class="section-head">
+          <span class="eyebrow">// session log</span>
+          <h2>It speaks herdr and zellij</h2>
+          <p>The server relays over your multiplexer's native IPC — zellij's Unix-domain sockets or herdr's wire protocol — so what you see on the phone is the real session state.</p>
+        </div>
+
+        <div class="terminal-block">
+          <div class="terminal-titlebar">
+            <span class="tdot r"></span><span class="tdot y"></span><span class="tdot g"></span>
+            <span class="tdot-label">muxrctl · server</span>
+          </div>
+          <div class="terminal-body"><span class="t-dim">$</span> muxrd start <span class="t-purple">--daemonize --bind</span> 0.0.0.0:50051
+<span class="t-teal">→</span> zellij <span class="t-green">0.44.3</span> detected <span class="t-muted">(version match ok)</span>
+<span class="t-teal">→</span> TLS cert loaded <span class="t-muted">~/.local/share/zellij/muxrd/</span>
+<span class="t-teal">→</span> listening on <span class="t-orange">0.0.0.0:50051</span> <span class="t-muted">(SAN: 192.168.0.42)</span>
+
+<span class="t-dim">$</span> muxrd create-token <span class="t-purple">--name</span> mobile
+<span class="t-green">✓</span> token created  <span class="t-yellow">3f9a2c1b-7e44-4d02-9c6a-1b8e5f0d2a77</span>  <span class="t-muted">read-write</span>
+
+<span class="t-dim">$</span> muxrctl <span class="t-muted"># launch the setup TUI → Tokens → Enter for QR</span>
+<span class="t-teal">●</span> client <span class="t-green">attached</span>  <span class="t-purple">phone · iPhone</span>  <span class="t-muted">3 sessions, 7 panes</span><span class="cursor-block"></span></div>
+        </div>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ═══════════════ FOOTER (canonical shell — copied verbatim by other pages) ═══════════════ -->
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="index.html">Home</a>
+        <a class="footer-link" href="docs.html">Docs</a>
+        <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <div class="footer-meta">
+        <span>self-hosted · open-source backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is MIT-licensed.</span>
+      </div>
+    </div>
+  </footer>
+
+</body>
+</html>

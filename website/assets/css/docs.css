@@ -1,0 +1,178 @@
+/* ═══════════════════════════════════════════════
+   DOCS — two-column documentation layout.
+   Shared by docs.html and guide.html (Tasks 02 & 03).
+   Layout-only: content reuses base.css components
+   (code-block, callout, data-table, badge, kbd, terminal-block).
+   Load order: tokens.css → base.css → docs.css.
+═══════════════════════════════════════════════ */
+
+/* ── Page header (eyebrow + title + lead) ──── */
+.doc-header {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 48px 24px 24px;
+}
+.doc-header .eyebrow { display: block; margin-bottom: 10px; }
+.doc-header h1 {
+  font-size: var(--font-size-3xl);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--fg);
+  margin-bottom: 12px;
+}
+.doc-header h1 span { color: var(--teal); }
+.doc-header .doc-lead {
+  font-size: var(--font-size-xl);
+  color: var(--fg-muted);
+  font-weight: 300;
+  line-height: 1.7;
+  max-width: 720px;
+}
+
+/* ── Two-column grid ───────────────────────── */
+.doc-layout {
+  max-width: var(--content-max);
+  margin: 0 auto;
+  padding: 0 24px 80px;
+  display: grid;
+  grid-template-columns: 230px minmax(0, 1fr);
+  gap: 40px;
+  align-items: start;
+}
+
+/* ── Sidebar (sticky section nav) ──────────── */
+.doc-sidebar {
+  position: sticky;
+  top: calc(var(--nav-height) + 24px);
+  align-self: start;
+  max-height: calc(100vh - var(--nav-height) - 48px);
+  overflow-y: auto;
+  background: var(--bg-surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+}
+
+.doc-sidebar-title {
+  font-size: var(--font-size-xs);
+  color: var(--fg-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 6px 10px 10px;
+}
+
+.doc-nav-list {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.doc-nav-link {
+  display: block;
+  padding: 8px 10px;
+  border-radius: var(--radius-md);
+  font-size: var(--font-size-md);
+  color: var(--fg-muted);
+  border: 1px solid transparent;
+  letter-spacing: 0.02em;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.doc-nav-link:hover { background: var(--bg-hover); color: var(--fg); }
+
+.doc-nav-link.active {
+  background: var(--teal-faint);
+  color: var(--teal);
+  border-color: var(--border-teal);
+}
+
+/* ── Content column ────────────────────────── */
+.doc-content {
+  min-width: 0;
+  max-width: 760px;
+  font-size: var(--font-size-lg);
+  line-height: 1.75;
+  color: var(--fg-muted);
+}
+
+.doc-content section { padding-top: 12px; }
+.doc-content section + section { margin-top: 40px; }
+
+.doc-content h2 {
+  font-size: var(--font-size-2xl);
+  font-weight: 700;
+  letter-spacing: -0.01em;
+  color: var(--fg);
+  margin-bottom: 14px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.doc-content h3 {
+  font-size: var(--font-size-xl);
+  font-weight: 700;
+  color: var(--fg);
+  margin: 28px 0 10px;
+}
+
+.doc-content p { margin: 12px 0; }
+.doc-content p:first-child { margin-top: 0; }
+
+.doc-content ul,
+.doc-content ol {
+  margin: 12px 0;
+  padding-left: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.doc-content li { line-height: 1.65; }
+.doc-content li::marker { color: var(--teal); }
+
+.doc-content a { text-decoration: underline; text-underline-offset: 2px; }
+
+.doc-content strong { color: var(--fg); font-weight: 700; }
+
+/* ═══════════════════════════════════════════════
+   RESPONSIVE — collapse sidebar to a horizontal
+   scroll strip; content goes full-width.
+═══════════════════════════════════════════════ */
+@media (max-width: 860px) {
+  .doc-layout {
+    grid-template-columns: 1fr;
+    gap: 20px;
+  }
+
+  .doc-sidebar {
+    position: sticky;
+    top: var(--nav-height);
+    z-index: 40;
+    max-height: none;
+    padding: 8px;
+    background: rgba(8,13,19,0.92);
+    backdrop-filter: blur(10px);
+    -webkit-backdrop-filter: blur(10px);
+  }
+
+  .doc-sidebar-title { display: none; }
+
+  .doc-nav-list {
+    flex-direction: row;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    gap: 6px;
+    scrollbar-width: none;
+  }
+  .doc-nav-list::-webkit-scrollbar { display: none; }
+
+  .doc-nav-link { white-space: nowrap; flex-shrink: 0; }
+
+  .doc-content { max-width: none; }
+}
+
+@media (max-width: 400px) {
+  .doc-header { padding-left: 16px; padding-right: 16px; }
+  .doc-layout { padding-left: 16px; padding-right: 16px; }
+}
