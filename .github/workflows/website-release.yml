@@ -1,0 +1,105 @@
+name: Website Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra image tag to publish alongside `latest` and `sha-<short-commit>` (e.g. 0.4.0). Leave empty to skip."
+        required: false
+        type: string
+
+# Least privilege: read by default; only the job that pushes to GHCR gets
+# packages: write (set per-job below).
+permissions:
+  contents: read
+
+jobs:
+  # ── Build the static website image and publish it to GHCR ───────────
+  publish:
+    name: Build & Publish Website Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Validate optional tag input
+        id: tag
+        env:
+          # Pass the dispatch input via env (not raw ${{ }} in the script) to
+          # avoid shell injection and to validate it before use.
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          if [ -n "$TAG_INPUT" ]; then
+            if ! printf '%s' "$TAG_INPUT" | grep -qE '^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'; then
+              echo "::error::Invalid tag '$TAG_INPUT' — expected [A-Za-z0-9][A-Za-z0-9._-]*, up to 128 chars."
+              exit 1
+            fi
+            echo "Using extra tag: $TAG_INPUT"
+            echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "No extra tag supplied — publishing latest + sha-<short-commit> only."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Fetch fonts
+        # Fonts are NOT committed to git (website/fonts/ is gitignored build
+        # context). fetch_fonts.sh downloads them from the live site at
+        # https://muxr.app/fonts/ and verifies every file's sha256 against
+        # the committed fonts/manifest.json before the build can use them —
+        # a hash mismatch fails the build, so a bad or partial download can
+        # never reach the image. Uses only curl + python3 (no gh CLI, no
+        # auth needed).
+        working-directory: website
+        run: ./fetch_fonts.sh
+
+      - name: Compute image name and tags
+        id: image
+        run: |
+          # GHCR requires an all-lowercase repository path; github.repository_owner
+          # reflects the owner's display casing and is not guaranteed lowercase,
+          # so normalize it here rather than assume.
+          OWNER=$(printf '%s' "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER}/muxr-web"
+          SHORT_SHA_TAG="sha-${GITHUB_SHA:0:7}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "short_sha_tag=$SHORT_SHA_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build and tag image
+        run: |
+          IMAGE="${{ steps.image.outputs.image }}"
+          docker build website/ -f website/Dockerfile -t "${IMAGE}:latest"
+          docker tag "${IMAGE}:latest" "${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
+          if [ -n "${{ steps.tag.outputs.tag }}" ]; then
+            docker tag "${IMAGE}:latest" "${IMAGE}:${{ steps.tag.outputs.tag }}"
+          fi
+
+      - name: Log in to GHCR
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Push image
+        run: |
+          IMAGE="${{ steps.image.outputs.image }}"
+          REFS="${IMAGE}:latest"
+          docker push "${IMAGE}:latest"
+
+          docker push "${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
+          REFS="$REFS ${IMAGE}:${{ steps.image.outputs.short_sha_tag }}"
+
+          if [ -n "${{ steps.tag.outputs.tag }}" ]; then
+            docker push "${IMAGE}:${{ steps.tag.outputs.tag }}"
+            REFS="$REFS ${IMAGE}:${{ steps.tag.outputs.tag }}"
+          fi
+
+          echo "Pushed: $REFS"
+          {
+            echo "### Published image refs"
+            for ref in $REFS; do
+              echo "- \`$ref\`"
+            done
+          } >> "$GITHUB_STEP_SUMMARY"
