@@ -96,7 +96,7 @@
             <li>Confirm <code>muxrd</code> is actually running — check with <code>muxrd status</code>, or start it with <code>muxrd start</code>.</li>
             <li>Make sure your phone is on the <strong>same network</strong> as the server, or that the server is otherwise reachable from your phone (see <a href="docs.html#lan">Expose on your LAN</a>).</li>
             <li>Check that the token hasn't been revoked — run <code>muxrd list-tokens</code> on the server to confirm it still exists.</li>
-            <li>QR codes are shown once per session in <code>muxrctl</code>. Re-open the <strong>Tokens</strong> screen and press <kbd class="kbd">Enter</kbd> on the token again to regenerate the overlay, then re-scan.</li>
+            <li>QR codes are shown once, right when a token is minted — <code>muxrctl</code> doesn't keep the plaintext secret around afterward, so pressing <kbd class="kbd">Enter</kbd> again won't bring back the QR for a token you've already lost (see <a href="docs.html#tokens">token secrets can't be retrieved after creation</a>). If you missed the scan, revoke that token (<kbd class="kbd">d</kbd>/<kbd class="kbd">x</kbd>), mint a new one, and press <kbd class="kbd">Enter</kbd> right away to show and scan its QR.</li>
             <li>If the camera won't focus or read the code, try the <a href="docs.html#pair">manual fallback</a> — entering the server URL and token by hand on the Connect screen.</li>
           </ul>
 
@@ -118,11 +118,11 @@
           <p>This is by design. Mutating RPCs — creating, renaming, or closing sessions, tabs, and panes, and server-side pane fullscreen — fail closed on read-only tokens; the app also hides those affordances entirely when connected read-only. If you need to make changes, mint a read-write token instead: <code>muxrd create-token --name mobile</code> (omit <code>--read-only</code>).</p>
 
           <h3>Push notifications aren't arriving</h3>
-          <p>Notifications are an optional feature. A few things need to be true for them to arrive:</p>
+          <p>Notifications are an optional feature, and only arrive once your device is registered with a relay — device registration is a capability arriving with app-side push support. A few things to check:</p>
           <ul>
-            <li>The device must be <strong>registered</strong> for notifications — check the toggle and registration status in the app's Settings.</li>
-            <li>If you're using the <strong>hosted Muxr Push relay</strong>, an active Muxr Push subscription is required for delivery.</li>
-            <li>If you're <strong>self-hosting</strong> the <code>muxr-notify</code> relay instead, confirm it's running and that the app is pointed at it.</li>
+            <li>Confirm the app is pointed at a relay at all — either the <strong>hosted Muxr Push relay</strong>, or your own <strong>self-hosted</strong> <code>muxr-notify</code> instance.</li>
+            <li>The hosted relay is what a <strong>Muxr Push subscription</strong> pays for; a self-hosted relay is free and needs no subscription.</li>
+            <li>If you're self-hosting, confirm <code>muxr-notify</code> is running and reachable from the app.</li>
           </ul>
           <p>See the <a href="privacy.html#push">Privacy Policy's Muxr Push section</a> for what a notification does and doesn't contain.</p>
         </section>
