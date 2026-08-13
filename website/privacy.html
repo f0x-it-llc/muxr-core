@@ -148,42 +148,46 @@
           </div>
 
           <h3>What the hosted relay stores</h3>
-          <p>Registering a device with our relay creates one small record:</p>
+          <p>The relay we host currently supports <strong>Android only</strong> — it rejects a registration from any other platform — so the push token it stores is a <strong>Firebase Cloud Messaging (FCM) registration token</strong> issued to your device by Google. Registering creates one small record:</p>
           <table class="data-table">
             <thead>
               <tr><th>Data</th><th>Why</th></tr>
             </thead>
             <tbody>
-              <tr><td>Push token issued by Apple Push Notification service (APNs) or Firebase Cloud Messaging (FCM)</td><td>The address the notification is delivered to — without it, delivery is impossible</td></tr>
-              <tr><td>Platform (iOS or Android)</td><td>Selects the correct delivery service</td></tr>
               <tr><td>An opaque device handle</td><td>Identifies the registration so your server can target it, and so you can remove it</td></tr>
+              <tr><td>FCM registration token</td><td>The address the notification is delivered to — without it, delivery is impossible</td></tr>
+              <tr><td>Platform</td><td>Recorded with the registration; today the relay accepts only <code>android</code></td></tr>
               <tr><td>Registration timestamp</td><td>Records when the device was registered</td></tr>
-              <tr><td>Per-day rate-limit counters</td><td>Caps notification volume and prevents abuse of the relay</td></tr>
+              <tr><td>Timestamp of the most recent notification sent</td><td>Records when the registration was last used</td></tr>
+              <tr><td>Per-day send counter, and the day it applies to</td><td>Caps notification volume and prevents abuse of the relay</td></tr>
+              <tr><td>Inactive flag</td><td>Set when Google reports the token is no longer valid, so the relay stops sending to it</td></tr>
             </tbody>
           </table>
-          <p>That is the complete list. We do not ask for — and the relay has no field for — your name, email address, phone number, contacts, or location, and no account is associated with a registration.</p>
+          <p>That is the complete record — the relay's database table holds no other fields. We do not ask for — and the relay has no field for — your name, email address, phone number, contacts, or location, and no account is associated with a registration.</p>
 
           <h3>What a notification contains</h3>
           <p>A notification payload carries only the <strong>event kind</strong>, a short <strong>title</strong>, and the <strong>workspace or session label</strong> you named. It <strong>never contains terminal content</strong> — no command output, no keystrokes, no file contents, no environment variables.</p>
 
           <div class="callout callout-warn">
             <div class="callout-title">Notification text is visible in transit</div>
-            <p>Push notifications are delivered through Apple's and Google's infrastructure, so the title and label you choose pass through their systems and may appear on your lock screen. Keep sensitive strings out of workspace and session names if that matters to you.</p>
+            <p>Push notifications are delivered through Google's infrastructure, so the title and label you choose pass through its systems and may appear on your lock screen. Keep sensitive strings out of workspace and session names if that matters to you.</p>
           </div>
 
           <h3>Who else receives it</h3>
-          <p>Delivering a notification means handing the payload and your push token to <strong>Apple Push Notification service</strong> (for iOS devices) or <strong>Firebase Cloud Messaging</strong> (for Android devices). Those are the <strong>only third parties</strong> that receive any data in this flow, they receive it solely to deliver the notification to your device, and their handling is governed by Apple's and Google's own privacy policies.</p>
+          <p>Delivering a notification means handing the payload and your registration token to <strong>Google's Firebase Cloud Messaging</strong>, which carries it to your device. <strong>Google is the only third party</strong> that receives any data in this flow, it receives it solely to deliver the notification to your device, and its handling is governed by Google's own privacy policy.</p>
+          <p>If and when we ship iOS support, delivery will also be routed through Firebase Cloud Messaging — with Apple's push service performing the final hop to Apple devices — and we will update this policy to describe it.</p>
 
           <h3>IP addresses</h3>
-          <p>While the relay handles a registration or a send request it necessarily sees the client's IP address, and uses it <strong>in memory</strong> to enforce rate limits. It is not written to the relay's database and is not retained afterwards.</p>
+          <p>While the relay handles a registration or a send request it necessarily sees the client's IP address, and uses it <strong>in memory</strong> to enforce rate limits. The relay itself never writes it to its database — the registration record has no IP field — and the in-memory rate-limit entry is dropped once it falls idle, and on every restart.</p>
+          <p>Like most web services, the hosted relay sits behind a TLS-terminating reverse proxy, and that front-end infrastructure keeps standard, short-lived access logs of the same kind described under <a href="#site">the website and the font catalog</a> — used only for keeping the service running and preventing abuse, and kept only as long as needed for those purposes.</p>
 
           <h3>How long registrations are kept</h3>
-          <p>A registration record is kept until one of three things happens:</p>
+          <p>A registration record is kept until it is deleted. It is deleted when:</p>
           <ul>
-            <li>You <strong>unregister the device</strong> — by turning notifications off in the App or removing the device.</li>
-            <li>Apple or Google <strong>reports the token as invalid</strong> (the App was uninstalled, or the token expired), at which point the relay prunes the record automatically.</li>
+            <li>You <strong>unregister the device</strong> in the App — the relay removes the record, token included, from its database immediately.</li>
             <li>You <strong>ask us to delete it</strong> by emailing <a href="mailto:support@muxr.app">support@muxr.app</a>.</li>
           </ul>
+          <p>If Google <strong>reports the token as invalid or expired</strong> (for example, the App was uninstalled), the relay <strong>marks the registration inactive and stops sending to it</strong> — every later notification request for that handle is refused, and the stored token is undeliverable. That flag does not by itself erase the record: the row, token included, stays in the database until one of the two deletions above happens. If you want it gone, unregister in the App or email us.</p>
           <p>There is no other schedule: while a device stays registered, its record stays. With no registered devices, the relay sends no outbound traffic at all.</p>
         </section>
 
@@ -204,7 +208,7 @@
           <ul>
             <li><strong>Credentials</strong> are held in the operating system's secure storage — iOS Keychain or Android Keystore — released only after a biometric prompt, and wiped from memory after use.</li>
             <li><strong>Connections to your server</strong> use TLS. When you pair by QR against a self-signed server, the App pins the certificate's SHA-256 fingerprint, so a CA-valid impostor cannot take its place.</li>
-            <li><strong>The hosted relay</strong> stores only the minimal registration record described above, on infrastructure we control, and talks to APNs and FCM over encrypted connections.</li>
+            <li><strong>The hosted relay</strong> stores only the minimal registration record described above, on infrastructure we control, and talks to Firebase Cloud Messaging over encrypted connections.</li>
           </ul>
           <p>No system is perfectly secure. Because the server is yours, its hardening — network exposure, token hygiene, OS updates — is in your hands; see the <a href="docs.html">setup documentation</a> for the recommended configuration.</p>
         </section>
