@@ -46,7 +46,7 @@ All six pages share the same `.site-nav` header and `.site-footer` footer (Home,
 
 ## Font Catalog (`/fonts/`)
 
-The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large; `muxr.app/fonts/` (this site's own nginx `/fonts/` location) is the canonical, immutable hosting location, pinned by the checked-in `../fonts/manifest.json`. The fonts used to be distributed as `muxr-core` `fonts-v1` release assets, but GitHub's anonymous release-download edge blocks non-browser clients, so hosting moved to muxr.app. The `fonts-v1` release is being retired but has **not** been deleted yet — deletion is a separate, pending step.
+The app downloads Nerd Fonts at runtime from `muxr.app/fonts/` rather than bundling them. The font binaries are **not** committed to git — `fonts/` is gitignored — because they're large; `muxr.app/fonts/` (this site's own nginx `/fonts/` location) is the canonical, immutable hosting location, pinned by the checked-in `../fonts/manifest.json`. The fonts used to be distributed as `muxr-core` `fonts-v1` release assets, but GitHub's anonymous release-download edge blocks non-browser clients, so hosting moved to muxr.app; the `fonts-v1` release has since been deleted. The catalog itself is served here too — `fetch_fonts.sh` copies `../fonts/manifest.json` into the build context, and nginx serves it at `/fonts/manifest.json` with `no-cache` (unlike the immutable binaries) so the app's discovery root updates on every deploy and has no GitHub dependency.
 
 Before building the Docker image, populate `fonts/` from muxr.app:
 
