@@ -385,7 +385,7 @@ missing=0
 for prefix in "${ALL_PREFIXES[@]}"; do
     if [[ -z "${SEEN_PREFIXES[$prefix]+_}" ]]; then
         if [[ "${SKIP_MISSING:-0}" == "1" ]]; then
-            echo "WARNING: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — SKIP_MISSING=1, omitting from manifest.json" >&2
+            echo "WARNING: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — SKIP_MISSING=1, omitting from manifest.json. The result is a SUBSET manifest: do NOT commit it, and do NOT run fetch_fonts.sh with PRUNE=1 against it — that would delete the omitted binaries from website/fonts/, which may be their only local copy." >&2
         else
             echo "ERROR: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — refusing to write a truncated manifest.json. Set SKIP_MISSING=1 to intentionally regenerate a subset." >&2
             missing=1

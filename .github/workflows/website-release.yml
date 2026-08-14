@@ -107,6 +107,18 @@ jobs:
               echo "::error::Invalid tag '$TAG_INPUT' — expected [A-Za-z0-9][A-Za-z0-9._-]*, up to 128 chars."
               exit 1
             fi
+            # Reserved names: the ref-guard invariant above only holds if the
+            # extra tag cannot NAME the tags the guard protects. `latest` may
+            # only ever be created by the guarded alias path (main builds), and
+            # sha-<hex> is the immutable per-commit namespace — an extra tag
+            # matching either would move/shadow them from any ref, which is
+            # exactly the side channel the guard exists to close.
+            TAG_LOWER=$(printf '%s' "$TAG_INPUT" | tr '[:upper:]' '[:lower:]')
+            sha_re='^sha-[0-9a-f]{7,}$'
+            if [ "$TAG_LOWER" = "latest" ] || [[ "$TAG_LOWER" =~ $sha_re ]]; then
+              echo "::error::Invalid tag '$TAG_INPUT' — 'latest' and 'sha-<hex>' are reserved (latest moves only via a main build; sha tags are immutable build identities)."
+              exit 1
+            fi
             echo "Using extra tag: $TAG_INPUT"
             echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
           else
@@ -155,6 +167,12 @@ jobs:
         working-directory: website
         env:
           FONTS_BASE_URL: ${{ steps.dispatch.outputs.fonts_base_url }}
+          # Deleting non-manifest binaries is opt-in; CI opts in so the build
+          # context stays hermetic even on cached/self-hosted runners. Fresh
+          # checkouts have nothing stale, so this is normally a no-op. Dev
+          # machines default to report-only (website/fonts/ can hold the only
+          # local copy of a binary).
+          PRUNE: "1"
         run: ./fetch_fonts.sh
 
       - name: Compute image name and tags
@@ -184,6 +202,15 @@ jobs:
           # it, so the non-main path simply never creates a latest tag.
           docker build website/ -f website/Dockerfile -t "${IMAGE}:${SHORT_SHA_TAG}"
           if [ -n "$EXTRA_TAG" ]; then
+            # Defense-in-depth re-check of the validation step's reserved-name
+            # rule: no code path may create a latest (or sha-*) ref except the
+            # guarded alias below, even if the validation step regresses.
+            EXTRA_LOWER=$(printf '%s' "$EXTRA_TAG" | tr '[:upper:]' '[:lower:]')
+            sha_re='^sha-[0-9a-f]{7,}$'
+            if [ "$EXTRA_LOWER" = "latest" ] || [[ "$EXTRA_LOWER" =~ $sha_re ]]; then
+              echo "::error::Refusing reserved extra tag '$EXTRA_TAG' — validation should have rejected this."
+              exit 1
+            fi
             docker tag "${IMAGE}:${SHORT_SHA_TAG}" "${IMAGE}:${EXTRA_TAG}"
           fi
           if [ "$PUBLISH_LATEST" = "true" ]; then

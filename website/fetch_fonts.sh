@@ -36,7 +36,9 @@
 # connection failures. Per-file failures are collected and reported as a
 # summary at the end (the loop does not abort on the first failure); after a
 # successful verification pass, any *.ttf/*.otf on disk that is NOT listed in
-# the manifest is pruned so stale binaries can never reach the image. The
+# the manifest is reported — and deleted only with PRUNE=1 (CI sets it; on dev
+# machines website/fonts/ can hold the only local copy of a binary, so the
+# default is report-only). Stranded *.part files are always removed. The
 # script exits non-zero if any file failed to fetch or verify.
 
 set -euo pipefail
@@ -55,8 +57,15 @@ import subprocess
 import sys
 from urllib.parse import urlsplit
 
-base_url, manifest_path = sys.argv[1], sys.argv[2]
+base_url, manifest_path = sys.argv[1].rstrip("/"), sys.argv[2]
 manifest = json.load(open(manifest_path))
+
+# Stranded .part files (a previous run killed mid-download) are never valid
+# artifacts and must not reach the build context — clear them up front.
+for stale in os.listdir("fonts"):
+    if stale.endswith(".part"):
+        os.remove(os.path.join("fonts", stale))
+        print(f"CLEAN    {stale} (stranded partial download)")
 
 def sha256_of(path):
     h = hashlib.sha256()
@@ -124,19 +133,28 @@ for entry in manifest["fonts"]:
 if bad:
     sys.exit(f"{bad} file(s) failed verification — not safe to build an image")
 
-# Prune stale binaries: anything on disk that the manifest no longer lists
-# must not reach the build context (or the image).
-pruned = 0
-for name in sorted(os.listdir("fonts")):
-    if not (name.endswith(".ttf") or name.endswith(".otf")):
-        continue
-    if name in known_names:
-        continue
-    os.remove(os.path.join("fonts", name))
-    print(f"PRUNE    {name} (not in manifest)")
-    pruned += 1
-if pruned:
-    print(f"pruned {pruned} stale font file(s) not present in the manifest")
+# Stale binaries (on disk but not in the manifest) must not reach the image.
+# Deleting is OPT-IN (PRUNE=1): website/fonts/ can hold the only local copy of
+# a binary (they are gitignored everywhere), so a truncated manifest — e.g. one
+# regenerated with SKIP_MISSING=1 — combined with an unconditional prune could
+# destroy files that exist nowhere else. CI sets PRUNE=1 (fresh checkouts have
+# nothing stale, and cached runners must stay hermetic); dev machines default
+# to report-only.
+prune = os.environ.get("PRUNE", "") == "1"
+stale_names = [
+    name for name in sorted(os.listdir("fonts"))
+    if (name.endswith(".ttf") or name.endswith(".otf")) and name not in known_names
+]
+for name in stale_names:
+    if prune:
+        os.remove(os.path.join("fonts", name))
+        print(f"PRUNE    {name} (not in manifest)")
+    else:
+        print(f"STALE    {name} (not in manifest — NOT deleted; remove it or re-run with PRUNE=1)")
+if stale_names and prune:
+    print(f"pruned {len(stale_names)} stale font file(s) not present in the manifest")
+elif stale_names:
+    print(f"WARNING: {len(stale_names)} file(s) on disk are not in the manifest and would ship into the image", file=sys.stderr)
 
 print("all font files verified against the manifest")
 EOF

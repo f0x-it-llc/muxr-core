@@ -197,12 +197,15 @@ The font catalog has a circular origin: the default download source for every fi
 `https://muxr.app/fonts/`, which is served by the very website image this catalog builds.
 Two consequences follow directly:
 
-- **Adding a new font:** `fetch_fonts.sh`'s skip-if-valid check accepts pre-seeded files,
-  so place the new Regular/Bold binaries in `website/fonts/` locally first, regenerate
-  `manifest.json` (above), then build + deploy the image — locally, or via CI with the new
-  file already present in the build context. Only once that image is live does the new
-  file become fetchable from muxr.app; dispatching a build before the binary is seeded
-  locally deadlocks (the site can't serve what it doesn't have yet).
+- **Adding a new font:** put the new Regular/Bold binaries in **this directory**
+  (`fonts/` — the manifest source of truth that `gen_manifest.sh` scans; same as the
+  "Adding a New Font" steps above), regenerate `manifest.json`, **and copy the binaries
+  into `website/fonts/`** so they are pre-seeded in the build context —
+  `fetch_fonts.sh`'s skip-if-valid check accepts pre-seeded files that match the new
+  manifest. Then build + deploy the image locally. Only once that image is live does the
+  new file become fetchable from muxr.app; dispatching a CI build before the image
+  serving the file is deployed deadlocks (the site can't serve what it doesn't have
+  yet, and CI starts from a fresh checkout with an empty `website/fonts/`).
 - **Recovering when muxr.app is down:** any machine holding a valid `website/fonts/`
   directory (all files matching the committed manifest) can rebuild and redeploy directly
   — no fetch needed. Without one, pull the *previous* image and extract it:
