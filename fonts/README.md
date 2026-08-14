@@ -39,7 +39,8 @@ where `<path>` is the `path` field from `manifest.json` (relative to this direct
           "style": "normal",          // "normal" | "italic"
           "path": "FiraCodeNerdFontMono-Regular.ttf",
           "bytes": 2647492,           // exact file size — verified by the app
-          "sha256": "<lowercase hex>" // SHA-256 of the file — verified by the app
+          "sha256": "<lowercase hex>", // SHA-256 of the file — verified by the app
+          "url": "https://muxr.app/fonts/FiraCodeNerdFontMono-Regular.ttf" // absolute download URL
         },
         { "weight": 700, "style": "normal", "path": "FiraCodeNerdFontMono-Bold.ttf", ... }
       ]
@@ -47,6 +48,12 @@ where `<path>` is the `path` field from `manifest.json` (relative to this direct
   ]
 }
 ```
+
+`url` is hosted at `https://muxr.app/fonts/` (this website's own nginx `/fonts/` location,
+cached as long-lived immutable). The `fonts-v1` GitHub release that used to back this is
+being retired — hosting has moved to muxr.app — but the release has NOT been deleted yet;
+deletion is a separate, pending step. `gen_manifest.sh` builds each entry's `url` from
+`FONTS_BASE_URL` (default `https://muxr.app/fonts`); see "Regenerating manifest.json" below.
 
 **Important:** `family` must be the font's internal PostScript/name-table family string —
 the exact string Flutter's `FontLoader` registers. Verify it with:
@@ -167,9 +174,46 @@ Notes:
 cd muxr-core/fonts && ./gen_manifest.sh
 ```
 
-The script is idempotent and deterministic: it scans `*.ttf` in this directory,
+The script is idempotent and deterministic: it scans `*.ttf`/`*.otf` in this directory,
 recomputes `bytes` and `sha256` from the actual files, and rewrites `manifest.json`.
 Run it any time after adding, removing, or replacing font files.
+
+Each file's `url` is built as `$FONTS_BASE_URL/<filename>`, where `FONTS_BASE_URL`
+defaults to `https://muxr.app/fonts` (the canonical hosting location) and can be
+overridden — `FONTS_BASE_URL=... ./gen_manifest.sh` — if the hosting location ever
+changes.
+
+**Fail-closed on missing binaries:** every family in the metadata table must match at
+least one file on disk, or the script errors out naming the family and exits 1 rather
+than silently writing a `manifest.json` that's missing that family's files. To
+intentionally regenerate a manifest from a partial local checkout, set `SKIP_MISSING=1`
+to downgrade the error to a warning and omit the missing families instead.
+
+---
+
+## Bootstrap & disaster recovery
+
+The font catalog has a circular origin: the default download source for every file is
+`https://muxr.app/fonts/`, which is served by the very website image this catalog builds.
+Two consequences follow directly:
+
+- **Adding a new font:** put the new Regular/Bold binaries in **this directory**
+  (`fonts/` — the manifest source of truth that `gen_manifest.sh` scans; same as the
+  "Adding a New Font" steps above), regenerate `manifest.json`, **and copy the binaries
+  into `website/fonts/`** so they are pre-seeded in the build context —
+  `fetch_fonts.sh`'s skip-if-valid check accepts pre-seeded files that match the new
+  manifest. Then build + deploy the image locally. Only once that image is live does the
+  new file become fetchable from muxr.app; dispatching a CI build before the image
+  serving the file is deployed deadlocks (the site can't serve what it doesn't have
+  yet, and CI starts from a fresh checkout with an empty `website/fonts/`).
+- **Recovering when muxr.app is down:** any machine holding a valid `website/fonts/`
+  directory (all files matching the committed manifest) can rebuild and redeploy directly
+  — no fetch needed. Without one, pull the *previous* image and extract it:
+  `docker create` the image, then `docker cp <container>:/usr/share/nginx/html/fonts
+  website/fonts`. For a CI rebuild specifically, the `website-release.yml` workflow's
+  `fonts_base_url` dispatch input (or the `FONTS_BASE_URL` env var directly) points
+  `fetch_fonts.sh` at a temporary https mirror serving the same filenames instead of the
+  unreachable default — the manifest sha256 check still gates what lands in the image.
 
 ---
 

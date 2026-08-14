@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Getting Started · Muxr</title>
+  <meta name="description" content="Install and configure muxrd, mint tokens, pair your device via QR, and connect the Muxr app to your remote herdr and zellij sessions.">
+  <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/glyph.css">
+  <script src="assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="index.html">Home</a>
+        <a class="nav-link active" href="docs.html">Docs</a>
+        <a class="nav-link" href="guide.html">Guide</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+
+    <div class="doc-header">
+      <span class="eyebrow">Documentation</span>
+      <h1>Getting <span>Started</span></h1>
+      <p class="doc-lead">Install the server, configure TLS, mint a token, and pair your device — from bare machine to connected terminal.</p>
+    </div>
+
+    <div class="doc-layout">
+
+      <aside class="doc-sidebar" aria-label="On this page">
+        <div class="doc-sidebar-title">On this page</div>
+        <ol class="doc-nav-list">
+          <li><a class="doc-nav-link" href="#overview">Overview</a></li>
+          <li><a class="doc-nav-link" href="#prerequisites">Prerequisites</a></li>
+          <li><a class="doc-nav-link" href="#install">Install the server</a></li>
+          <li><a class="doc-nav-link" href="#first-run">First run</a></li>
+          <li><a class="doc-nav-link" href="#lan">Expose on your LAN</a></li>
+          <li><a class="doc-nav-link" href="#tokens">Create a token</a></li>
+          <li><a class="doc-nav-link" href="#muxrctl">muxrctl TUI</a></li>
+          <li><a class="doc-nav-link" href="#pair">Pair your device (QR)</a></li>
+          <li><a class="doc-nav-link" href="#docker">Docker dev rig</a></li>
+          <li><a class="doc-nav-link" href="#connect">Connect from the app</a></li>
+        </ol>
+      </aside>
+
+      <div class="doc-content">
+
+        <section id="overview">
+          <h2>Overview</h2>
+          <p>Muxr is two pieces that talk to each other over TLS-secured gRPC:</p>
+          <ul>
+            <li><strong>The Flutter app</strong> — the mobile/tablet client that renders your terminal sessions and sends input.</li>
+            <li><strong><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a></strong> (open-source MIT) — a Rust gRPC backend (<code>muxrd</code>) that relays over your terminal multiplexer's native IPC — <a href="https://zellij.dev/" target="_blank" rel="noopener noreferrer">zellij</a> or <a href="https://herdr.dev/" target="_blank" rel="noopener noreferrer">herdr</a> — plus a ratatui setup TUI (<code>muxrctl</code>).</li>
+          </ul>
+          <p>The server speaks the <code>muxr.v1</code> protobuf contract and must be running alongside a <code>zellij</code> or <code>herdr</code> instance on the machine you want to control — at startup it auto-detects whichever backends are available. The app connects over your network to that server.</p>
+        </section>
+
+        <section id="prerequisites">
+          <h2>Prerequisites</h2>
+          <ul>
+            <li><strong>A terminal multiplexer</strong> — at least one of:
+              <ul>
+                <li><strong>zellij <code>0.44.3</code></strong> on your <code>PATH</code> for the zellij backend. The server validates the version at startup and refuses to start against a mismatched binary; set <code>MUXRD_SKIP_VERSION_CHECK=1</code> to bypass this check in development.</li>
+                <li><strong>herdr <code>0.7.1</code></strong> (wire protocol 14) running for the herdr backend — a separate, unmodified, user-installed binary (AGPL-3.0). muxrd asserts the protocol version on the wire handshake and fails clearly on a mismatch.</li>
+              </ul>
+              muxrd auto-detects whichever are present and serves all available backends simultaneously; pass <code>--backend</code> / <code>MUXRD_BACKEND</code> to restrict to one.</li>
+            <li><strong>Rust 1.92</strong> (edition 2024) — required only if building from source.</li>
+            <li><strong>Docker</strong> — optional; use the dev rig instead of building if you prefer (see <a href="#docker">Docker dev rig</a>).</li>
+          </ul>
+        </section>
+
+        <section id="install">
+          <h2>Install the server</h2>
+          <p>The server is the open-source <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer"><code>muxr-core</code></a> project. The quickest install is the release script, which downloads a checksum-verified prebuilt suite for your platform (Linux <code>x86_64</code>/<code>aarch64</code>, macOS <code>aarch64</code>):</p>
+          <div class="code-block"><pre><code>curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.sh | bash</code></pre></div>
+          <p>Pin a specific release with <code>--version X.Y.Z</code>, or override the install location with <code>MUXR_INSTALL_DIR</code>. Either way you get two binaries:</p>
+          <ul>
+            <li><code>muxrd</code> — the gRPC backend daemon.</li>
+            <li><code>muxrctl</code> — the ratatui setup TUI.</li>
+          </ul>
+          <p>Prefer to build from source? Clone and compile with a Rust 1.92+ toolchain:</p>
+          <div class="code-block"><pre><code>git clone https://github.com/f0x-it-llc/muxr-core
+cd muxr-core
+cargo build --release</code></pre></div>
+          <p>Or use the <a href="#docker">Docker dev rig</a> — it builds and runs both in a container without a local Rust toolchain.</p>
+        </section>
+
+        <section id="first-run">
+          <h2>First run</h2>
+          <p>Initialise the server's data directory and generate a self-signed TLS certificate:</p>
+          <div class="code-block"><pre><code>muxrd init</code></pre></div>
+          <p>This creates the data directory at <code>~/.local/share/zellij/muxrd/</code> and writes the TLS certificate there.</p>
+          <p>Start the server in the foreground:</p>
+          <div class="code-block"><pre><code>muxrd start</code></pre></div>
+          <p>Or detach it as a background daemon:</p>
+          <div class="code-block"><pre><code>muxrd start --daemonize</code></pre></div>
+          <p>When running as a daemon, use <code>status</code> and <code>stop</code> to manage it:</p>
+          <div class="code-block"><pre><code>muxrd status
+muxrd stop</code></pre></div>
+          <p>The server binds <code>127.0.0.1:50051</code> by default. To bypass the zellij version check during development:</p>
+          <div class="code-block"><pre><code>MUXRD_SKIP_VERSION_CHECK=1 muxrd start</code></pre></div>
+        </section>
+
+        <section id="lan">
+          <h2>Expose on your LAN</h2>
+          <p>To reach the server from a phone or tablet on your local network, bind to your LAN address and add that address as a Subject Alternative Name (SAN) to the TLS certificate.</p>
+          <p>Pass the bind address at startup:</p>
+          <div class="code-block"><pre><code>muxrd start --bind 0.0.0.0:50051</code></pre></div>
+          <p>Or set it via the environment variable:</p>
+          <div class="code-block"><pre><code>MUXRD_BIND=0.0.0.0:50051 muxrd start</code></pre></div>
+          <p>Add one or more SANs when generating the certificate (repeatable flag):</p>
+          <div class="code-block"><pre><code>muxrd init --san 192.168.0.42</code></pre></div>
+          <p>Or provide them as a comma-separated list via the environment:</p>
+          <div class="code-block"><pre><code>MUXRD_SAN=192.168.0.42 muxrd init</code></pre></div>
+
+          <div class="callout callout-note">
+            <div class="callout-title">SAN required for TLS</div>
+            <p>TLS clients verify that the server's certificate lists the address they connected to. If your LAN IP is not in the certificate's SANs, clients will reject the connection. Run <code>muxrd init</code> again with <code>--san &lt;your-lan-ip&gt;</code> to regenerate the certificate, then restart the server.</p>
+          </div>
+        </section>
+
+        <section id="tokens">
+          <h2>Create a token</h2>
+          <p>The server uses bearer tokens for authentication. Mint a named token for your device:</p>
+          <div class="code-block"><pre><code>muxrd create-token --name mobile</code></pre></div>
+          <p>Add <code>--read-only</code> to mint a view-only token — mutating RPCs (create/rename/close sessions, tabs, and panes) fail closed on read-only tokens:</p>
+          <div class="code-block"><pre><code>muxrd create-token --name mobile --read-only</code></pre></div>
+          <p>List all tokens:</p>
+          <div class="code-block"><pre><code>muxrd list-tokens</code></pre></div>
+          <p>Revoke a token by name:</p>
+          <div class="code-block"><pre><code>muxrd revoke-token mobile</code></pre></div>
+
+          <div class="callout callout-warn">
+            <div class="callout-title">Secret shown once</div>
+            <p>The plaintext token secret is printed only when the token is created. Copy it immediately — it cannot be retrieved afterwards. If you lose it, revoke the token and create a new one.</p>
+          </div>
+        </section>
+
+        <section id="muxrctl">
+          <h2><code>muxrctl</code> — the setup TUI</h2>
+          <p><code>muxrctl</code> is a ratatui terminal UI (not a CLI tool — it takes no arguments beyond <code>--version</code>/<code>--help</code>). Launch it with the built binary or via Cargo:</p>
+          <div class="code-block"><pre><code>muxrctl</code></pre></div>
+          <div class="code-block"><pre><code>cargo run -p muxrctl</code></pre></div>
+          <p>It opens five screens — <strong>Dashboard</strong>, <strong>Config</strong>, <strong>Cert</strong>, <strong>Tokens</strong>, and <strong>Server</strong> — and is ideal for headless server setup over SSH.</p>
+
+          <h3>Navigation</h3>
+          <table class="data-table">
+            <thead>
+              <tr><th>Key</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><kbd class="kbd">Tab</kbd></td><td>Next screen</td></tr>
+              <tr><td><kbd class="kbd">Shift</kbd>+<kbd class="kbd">Tab</kbd></td><td>Previous screen</td></tr>
+              <tr><td><kbd class="kbd">q</kbd></td><td>Quit</td></tr>
+            </tbody>
+          </table>
+
+          <h3>Per-screen keys</h3>
+          <table class="data-table">
+            <thead>
+              <tr><th>Screen</th><th>Key</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Cert</td><td><kbd class="kbd">g</kbd></td><td>Generate a new self-signed TLS certificate</td></tr>
+              <tr><td>Tokens</td><td><kbd class="kbd">c</kbd></td><td>Start creating a token — type the name</td></tr>
+              <tr><td>Tokens</td><td><kbd class="kbd">Ctrl</kbd>+<kbd class="kbd">Space</kbd></td><td>Toggle read-only flag while naming the token</td></tr>
+              <tr><td>Tokens</td><td><kbd class="kbd">Enter</kbd></td><td>Mint the token (also opens QR overlay on a minted token)</td></tr>
+              <tr><td>Tokens</td><td><kbd class="kbd">d</kbd> / <kbd class="kbd">x</kbd></td><td>Revoke the selected token</td></tr>
+              <tr><td>Server</td><td><kbd class="kbd">s</kbd></td><td>Start the server</td></tr>
+              <tr><td>Server</td><td><kbd class="kbd">x</kbd></td><td>Stop the server</td></tr>
+              <tr><td>Server</td><td><kbd class="kbd">r</kbd></td><td>Refresh server status</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="pair">
+          <h2>Pair your device (QR)</h2>
+          <p>QR pairing is the recommended way to connect — it encodes the server address and token in a single scan. For a self-signed server it also carries the TLS certificate fingerprint so the app pins trust to your exact cert; for a CA-signed server it uses system trust instead.</p>
+          <ol>
+            <li>In <code>muxrctl</code>, navigate to the <strong>Tokens</strong> screen.</li>
+            <li>Press <kbd class="kbd">c</kbd> to create a new token, type a name, and press <kbd class="kbd">Enter</kbd> to mint it.</li>
+            <li>Press <kbd class="kbd">Enter</kbd> again on the minted token to open the QR overlay.</li>
+            <li>Scan the QR code from the app's Connect screen.</li>
+          </ol>
+          <p>The QR encodes a URI of the form:</p>
+          <div class="code-block"><pre><code>muxr://pair?v=2&amp;h=&lt;host&gt;&amp;p=&lt;port&gt;&amp;t=&lt;token-base64url&gt;&amp;ro=&lt;0|1&gt;&amp;n=&lt;name&gt;&amp;tm=&lt;pin|ca&gt;[&amp;fp=&lt;sha256-hex&gt;]</code></pre></div>
+          <p>The <code>tm</code> field selects the trust mode. For a self-signed server it is <code>tm=pin</code> and the <code>fp</code> field carries the <strong>SHA-256 fingerprint of the server's TLS certificate</strong> — the app pins trust to exactly that certificate, so a CA-valid impostor cannot bypass the pin. For a CA-signed server (Let's Encrypt, Cloudflare) it is <code>tm=ca</code> with no <code>fp</code>, and the app uses system CA trust so the connection survives cert renewals.</p>
+
+          <h3>Manual fallback</h3>
+          <p>If you cannot scan a QR, enter the server URL and token manually on the Connect screen and pick a trust mode: <strong>Public domain (CA)</strong> for a CA-signed server, or <strong>Trust anyway (insecure — dev only)</strong> to skip verification. Fingerprint pinning is available through QR pairing only; the insecure option is for development and must not be used in production.</p>
+        </section>
+
+        <section id="docker">
+          <h2>Docker dev rig</h2>
+          <p>The <code>muxr-core</code> repository includes a Docker Compose file that builds and runs <code>muxrd</code> in a container — useful for trying it out without a local Rust toolchain or a running zellij instance. Run these from the cloned <code>muxr-core</code> directory:</p>
+          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml up --build</code></pre></div>
+          <p>To reach it from a phone on your LAN, pass the bind address as an environment variable:</p>
+          <div class="code-block"><pre><code>BIND_ADDR=192.168.0.42 docker compose -f docker/compose.yaml up --build</code></pre></div>
+          <p>The rig exposes two ports:</p>
+          <table class="data-table">
+            <thead>
+              <tr><th>Port</th><th>Purpose</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><code>50051</code></td><td>gRPC (muxrd)</td></tr>
+              <tr><td><code>2222</code></td><td>SSH access into the container</td></tr>
+            </tbody>
+          </table>
+          <p>Reset all container state (volumes included):</p>
+          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml down -v</code></pre></div>
+
+          <div class="callout callout-danger">
+            <div class="callout-title">Dev-only — never expose on an untrusted network</div>
+            <p>The Docker rig uses passwordless SSH and self-signed certificates. It is intended for local development only. Do not expose it on the public internet or any untrusted network.</p>
+          </div>
+        </section>
+
+        <section id="connect">
+          <h2>Connect from the app</h2>
+          <p>With the server running and a token in hand, connect from the Muxr app:</p>
+          <ol>
+            <li><strong>QR scan (recommended):</strong> tap the QR icon on the Connect screen and scan the code from <code>muxrctl</code>. The app connects immediately — pinning a self-signed cert or trusting a CA-signed one as the QR specifies, with no further prompts.</li>
+            <li><strong>Manual:</strong> enter the server URL (<code>host:50051</code>) and paste the bearer token, then choose <strong>Public domain (CA)</strong> for a CA-signed server or <strong>Trust anyway (insecure — dev only)</strong> for development.</li>
+          </ol>
+          <p>After a successful connection the app offers a biometric prompt to save the credential for one-tap reconnect — the saved server appears on the Connect screen as a pill you can tap to re-enter with biometric unlock.</p>
+          <p>Once connected, see the <a href="guide.html">Usage Guide</a> for day-to-day terminal control: gestures, the command center, keyboard bar, fullscreen modes, and tablet differences.</p>
+        </section>
+
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="index.html">Home</a>
+        <a class="footer-link" href="docs.html">Docs</a>
+        <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="support.html">Support</a>
+        <a class="footer-link" href="privacy.html">Privacy</a>
+        <a class="footer-link" href="terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <div class="footer-meta">
+        <span>self-hosted · open-source backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is MIT-licensed.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

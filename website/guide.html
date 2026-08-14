@@ -1,0 +1,369 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Usage Guide — Muxr</title>
+  <meta name="description" content="How to drive Muxr: gestures, command center, keyboard bar, fullscreen modes, tablet differences, and settings.">
+  <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/glyph.css">
+  <script src="assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="index.html">Home</a>
+        <a class="nav-link" href="docs.html">Docs</a>
+        <a class="nav-link active" href="guide.html">Guide</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+
+    <div class="doc-header">
+      <span class="eyebrow">Usage</span>
+      <h1>Usage <span>Guide</span></h1>
+      <p class="doc-lead">How to drive Muxr: gestures, command center, keyboard bar, fullscreen modes, tablet layout, and settings.</p>
+    </div>
+
+    <div class="doc-layout">
+
+      <aside class="doc-sidebar" aria-label="Guide sections">
+        <div class="doc-sidebar-title">On this page</div>
+        <ul class="doc-nav-list" role="list">
+          <li><a class="doc-nav-link" href="#four-screens">The four screens</a></li>
+          <li><a class="doc-nav-link" href="#connecting">Connecting</a></li>
+          <li><a class="doc-nav-link" href="#sessions">Sessions</a></li>
+          <li><a class="doc-nav-link" href="#terminal-gestures">Terminal gestures</a></li>
+          <li><a class="doc-nav-link" href="#command-center">Command center</a></li>
+          <li><a class="doc-nav-link" href="#tabs-and-panes">Tabs &amp; panes</a></li>
+          <li><a class="doc-nav-link" href="#keyboard-bar">Keyboard bar</a></li>
+          <li><a class="doc-nav-link" href="#fullscreen-vs-immersive">Fullscreen vs immersive</a></li>
+          <li><a class="doc-nav-link" href="#tablet-differences">Tablet differences</a></li>
+          <li><a class="doc-nav-link" href="#settings">Settings</a></li>
+          <li><a class="doc-nav-link" href="#read-only-mode">Read-only mode</a></li>
+        </ul>
+      </aside>
+
+      <article class="doc-content">
+
+        <!-- 1 · The four screens -->
+        <section id="four-screens">
+          <h2>The four screens</h2>
+          <p>The app is built around four top-level screens:</p>
+          <ul>
+            <li><strong>Connect</strong> — enter server credentials or scan a QR code to authenticate.</li>
+            <li><strong>Sessions</strong> — list running sessions; create, rename, or kill them. (On a herdr backend this is the single herdr session, whose workspaces appear as switchable spaces in the Terminal screen.)</li>
+            <li><strong>Terminal</strong> — the live terminal view with tab bar, pane strip, and command center.</li>
+            <li><strong>Settings</strong> — manage tokens, saved servers, appearance, and preferences.</li>
+          </ul>
+        </section>
+
+        <!-- 2 · Connecting -->
+        <section id="connecting">
+          <h2>Connecting</h2>
+          <div class="device-figure">
+            <div class="device-figure-body">
+              <p>There are three ways to connect from the Connect screen:</p>
+              <ul>
+                <li><strong>Manual</strong> — type the server URL (<code>host:port</code>) and paste a bearer token, then tap Connect.</li>
+                <li><strong>QR scan</strong> — tap the FAB on the Connect screen to open the camera scanner. Scan a QR code generated by <code>muxrctl</code>; the connection is cert-fingerprint-pinned automatically with no further prompts.</li>
+                <li><strong>Saved-server pill</strong> — tap a saved server pill below the form to pre-fill its credentials. If a biometric-protected token is stored, a biometric prompt unlocks it for one-tap reconnect.</li>
+              </ul>
+              <p>The <strong>Remember me</strong> toggle extends the server-side session-token TTL to 28 days (default is approximately 5 minutes without it).</p>
+            </div>
+            <div class="device">
+              <!-- Connect screen: manual fields, remember-me toggle, QR-scan FAB, saved server -->
+              <div class="phone-frame sm" aria-hidden="true">
+                <div class="phone-notch"></div>
+                <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
+                <div class="screen-body">
+                  <div class="pm-connect">
+                    <div class="pm-mark"><span></span><span></span><span></span><span></span></div>
+                    <div class="pm-h2">Connect to server</div>
+                    <div class="pm-field"><label>server url</label><div class="v">192.168.0.42:50051</div></div>
+                    <div class="pm-field"><label>login token</label><div class="v">••••••••••••</div></div>
+                    <div class="pm-toggle-row"><span>Remember me</span><span class="pm-toggle on"></span></div>
+                    <div class="pm-btn">→ connect</div>
+                    <div class="pm-hdr">saved servers</div>
+                    <div class="pm-saved-row">
+                      <span class="pm-dot-ok"></span>
+                      <span><span class="addr">192.168.0.42:50051</span><span class="meta">cert-pinned TLS · 2h ago</span></span>
+                    </div>
+                  </div>
+                  <span class="pm-fab">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                      <rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 21v.01M17 21h.01M21 17h.01"/>
+                    </svg>
+                  </span>
+                </div>
+                <div class="home-indicator"><div class="home-bar"></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 3 · Sessions -->
+        <section id="sessions">
+          <h2>Sessions</h2>
+          <div class="device-figure">
+            <div class="device-figure-body">
+              <p>The Sessions screen lists all running sessions on the connected server.</p>
+              <ul>
+                <li><strong>Tap a session card</strong> — opens that session in the Terminal screen.</li>
+                <li><strong>Long-press a session card</strong> — shows a menu with options to rename or kill the session. Killing a session asks for confirmation before proceeding.</li>
+              </ul>
+              <p>To create a new session, use the <strong>new-session</strong> affordance (the dashed &ldquo;+ new session&rdquo; button on phone, or the create button on the tablet sessions view) and enter a name in the dialog.</p>
+            </div>
+            <div class="device">
+              <!-- Sessions screen: connection row, session cards with state chips, + new session -->
+              <div class="phone-frame sm" aria-hidden="true">
+                <div class="phone-notch"></div>
+                <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
+                <div class="screen-body">
+
+                  <div class="pm-topbar">
+                    <div class="pm-brand"><span class="pm-brand-mark"><span></span><span></span><span></span><span></span></span>muxr</div>
+                    <div class="pm-topbar-title">192.168.0.42</div>
+                    <span class="pm-topbar-icon">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+                        <circle cx="12" cy="12" r="3.2"/>
+                        <path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2 5.4 5.4"/>
+                      </svg>
+                    </span>
+                  </div>
+
+                  <div class="pm-conn-row">
+                    <span class="pm-dot-ok"></span>
+                    <span class="addr">192.168.0.42:50051</span>
+                    <span class="pm-badge-ok">TLS ✓</span>
+                  </div>
+
+                  <div class="pm-scroll">
+                    <div class="pm-sess-list">
+                      <div class="pm-sess-card running">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">D</span><span class="pm-sess-name">dev</span><span class="pm-chip run">running</span></div>
+                        <div class="pm-sess-meta"><span>▣ 9 panes</span><span>◧ 4 tabs</span></div>
+                        <div class="pm-pane-pills"><span class="pm-pane-pill">btop</span><span class="pm-pane-pill">ed@devbox:~</span></div>
+                      </div>
+                      <div class="pm-sess-card running">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">H</span><span class="pm-sess-name">herdr</span><span class="pm-chip run">running</span></div>
+                        <div class="pm-sess-meta"><span>▣ 3 panes</span><span>◧ 2 tabs</span><span>◆ 5 spaces</span></div>
+                      </div>
+                      <div class="pm-sess-card idle">
+                        <div class="pm-sess-top"><span class="pm-sess-avatar">B</span><span class="pm-sess-name">build</span><span class="pm-chip neutral">resurrectible</span></div>
+                        <div class="pm-sess-meta"><span>▣ 0 panes</span><span>◧ 0 tabs</span></div>
+                      </div>
+                      <div class="pm-new-btn"><b>+</b> new session</div>
+                    </div>
+                  </div>
+
+                </div>
+                <div class="home-indicator"><div class="home-bar"></div></div>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- 4 · Terminal gestures -->
+        <section id="terminal-gestures">
+          <h2>Terminal gestures</h2>
+          <p>The terminal view renders all tiled and floating panes in the active tab. Touch gestures are mapped as follows:</p>
+
+          <table class="data-table" aria-label="Terminal gesture reference">
+            <thead>
+              <tr><th>Gesture</th><th>Target</th><th>Effect</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>Tap</td><td>An <strong>unfocused</strong> pane</td><td>Focus that pane (sends a <code>FocusPane</code> RPC)</td></tr>
+              <tr><td>Tap</td><td>The <strong>focused</strong> pane</td><td>Opens the soft keyboard for input</td></tr>
+              <tr><td>Double-tap</td><td>Any pane</td><td>Toggles server-side pane fullscreen (<code>TogglePaneFullscreen</code> RPC)</td></tr>
+              <tr><td>Long-press</td><td>Terminal text</td><td>Starts text selection — see <a href="#copy-text">Copy text</a> below</td></tr>
+              <tr><td>Back gesture</td><td>—</td><td>Exits client-side immersive mode first; if not immersive, prompts to detach from the session</td></tr>
+            </tbody>
+          </table>
+
+          <h3 id="copy-text">Copy text</h3>
+          <p>Long-press any text in the terminal to select the word under your finger; keep holding and drag to extend the selection word by word. A small <strong>magnifier loupe</strong> floats above your finger while selecting, so your thumb never hides the text. Release to show a floating <strong>Copy</strong> chip — tap it to put the selected text on the system clipboard, or tap anywhere else to dismiss the selection.</p>
+          <p>Selection is entirely client-side (it reads the rendered terminal buffer, no server round-trip), so it works on every backend and even in read-only sessions.</p>
+        </section>
+
+        <!-- 5 · Command center -->
+        <section id="command-center">
+          <h2>The command center</h2>
+          <p>The command center is the primary affordance for tab and pane management within the Terminal screen.</p>
+          <ul>
+            <li><strong>Phone</strong> — a persistent FAB in the lower corner opens a modal bottom sheet.</li>
+            <li><strong>Tablet</strong> — a persistent 220&nbsp;px left pane rail is always visible alongside the terminal.</li>
+          </ul>
+          <p>From either the sheet or the rail:</p>
+          <ul>
+            <li><strong>Tab pills</strong> — tap to switch to that tab (<code>GoToTab</code> RPC).</li>
+            <li><strong>+ tab</strong> — adds a new tab.</li>
+            <li><strong>Pane rows</strong> — tap a pane row to focus it.</li>
+            <li><strong>New pane card</strong> — tap to create a tiled pane; long-press to create a floating pane.</li>
+            <li><strong>Long-press a tab or pane row</strong> — shows a contextual menu with rename and close options.</li>
+          </ul>
+
+          <div class="callout callout-note">
+            <div class="callout-title">Read-only sessions</div>
+            <p>All create, rename, and close affordances are hidden in the command center when connected with a read-only token.</p>
+          </div>
+        </section>
+
+        <!-- 6 · Tabs & panes -->
+        <section id="tabs-and-panes">
+          <h2>Tabs &amp; panes</h2>
+          <p>All tab and pane lifecycle operations are accessible from the command center (bottom sheet on phone, pane rail on tablet).</p>
+          <ul>
+            <li><strong>Create tab</strong> — tap the <em>+ tab</em> chip.</li>
+            <li><strong>Rename tab</strong> — long-press a tab pill → Rename.</li>
+            <li><strong>Close tab</strong> — long-press a tab pill → Close.</li>
+            <li><strong>Create pane (tiled)</strong> — tap the new pane card.</li>
+            <li><strong>Create pane (floating)</strong> — long-press the new pane card.</li>
+            <li><strong>Rename pane</strong> — long-press a pane row → Rename.</li>
+            <li><strong>Close pane</strong> — long-press a pane row → Close.</li>
+          </ul>
+          <p>All mutating affordances (create, rename, close) are hidden when connected with a read-only token.</p>
+        </section>
+
+        <!-- 7 · Keyboard bar -->
+        <section id="keyboard-bar">
+          <h2>Keyboard bar</h2>
+          <p>A modifier key bar sits above the soft keyboard, providing keys that are absent or inconvenient on mobile keyboards.</p>
+
+          <table class="data-table" aria-label="Keyboard bar key reference">
+            <thead>
+              <tr><th>Key</th><th>Sequence sent</th><th>Notes</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><kbd class="kbd">Ctrl</kbd></td><td>—</td><td>One-shot latch: applies to the next key — bar or soft keyboard — then clears</td></tr>
+              <tr><td><kbd class="kbd">Alt</kbd></td><td>—</td><td>One-shot latch: applies to the next key — bar or soft keyboard — then clears</td></tr>
+              <tr><td><kbd class="kbd">Esc</kbd></td><td><code>\x1b</code></td><td>Escape character</td></tr>
+              <tr><td><kbd class="kbd">Tab</kbd></td><td><code>\t</code></td><td>Horizontal tab</td></tr>
+              <tr><td><kbd class="kbd">↑</kbd></td><td><code>\x1b[A</code></td><td>Cursor up</td></tr>
+              <tr><td><kbd class="kbd">↓</kbd></td><td><code>\x1b[B</code></td><td>Cursor down</td></tr>
+              <tr><td><kbd class="kbd">→</kbd></td><td><code>\x1b[C</code></td><td>Cursor right (forward)</td></tr>
+              <tr><td><kbd class="kbd">←</kbd></td><td><code>\x1b[D</code></td><td>Cursor left (back)</td></tr>
+              <tr><td><kbd class="kbd">PgUp</kbd></td><td><code>\x1b[5~</code></td><td>Page up</td></tr>
+              <tr><td><kbd class="kbd">PgDn</kbd></td><td><code>\x1b[6~</code></td><td>Page down</td></tr>
+              <tr><td><kbd class="kbd">Del</kbd></td><td><code>\x1b[3~</code></td><td>Forward delete</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <!-- 8 · Fullscreen vs immersive -->
+        <section id="fullscreen-vs-immersive">
+          <h2>Fullscreen vs immersive</h2>
+          <p>Muxr has two distinct fullscreen concepts that are independent of each other:</p>
+
+          <h3>Server-side pane fullscreen</h3>
+          <p>A zellij RPC (<code>TogglePaneFullscreen</code>) that expands one tiled pane to fill its tab area on the server. Other connected clients (desktop zellij) see the same state. Triggered by <strong>double-tapping</strong> a pane. This is a mutating operation and is blocked in read-only sessions.</p>
+
+          <h3>Client-side immersive mode</h3>
+          <p>Hides the OS navigation bar and the app's own chrome via <code>SystemChrome</code> (Android/iOS immersive sticky mode). This is display-only on the client and does not affect the server or other clients. Available even in read-only sessions. The <strong>back gesture</strong> exits immersive mode before triggering any detach prompt.</p>
+        </section>
+
+        <!-- 9 · Tablet differences -->
+        <section id="tablet-differences">
+          <h2>Tablet differences</h2>
+          <p>Tablet-specific layout kicks in at the <strong>840&nbsp;dp</strong> breakpoint:</p>
+          <ul>
+            <li>A <strong>persistent 220&nbsp;px left pane rail</strong> replaces the phone's FAB + bottom sheet in the Terminal screen.</li>
+            <li>In client-side immersive mode the pane rail collapses to a <strong>56&nbsp;px icon mini-rail</strong>, leaving maximum space for the terminal.</li>
+            <li><strong>Connect screen</strong> renders in a two-column layout.</li>
+            <li><strong>Sessions screen</strong> uses a master-detail layout.</li>
+            <li><strong>Settings screen</strong> uses a master-detail layout.</li>
+          </ul>
+        </section>
+
+        <!-- 10 · Settings -->
+        <section id="settings">
+          <h2>Settings</h2>
+          <p>The Settings screen is divided into several groups:</p>
+          <ul>
+            <li><strong>Connection info</strong> — shows the connected server endpoint, its TLS trust label, and the server/backend versions.</li>
+            <li><strong>Tokens</strong> — create new auth tokens and revoke existing ones on the server.</li>
+            <li><strong>Saved servers</strong> — manage saved server profiles and their biometric-protected credentials.</li>
+            <li><strong>Appearance</strong> — font family (downloadable from the server's font catalog), font size, cursor style, and the mac-option-as-meta toggle for Option key behavior on iOS/macOS.</li>
+            <li><strong>Bell notification</strong> — toggle terminal bell notifications on or off.</li>
+            <li><strong>In-app log viewer</strong> — access the talker log stream for diagnostics without leaving the app.</li>
+            <li><strong>Disconnect</strong> — detach from the current session and return to the Connect screen.</li>
+          </ul>
+        </section>
+
+        <!-- 11 · Read-only mode -->
+        <section id="read-only-mode">
+          <h2>Read-only mode</h2>
+
+          <div class="callout callout-note">
+            <div class="callout-title">Read-only token</div>
+            <p>When connected with a read-only token, the <strong>keyboard bar is disabled</strong> (no input is sent to the server) and all create, rename, close, and server-side pane fullscreen affordances are hidden throughout the app. Client-side immersive mode remains available, and so does <strong>text selection and copy</strong> — long-press works as usual, since selection never sends anything to the server.</p>
+          </div>
+        </section>
+
+      </article>
+    </div>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="index.html">Home</a>
+        <a class="footer-link" href="docs.html">Docs</a>
+        <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="support.html">Support</a>
+        <a class="footer-link" href="privacy.html">Privacy</a>
+        <a class="footer-link" href="terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <div class="footer-meta">
+        <span>self-hosted · open-source backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is MIT-licensed.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

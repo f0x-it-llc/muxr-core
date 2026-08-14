@@ -17,16 +17,25 @@
 #   1. Drop the Regular + Bold .ttf (or .otf) files into this directory.
 #   2. Add a row to the FONT_META table below.
 #   3. Run ./gen_manifest.sh.
+#
+# Fail-closed on missing binaries: every family in the metadata table below
+# must match at least one file on disk, or the script errors out and exits 1
+# instead of silently writing a manifest.json missing that family's files —
+# a truncated manifest committed by accident is a supply-chain incident, not
+# a cosmetic bug. To intentionally regenerate a partial manifest (e.g. only
+# a subset of binaries are checked out locally), set SKIP_MISSING=1 to
+# downgrade the error to a loud warning and omit the family instead.
 
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# ─── Release-asset hosting ─────────────────────────────────────────────────────
-# Font binaries are NOT committed in-tree; they are uploaded as assets to a
-# GitHub Release and the app downloads each file from its absolute "url".
-# Override the tag with FONTS_RELEASE_TAG=... when cutting a new release.
-RELEASE_TAG="${FONTS_RELEASE_TAG:-fonts-v1}"
-RELEASE_BASE="https://github.com/f0x-it-llc/muxr-core/releases/download/${RELEASE_TAG}"
+# ─── Hosting ────────────────────────────────────────────────────────────────
+# Font binaries are NOT committed in-tree; they are hosted at
+# https://muxr.app/fonts/ (the website's own nginx `/fonts/` location, cached
+# as long-lived immutable) and each entry's absolute "url" points there.
+# Override the base with FONTS_BASE_URL=... if the hosting location ever
+# changes.
+FONTS_BASE_URL="${FONTS_BASE_URL:-https://muxr.app/fonts}"
 
 # ─── Metadata table ──────────────────────────────────────────────────────────
 # Columns (tab-separated):
@@ -38,6 +47,7 @@ RELEASE_BASE="https://github.com/f0x-it-llc/muxr-core/releases/download/${RELEAS
 # isNerdFont   = "true" or "false"
 #
 declare -A META_ID META_DISPLAY META_FAMILY META_LICENSE META_ISNF
+declare -a ALL_PREFIXES
 
 add_meta() {
     local prefix="$1" id="$2" display="$3" family="$4" license="$5" isnf="$6"
@@ -46,6 +56,7 @@ add_meta() {
     META_FAMILY["$prefix"]="$family"
     META_LICENSE["$prefix"]="$license"
     META_ISNF["$prefix"]="$isnf"
+    ALL_PREFIXES+=("$prefix")
 }
 
 # ── Original catalog ──────────────────────────────────────────────────────────
@@ -365,6 +376,26 @@ for font in $(ls *.ttf *.otf 2>/dev/null | sort); do
     fi
 done
 
+# ─── Guard: every known family must have matching binaries on disk ──────────
+# The inverse check (files with no metadata) already warns above; this one
+# catches a family that's registered but has ZERO files on disk, which the
+# scan above would otherwise skip silently — the family just wouldn't appear
+# in the emitted manifest.json at all.
+missing=0
+for prefix in "${ALL_PREFIXES[@]}"; do
+    if [[ -z "${SEEN_PREFIXES[$prefix]+_}" ]]; then
+        if [[ "${SKIP_MISSING:-0}" == "1" ]]; then
+            echo "WARNING: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — SKIP_MISSING=1, omitting from manifest.json. The result is a SUBSET manifest: do NOT commit it, and do NOT run fetch_fonts.sh with PRUNE=1 against it — that would delete the omitted binaries from website/fonts/, which may be their only local copy." >&2
+        else
+            echo "ERROR: no files on disk for '${META_DISPLAY[$prefix]}' (prefix '$prefix') — refusing to write a truncated manifest.json. Set SKIP_MISSING=1 to intentionally regenerate a subset." >&2
+            missing=1
+        fi
+    fi
+done
+if [[ "$missing" == "1" ]]; then
+    exit 1
+fi
+
 # Emit JSON
 {
 printf '{\n'
@@ -409,7 +440,7 @@ for prefix in "${PREFIX_ORDER[@]}"; do
         fi
 
         printf '        { "weight": %s, "style": "%s", "path": "%s", "bytes": %s, "sha256": "%s", "url": "%s" }' \
-               "$weight" "$style" "$font" "$bytes" "$sha" "$RELEASE_BASE/$font"
+               "$weight" "$style" "$font" "$bytes" "$sha" "$FONTS_BASE_URL/$font"
     done
     printf '\n'
     printf '      ]\n'

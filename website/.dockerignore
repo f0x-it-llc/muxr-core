@@ -1,0 +1,15 @@
+# Keep meta files out of the build context so they can never reach the web root
+# (info disclosure if the Dockerfile ever switches to a bulk `COPY . .`).
+# NOTE: nginx.conf is deliberately NOT ignored — the Dockerfile copies it to
+# /etc/nginx/conf.d/default.conf (not the web root), so it must stay in context.
+Dockerfile
+.dockerignore
+README.md
+
+# VCS / OS / editor cruft
+.git
+.gitignore
+.DS_Store
+*.swp
+*.swo
+*~
