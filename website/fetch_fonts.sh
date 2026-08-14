@@ -53,6 +53,7 @@ python3 - "$FONTS_BASE_URL" "$MANIFEST" << 'EOF'
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from urllib.parse import urlsplit
@@ -132,6 +133,13 @@ for entry in manifest["fonts"]:
 
 if bad:
     sys.exit(f"{bad} file(s) failed verification — not safe to build an image")
+
+# Ship the catalog itself alongside the binaries: the app discovers fonts via
+# https://muxr.app/fonts/manifest.json (no GitHub dependency), and copying at
+# fetch time guarantees the served catalog always matches the files this very
+# build context holds — no skew between manifest and binaries is possible.
+shutil.copyfile(manifest_path, os.path.join("fonts", "manifest.json"))
+print("COPY     manifest.json (served at /fonts/manifest.json)")
 
 # Stale binaries (on disk but not in the manifest) must not reach the image.
 # Deleting is OPT-IN (PRUNE=1): website/fonts/ can hold the only local copy of
