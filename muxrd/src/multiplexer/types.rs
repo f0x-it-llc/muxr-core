@@ -202,10 +202,15 @@ pub struct SpaceSnapshot {
 /// (`AttachReq.resume_*`), so a reconnecting client resumes where it left off
 /// instead of snapping to the backend's daemon-global focus.
 ///
-/// Every field is independent and optional; the backend resolves them in the
-/// order pane → tab → space and falls through on anything stale or unknown. An
+/// Every field is optional, but they are NOT independent: the pane hint is
+/// honoured only when the tab hint is also present and the named pane sits in
+/// that tab (a pane-only hint is ignored even when it resolves); the tab hint
+/// needs no corroboration; the space hint is the durable axis. Resolution falls
+/// through pane → tab → space on anything stale, unknown or uncorroborated. An
 /// unresolvable hint must NEVER fail the attach — an all-`None` target is
-/// exactly today's behavior (the session's currently-focused pane).
+/// exactly today's behavior (the session's currently-focused pane). Read-only
+/// attaches drop the entire hint before resolution
+/// (`relay::resume_target_for`).
 ///
 /// Spaces/panes/tabs here are addressed with the *neutral* ids the gRPC layer
 /// speaks (`SpaceSnapshot::id`, `TabSnapshot::tab_id`, `PaneSnapshot::id`), so

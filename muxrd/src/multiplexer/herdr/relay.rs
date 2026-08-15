@@ -530,10 +530,13 @@ fn focused_or_first<'a>(scoped: impl Iterator<Item = &'a PaneInfo>) -> Option<&'
 /// its own can name a live-but-different pane. Rung 1 therefore fires only when
 /// the client also sent a tab hint AND the pane it names sits in that very tab;
 /// a pane-only hint is never honoured (it falls to rung 3), and a pane hint that
-/// contradicts the tab hint falls to rung 2. Two independently-translated ids
-/// agreeing is weak evidence, but it is the evidence available here, and it
-/// bounds a mis-resolution to a swap *within one tab* — which lands the client on
-/// the right tab, one pane over, instead of somewhere unrelated.
+/// contradicts the tab hint falls past the pane rung (to the tab rung when the
+/// tab hint translates, onward otherwise). What corroboration buys is narrow but
+/// real: the pane hint alone can never dictate the landing *tab* — the landing
+/// tab is whatever the tab hint resolves to, or daemon focus. It is NOT proof of
+/// identity: the tab hint is itself uncorroborated, and after a restart both
+/// registries shift together, so two translated ids can agree while both are
+/// wrong ([`hint_ids`] records the honest bound and the accepted residual).
 ///
 /// Every rung falls through silently on a stale/unknown/uncorroborated hint, so
 /// the only failure is a workspace with **no panes at all**; the caller uses that
@@ -599,13 +602,19 @@ fn pick_resume_pane(
 /// and a numeric hint minted by the previous process can translate to a live but
 /// *different* pane or tab. Translation is an id lookup, not proof of identity.
 ///
-/// [`pick_resume_pane`] is what bounds the damage: the pane rung requires the tab
-/// hint to corroborate it (the pane must live in the hinted tab), so a
-/// cross-restart mis-resolution can only land the client on a *different pane
-/// within the tab it asked for* — never on an unrelated tab or workspace. That
-/// same-tab residual is **accepted**: the tab is the unit the user recognises, the
-/// attach still succeeds, and one pane's content within the tab they were already
-/// viewing is not a disclosure step beyond the tab itself.
+/// [`pick_resume_pane`] narrows the damage but does not bound it to one tab: the
+/// pane rung requires the tab hint to corroborate it, so the pane hint alone can
+/// never drag the attach off the tab the tab hint resolved to. The tab hint
+/// itself is uncorroborated, though — a cross-restart alias can land the client
+/// on a live-but-different *tab*, and because both registries shift together
+/// after a restart, corroboration can even pass with both ids wrong (a
+/// correlated shift names a real pane inside a real-but-unrelated tab). The
+/// **accepted residual** is therefore wrong-pane *or wrong-tab* landing within
+/// the workspace the attach resolved; the genuinely stable axis is the space
+/// hint (an opaque herdr id, not a registry number), which bounds every
+/// mis-resolution to the workspace the client asked for. Same class of damage as
+/// the daemon-global-focus default this feature replaces, never an authorization
+/// step (read-only attaches carry no hint at all).
 ///
 /// The complete fix is to stamp ids with a **per-process epoch** (a value minted
 /// at muxrd start, echoed in `GetLayout` and back in `AttachReq`) and drop any
