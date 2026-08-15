@@ -41,7 +41,8 @@ mod zellij;
 
 pub use types::{
     ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
-    PaneSnapshot, ResizeDir, ResizeKind, ScrollDir, SpaceSnapshot, TabSnapshot,
+    PaneSnapshot, ResizeDir, ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot,
+    TabSnapshot,
 };
 pub use zellij::ZellijBackend;
 
@@ -298,6 +299,30 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
         read_only: bool,
     ) -> anyhow::Result<DualHandle>;
 
+    /// Open an attach that honours a client's best-effort [`ResumeTarget`],
+    /// reporting the view it landed on via [`DualHandle::resumed_view`].
+    ///
+    /// **This is the fork where the resume hint stops mattering for every
+    /// backend but herdr:** the default implementation *ignores* `resume` and
+    /// delegates to [`Self::open_attach`], so zellij (whose attach streams the
+    /// whole composited session and follows the server's own focus — there is no
+    /// per-connection pane to resume) and any future backend without a resume
+    /// concept keep byte-identical behavior. Only [`HerdrBackend`] overrides it.
+    ///
+    /// An override MUST NOT fail the attach on a stale/unknown hint: every field
+    /// is best-effort and falls through to the backend's current focus.
+    fn open_attach_with_resume(
+        &self,
+        session: &str,
+        rows: u16,
+        cols: u16,
+        read_only: bool,
+        resume: &ResumeTarget,
+    ) -> anyhow::Result<DualHandle> {
+        let _ = resume;
+        self.open_attach(session, rows, cols, read_only)
+    }
+
     // ── Backend identity ────────────────────────────────────────────────────
 
     /// Backend version string (today: `zellij_utils::consts::VERSION`).
@@ -328,6 +353,11 @@ pub struct DualHandle {
     pub sender: Box<dyn MuxSender>,
     pub receiver: Box<dyn MuxReceiver>,
     pub session_name: String,
+    /// The view this attach resolved from a [`ResumeTarget`], when the backend
+    /// honours resume hints (herdr). `None` for every hint-less attach and for
+    /// backends that ignore the hint — the relay then initialises its view state
+    /// exactly as it does today.
+    pub resumed_view: Option<ResumedView>,
 }
 
 impl DualHandle {

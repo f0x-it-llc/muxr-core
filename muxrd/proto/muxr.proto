@@ -285,6 +285,29 @@ message AttachReq {
   string session = 1;
   uint32 rows    = 2;
   uint32 cols    = 3;
+
+  // ─── Resume hints (additive; best-effort) ──────────────────────────────────
+  // A reconnecting client may name the space/tab/pane it was last viewing so the
+  // fresh attach lands there instead of the backend's daemon-global focus.
+  //
+  // All three are BEST-EFFORT and independent: the server resolves them in the
+  // order pane → tab → space, falling through on anything stale or unknown, and
+  // an unresolvable hint NEVER fails the attach (it degrades to the behavior
+  // below). Leaving them unset (proto3 defaults: "" / 0) is exactly today's
+  // behavior — the session's currently-focused pane.
+  //
+  // herdr sessions only. zellij attaches ignore these fields entirely (a zellij
+  // stream is the whole composited session and follows the server's own focus).
+
+  // Opaque herdr workspace id (the same `space_id` GetSpaces/SwitchSpace use).
+  // Unset ("") = the daemon's active-or-first workspace, as today.
+  string resume_space_id = 4;
+  // Registry-mapped tab id, as emitted by GetLayout's `TabMsg.tab_id`.
+  // Unset (0) = no tab hint.
+  uint64 resume_tab_id   = 5;
+  // Registry-mapped pane id, as emitted by GetLayout's `PaneMsg.id`.
+  // Unset (0) = no pane hint.
+  uint32 resume_pane_id  = 6;
 }
 
 // Terminal resize.
