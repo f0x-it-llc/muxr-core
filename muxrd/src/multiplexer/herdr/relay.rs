@@ -14,7 +14,8 @@
 //! herdr's wire [`AttachTerminal`](wire::ClientMessage::AttachTerminal) streams
 //! **one pane's** ANSI content (not the whole composited tab, unlike zellij). So
 //! the relay is attached to exactly **one pane's `terminal_id` at a time** —
-//! initially the session's **focused pane**:
+//! initially the session's **focused pane**, or the pane a client's resume hint
+//! names ([`resolve_attach_target`]):
 //!
 //! - [`HerdrMuxReceiver`] forwards that pane's [`TerminalFrame`](wire::TerminalFrame)
 //!   bytes (full-on-attach, then incrementals) verbatim into the gRPC
@@ -62,10 +63,12 @@
 //! ## P2.04 wiring
 //!
 //! [`open_attach`] is the single entry point `HerdrBackend::open_attach` (P2.04)
-//! calls: it performs the handshake, attaches the focused pane, and returns the
-//! split [`DualHandle`]. P2.04 owns the `Arc<HerdrControl>` (and, through it, the
-//! shared registries) and the resolved wire socket path; it maps the muxrd
-//! `session` name to a herdr `workspace_id` before calling.
+//! calls: it performs the handshake, attaches the pane
+//! [`resolve_attach_target`]'s resume ladder picks — the client's best-effort
+//! resume target when it still resolves, the workspace's focused pane otherwise
+//! — and returns the split [`DualHandle`]. P2.04 owns the `Arc<HerdrControl>`
+//! (and, through it, the shared registries) and the resolved wire socket path;
+//! it maps the muxrd `session` name to a herdr `workspace_id` before calling.
 
 use std::io;
 use std::net::Shutdown;
@@ -224,16 +227,7 @@ pub fn open_attach(
     let (swap_tx, swap_rx) = mpsc::channel();
     let write = Arc::new(Mutex::new(write_half));
 
-    // Report the resolved view ONLY when the client actually asked to resume: a
-    // hint-less attach must stay byte-identical to the pre-resume behavior (the
-    // relay then runs its usual view-state init).
-    let resumed_view = (!resume.is_empty()).then(|| ResumedView {
-        space_id: target.workspace_id.clone(),
-        tab_id: target.tab_id,
-        // herdr has no plugin panes (the layout transcode reports is_plugin=false
-        // for every pane), so a terminal PaneRef is the only correct shape here.
-        pane: PaneRef::terminal(target.pane_id),
-    });
+    let resumed_view = resumed_view_for(resume, &target);
 
     Ok(DualHandle {
         sender: Box::new(HerdrMuxSender {
@@ -258,6 +252,24 @@ pub fn open_attach(
         }),
         session_name,
         resumed_view,
+    })
+}
+
+/// The view to report through [`DualHandle::resumed_view`] for an attach that
+/// resolved `target` from `resume`.
+///
+/// `Some` **only** when the client actually asked to resume: an empty
+/// [`ResumeTarget`] — a client that sent no hint, or one whose hint was dropped
+/// upstream (a read-only attach; see `relay::resume_target_for`) — yields `None`,
+/// which is what keeps the relay on its usual view-state init and makes such an
+/// attach byte-identical to the pre-resume behavior.
+fn resumed_view_for(resume: &ResumeTarget, target: &AttachTarget) -> Option<ResumedView> {
+    (!resume.is_empty()).then(|| ResumedView {
+        space_id: target.workspace_id.clone(),
+        tab_id: target.tab_id,
+        // herdr has no plugin panes (the layout transcode reports is_plugin=false
+        // for every pane), so a terminal PaneRef is the only correct shape here.
+        pane: PaneRef::terminal(target.pane_id),
     })
 }
 
@@ -506,14 +518,28 @@ fn focused_or_first<'a>(scoped: impl Iterator<Item = &'a PaneInfo>) -> Option<&'
 /// [`pick_tab_pane`], so a later `focus_pane(u32)` resolves for panes on any
 /// tab) and then picks the target by falling down these rungs:
 ///
-/// 1. `hint_pane` (a herdr `pane_id`) that is still present in this workspace;
+/// 1. `hint_pane` (a herdr `pane_id`) that is still present in this workspace
+///    **and whose tab is `hint_tab`** — see the corroboration rule below;
 /// 2. `hint_tab` (a herdr `tab_id`) → that tab's focused-or-first pane;
 /// 3. the workspace's focused-or-first pane — today's behavior.
 ///
-/// Every rung falls through silently on a stale/unknown hint, so the only
-/// failure is a workspace with **no panes at all**; the caller uses that to fall
-/// back to the default workspace ([`resolve_attach_target_with`]'s rung 4).
-/// Separated from the I/O call for unit-testability, mirroring [`pick_tab_pane`].
+/// ## Rung 1 requires tab corroboration
+///
+/// The numeric hints reaching us have been translated through registries that
+/// are **not** stable across a muxrd restart ([`hint_ids`]), so a pane hint on
+/// its own can name a live-but-different pane. Rung 1 therefore fires only when
+/// the client also sent a tab hint AND the pane it names sits in that very tab;
+/// a pane-only hint is never honoured (it falls to rung 3), and a pane hint that
+/// contradicts the tab hint falls to rung 2. Two independently-translated ids
+/// agreeing is weak evidence, but it is the evidence available here, and it
+/// bounds a mis-resolution to a swap *within one tab* — which lands the client on
+/// the right tab, one pane over, instead of somewhere unrelated.
+///
+/// Every rung falls through silently on a stale/unknown/uncorroborated hint, so
+/// the only failure is a workspace with **no panes at all**; the caller uses that
+/// to fall back to the default workspace ([`resolve_attach_target_with`]'s rung
+/// 4). Separated from the I/O call for unit-testability, mirroring
+/// [`pick_tab_pane`].
 fn pick_resume_pane(
     panes: &[PaneInfo],
     pane_reg: &HerdrPaneRegistry,
@@ -526,8 +552,20 @@ fn pick_resume_pane(
         pane_reg.assign_or_get(&pane.pane_id, &pane.terminal_id);
     }
 
-    let chosen = hint_pane
-        .and_then(|hp| panes.iter().find(|p| p.pane_id == hp))
+    // Rung 1, corroborated: the hinted pane, but only if the hinted tab is the
+    // tab it actually lives in. `hint_tab` being None disarms this rung entirely.
+    let corroborated = hint_pane.zip(hint_tab).and_then(|(hp, ht)| {
+        let found = panes.iter().find(|p| p.pane_id == hp && p.tab_id == ht);
+        if found.is_none() && panes.iter().any(|p| p.pane_id == hp) {
+            log::debug!(
+                "herdr attach: resume pane hint resolves in workspace '{workspace_id}' but not \
+                 in the hinted tab — treating it as stale and falling back to the tab hint"
+            );
+        }
+        found
+    });
+
+    let chosen = corroborated
         .or_else(|| {
             hint_tab.and_then(|ht| focused_or_first(panes.iter().filter(|p| p.tab_id == ht)))
         })
@@ -545,12 +583,35 @@ fn pick_resume_pane(
 /// Translate a [`ResumeTarget`]'s **numeric** pane/tab hints into herdr's opaque
 /// string ids through the shared registries.
 ///
-/// Deliberately read-only ([`HerdrPaneRegistry::herdr_pane_id`] /
-/// [`HerdrTabRegistry::herdr_tab_id`] never assign) and deliberately called
-/// **before** this attach's registration pass: on a fresh muxrd process the
-/// registries are empty, so a hint minted by a previous process resolves to
-/// `None` and falls through — rather than aliasing whichever pane happens to be
-/// handed that id now.
+/// The lookups are deliberately read-only ([`HerdrPaneRegistry::herdr_pane_id`] /
+/// [`HerdrTabRegistry::herdr_tab_id`] never assign), so translating a hint can
+/// never itself mint an id — an id this process has genuinely never seen resolves
+/// to `None` and the hint falls through.
+///
+/// ## What this does NOT guarantee
+///
+/// The registries are **process-lifetime**, not durable, and they are repopulated
+/// eagerly: `transcode_layout` (`herdr/control.rs`) `assign_or_get`s every pane
+/// and tab on *every* ephemeral `GetLayout`, and the mobile client polls layout on
+/// a 3 s cadence straight through its reconnect backoff. So by the time a
+/// reconnecting client's `AttachReq` arrives at a **restarted** muxrd, the
+/// registries are typically well populated with ids assigned in a fresh order —
+/// and a numeric hint minted by the previous process can translate to a live but
+/// *different* pane or tab. Translation is an id lookup, not proof of identity.
+///
+/// [`pick_resume_pane`] is what bounds the damage: the pane rung requires the tab
+/// hint to corroborate it (the pane must live in the hinted tab), so a
+/// cross-restart mis-resolution can only land the client on a *different pane
+/// within the tab it asked for* — never on an unrelated tab or workspace. That
+/// same-tab residual is **accepted**: the tab is the unit the user recognises, the
+/// attach still succeeds, and one pane's content within the tab they were already
+/// viewing is not a disclosure step beyond the tab itself.
+///
+/// The complete fix is to stamp ids with a **per-process epoch** (a value minted
+/// at muxrd start, echoed in `GetLayout` and back in `AttachReq`) and drop any
+/// hint whose epoch is not this process's — making a foreign id unusable rather
+/// than merely improbable. That is an additive proto change and is not attempted
+/// here.
 fn hint_ids(
     pane_reg: &HerdrPaneRegistry,
     tab_reg: &HerdrTabRegistry,
@@ -589,7 +650,8 @@ fn resolve_attach_target(
 /// The four-rung resume ladder, parameterized over the pane-list query so it is
 /// unit-testable without a live herdr:
 ///
-/// 1. `hint_pane` inside `hint_space` (when set) else `default_workspace`;
+/// 1. `hint_pane` — corroborated by `hint_tab` (see [`pick_resume_pane`]) —
+///    inside `hint_space` (when set) else `default_workspace`;
 /// 2. `hint_tab` → that tab's focused-or-first pane, same workspace;
 /// 3. `hint_space` → that workspace's focused-or-first pane;
 /// 4. nothing usable → `default_workspace`'s focused-or-first pane, i.e. exactly
@@ -1551,10 +1613,66 @@ mod tests {
         ]
     }
 
-    /// Rung 1: a live pane hint wins over both the tab hint and the workspace's
-    /// focused pane — this is the whole point of a resumable attach.
+    /// Rung 1: a live pane hint **corroborated by its own tab hint** wins over the
+    /// tab's focused-or-first pane AND the workspace's focused pane — this is the
+    /// whole point of a resumable attach.
     #[test]
-    fn resume_picks_the_exact_hinted_pane() {
+    fn resume_picks_the_exact_hinted_pane_when_the_tab_corroborates() {
+        let (pane_reg, tab_reg) = (HerdrPaneRegistry::new(), HerdrTabRegistry::new());
+        let target = pick_resume_pane(
+            &resume_panes(),
+            &pane_reg,
+            &tab_reg,
+            "ws-1",
+            Some("pane-b1"),
+            Some("tab-B"), // pane-b1 really is in tab-B → corroborated
+        )
+        .unwrap();
+
+        assert_eq!(
+            target.terminal_id, "term-b1",
+            "a corroborated pane hint must beat the tab's focused pane (term-b2) \
+             AND the daemon-global focus"
+        );
+        assert_eq!(
+            target.tab_id,
+            tab_reg.assign_or_get("tab-B"),
+            "the reported tab id must be the hinted pane's OWN tab"
+        );
+        assert_eq!(target.pane_id, pane_reg.assign_or_get("pane-b1", "term-b1"));
+        assert_eq!(target.workspace_id, "ws-1");
+    }
+
+    /// Defect B: a pane hint that resolves to a pane in a DIFFERENT tab than the
+    /// tab hint is not corroborated — the two ids disagree, so the pane id is
+    /// treated as stale and the ladder falls to rung 2 (the tab hint). This is the
+    /// cross-restart aliasing case: a foreign pane id that happens to translate to
+    /// a live pane cannot drag the attach off the hinted tab.
+    #[test]
+    fn uncorroborated_pane_hint_falls_to_the_tab_rung() {
+        let (pane_reg, tab_reg) = (HerdrPaneRegistry::new(), HerdrTabRegistry::new());
+        let target = pick_resume_pane(
+            &resume_panes(),
+            &pane_reg,
+            &tab_reg,
+            "ws-1",
+            Some("pane-a1"), // live, but in tab-A …
+            Some("tab-B"),   // … while the client asked for tab-B
+        )
+        .unwrap();
+
+        assert_eq!(
+            target.terminal_id, "term-b2",
+            "a pane hint contradicting the tab hint must fall to the tab's focused pane"
+        );
+        assert_eq!(target.tab_id, tab_reg.assign_or_get("tab-B"));
+    }
+
+    /// Defect B: a pane hint with NO tab hint is never honoured — there is nothing
+    /// to corroborate it, so the ladder skips rung 1 (and rung 2, absent a tab
+    /// hint) and lands on the workspace's focused-or-first pane.
+    #[test]
+    fn pane_only_hint_is_not_honoured() {
         let (pane_reg, tab_reg) = (HerdrPaneRegistry::new(), HerdrTabRegistry::new());
         let target = pick_resume_pane(
             &resume_panes(),
@@ -1562,21 +1680,15 @@ mod tests {
             &tab_reg,
             "ws-1",
             Some("pane-a1"),
-            Some("tab-B"),
+            None,
         )
         .unwrap();
 
         assert_eq!(
-            target.terminal_id, "term-a1",
-            "the pane hint must beat the tab hint AND the daemon-global focus"
+            target.terminal_id, "term-b2",
+            "an uncorroborated pane-only hint must fall through to today's behavior"
         );
-        assert_eq!(
-            target.tab_id,
-            tab_reg.assign_or_get("tab-A"),
-            "the reported tab id must be the hinted pane's OWN tab"
-        );
-        assert_eq!(target.pane_id, pane_reg.assign_or_get("pane-a1", "term-a1"));
-        assert_eq!(target.workspace_id, "ws-1");
+        assert_eq!(target.tab_id, tab_reg.assign_or_get("tab-B"));
     }
 
     /// Rung 2: a stale pane hint (pane closed since the client last saw it) falls
@@ -1687,7 +1799,7 @@ mod tests {
             &tab_reg,
             "ws-1",
             Some("pane-b1"),
-            None,
+            Some("tab-B"),
         )
         .unwrap();
 
@@ -1746,9 +1858,11 @@ mod tests {
         assert_eq!(hint_tab.as_deref(), Some("tab-B"));
     }
 
-    /// Unknown numeric hints (the fresh-muxrd-process case: the registries are
-    /// empty, so ids minted by a previous process mean nothing) resolve to `None`
-    /// and fall through — they must NOT alias whichever pane holds that id now.
+    /// A numeric hint this process has never assigned resolves to `None` and falls
+    /// through, and the read-only lookup must not mint an id on the way past.
+    /// (This is only half the story — an id this process HAS assigned, to some
+    /// other entity, translates fine; [`pick_resume_pane`]'s tab corroboration is
+    /// what bounds that case. See [`hint_ids`].)
     #[test]
     fn hint_ids_drop_unknown_numeric_hints() {
         let (pane_reg, tab_reg) = (HerdrPaneRegistry::new(), HerdrTabRegistry::new());
@@ -1764,6 +1878,44 @@ mod tests {
         assert!(hint_pane.is_none() && hint_tab.is_none());
         // A read-only lookup must not have assigned anything either.
         assert!(pane_reg.herdr_pane_id(1).is_none());
+    }
+
+    // ── resumed_view_for: only a real hint reports a resumed view ─────────────
+
+    fn sample_target() -> AttachTarget {
+        AttachTarget {
+            workspace_id: "ws-2".into(),
+            tab_id: 7,
+            pane_id: 21,
+            terminal_id: "term-c1".into(),
+        }
+    }
+
+    /// An empty [`ResumeTarget`] reports NO resumed view, so the relay keeps its
+    /// usual view-state init and the attach is byte-identical to the pre-resume
+    /// behavior. This is what a read-only attach relies on: `relay::mod`'s gate
+    /// hands the backend an empty target, and the difference stops here.
+    #[test]
+    fn empty_resume_target_reports_no_resumed_view() {
+        assert!(resumed_view_for(&ResumeTarget::default(), &sample_target()).is_none());
+    }
+
+    /// A hinted attach reports the view it actually landed on (the RESOLVED ids,
+    /// not the hinted ones) so the relay seeds a truthful B-FOCUS override.
+    #[test]
+    fn hinted_resume_target_reports_the_resolved_view() {
+        let view = resumed_view_for(
+            &ResumeTarget {
+                space_id: Some("ws-2".into()),
+                tab_id: Some(1),
+                pane_id: Some(2),
+            },
+            &sample_target(),
+        )
+        .expect("a non-empty hint must report the resolved view");
+        assert_eq!(view.space_id, "ws-2");
+        assert_eq!(view.tab_id, 7);
+        assert_eq!(view.pane, PaneRef::terminal(21));
     }
 
     // ── resolve_attach_target_with: the space rung + its fallback ─────────────
@@ -1820,7 +1972,7 @@ mod tests {
             "ws-1",
             Some("ws-2"),
             Some("pane-c1"),
-            None,
+            Some("tab-C"), // corroborates the pane hint (rung 1)
         )
         .unwrap();
         assert_eq!(target.workspace_id, "ws-2");
@@ -1853,8 +2005,8 @@ mod tests {
         );
     }
 
-    /// A stale space hint does not disarm the other rungs: the pane hint is still
-    /// honoured in the workspace we fell back to.
+    /// A stale space hint does not disarm the other rungs: the (corroborated) pane
+    /// hint is still honoured in the workspace we fell back to.
     #[test]
     fn stale_space_hint_still_honours_the_pane_hint_in_the_fallback() {
         let (pane_reg, tab_reg) = (HerdrPaneRegistry::new(), HerdrTabRegistry::new());
@@ -1866,7 +2018,7 @@ mod tests {
             "ws-1",
             Some("ws-vanished"),
             Some("pane-a1"),
-            None,
+            Some("tab-A"),
         )
         .unwrap();
         assert_eq!(target.workspace_id, "ws-1");

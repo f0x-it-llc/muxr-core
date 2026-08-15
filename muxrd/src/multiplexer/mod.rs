@@ -311,6 +311,13 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     ///
     /// An override MUST NOT fail the attach on a stale/unknown hint: every field
     /// is best-effort and falls through to the backend's current focus.
+    ///
+    /// **Recursion trap:** this default delegates to [`Self::open_attach`], so a
+    /// backend that implements [`Self::open_attach`] by delegating *here* — a
+    /// natural way to funnel both entry points through one resume-aware code path
+    /// — would recurse forever. Override **at least one** of the pair with a real
+    /// implementation ([`HerdrBackend`] overrides this one and keeps its own
+    /// `open_attach`).
     fn open_attach_with_resume(
         &self,
         session: &str,
