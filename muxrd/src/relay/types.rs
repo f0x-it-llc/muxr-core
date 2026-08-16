@@ -113,9 +113,12 @@ pub struct RelayViewState {
     /// The space (herdr workspace) this relay client is currently viewing
     /// (herdr Spaces, Option A — per-connection view).
     ///
-    /// `None` until this relay performs its first `SwitchSpace`: at attach time the
-    /// relay views the daemon's focused workspace, so the backend-reported
-    /// `SpaceSnapshot.active` is correct and no per-connection override is needed.
+    /// `None` for a **hint-less** attach until this relay performs its first
+    /// `SwitchSpace`: such an attach lands on the daemon's focused workspace, so the
+    /// backend-reported `SpaceSnapshot.active` is correct and no per-connection
+    /// override is needed. A **resumed** attach is the exception — it can land in a
+    /// workspace the daemon does not consider active, so `attach_relay` seeds this
+    /// at attach time from the backend's reported `resumed_view`.
     /// After a `SwitchSpace` (which deliberately does NOT move the daemon-global
     /// focus), this holds the relay's chosen `workspace_id` so the gRPC `GetSpaces`
     /// handler can mark the connection-active space independently of the daemon's

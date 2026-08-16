@@ -123,8 +123,8 @@ use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Status, Streaming};
 
-use crate::multiplexer::BackendSet;
-use crate::proto::{ClientFrame, ServerFrame, client_frame};
+use crate::multiplexer::{BackendSet, ResumeTarget, ResumedView};
+use crate::proto::{AttachReq, ClientFrame, ServerFrame, client_frame};
 
 mod helpers;
 mod inbound;
@@ -194,6 +194,12 @@ pub async fn attach_relay(
 
     let client_rows = clamp_dim(attach.rows, 24);
     let client_cols = clamp_dim(attach.cols, 80);
+
+    // Best-effort resume hint (additive AttachReq fields), tier-gated on write
+    // access. Empty for every client that does not send them — and an empty target
+    // is today's behavior exactly. See [`resume_target_for`] for why a read-only
+    // attach never carries one.
+    let resume = resume_target_for(&attach, read_only);
 
     // ── 1a. Option C: resolve the opaque session id → owning backend + bare name.
     // The id is `<backend>:<bare>` (e.g. `zellij:dev`); the client echoes the SAME
@@ -270,14 +276,21 @@ pub async fn attach_relay(
     //       handshake), yielding a neutral DualHandle of boxed sender/receiver. ─
     let attach_session = session.clone();
     let open_backend = backend.clone();
+    let open_resume = resume.clone();
     let handle = tokio::task::spawn_blocking(move || {
-        open_backend.open_attach(&attach_session, rows, cols, read_only)
+        // Resume-aware entry point: the trait default ignores the hint and
+        // delegates to `open_attach`, so zellij (and any backend without a
+        // resume concept) is untouched; only herdr resolves it.
+        open_backend.open_attach_with_resume(&attach_session, rows, cols, read_only, &open_resume)
     })
     .await
     .map_err(|e| Status::internal(format!("attach task panicked: {e}")))?
     .map_err(|e| Status::not_found(format!("attach failed: {e:#}")))?;
 
     let session_name = handle.session_name.clone();
+    // The view this attach actually landed on (herdr resume) — used to seed the
+    // per-connection B-FOCUS state below. `None` for every hint-less attach.
+    let resumed_view = handle.resumed_view.clone();
     let (sender, receiver) = handle.split();
 
     // ── Phase F: count this client against the session ──────────────────────
@@ -387,38 +400,57 @@ pub async fn attach_relay(
     // correct). We use the ephemeral query path here because no QueryLayout RPC
     // can arrive yet: the control sender is registered only AFTER this block, so
     // there is no race against the render thread's query draining.
+    //
+    // A **resumed** attach skips that query: the backend already told us the exact
+    // view it landed on, and the ephemeral query would report the daemon-GLOBAL
+    // focus in the daemon's active-or-first workspace — precisely what the resume
+    // exists to override.
     {
-        let init_session = session_name.clone();
         let view_state_init = view_state.clone();
         let conn_id = connection_id.clone();
         // Option C: the registry stores the opaque *id* the client echoes (not the
         // bare name) so `entry.session == req.session` stays an id-vs-id match.
         let session_for_entry = id.clone();
-        let init_backend = backend.clone();
-        let init_result = tokio::task::spawn_blocking(move || {
-            helpers::init_relay_view_state(&init_backend, &init_session)
-        })
-        .await;
-        let relay_vs = match init_result {
-            Ok(Ok(state)) => {
+        let relay_vs = match resumed_view {
+            Some(view) => {
                 log::info!(
-                    "relay [{session_name}]: initialized view state: \
-                     active_tab={:?} focused_pane={:?}",
-                    state.active_tab,
-                    state.focused_pane
+                    "relay [{session_name}]: seeded view state from resumed attach: \
+                     space='{}' active_tab={} focused_pane={}",
+                    view.space_id,
+                    view.tab_id,
+                    view.pane.id
                 );
-                state
+                view_state_from_resumed(&view)
             }
-            Ok(Err(e)) => {
-                log::warn!(
-                    "relay [{session_name}]: view-state init failed (will use queried \
-                     values until first action): {e:#}"
-                );
-                RelayViewState::default()
-            }
-            Err(e) => {
-                log::warn!("relay [{session_name}]: view-state init task panicked: {e}");
-                RelayViewState::default()
+            None => {
+                let init_session = session_name.clone();
+                let init_backend = backend.clone();
+                let init_result = tokio::task::spawn_blocking(move || {
+                    helpers::init_relay_view_state(&init_backend, &init_session)
+                })
+                .await;
+                match init_result {
+                    Ok(Ok(state)) => {
+                        log::info!(
+                            "relay [{session_name}]: initialized view state: \
+                             active_tab={:?} focused_pane={:?}",
+                            state.active_tab,
+                            state.focused_pane
+                        );
+                        state
+                    }
+                    Ok(Err(e)) => {
+                        log::warn!(
+                            "relay [{session_name}]: view-state init failed (will use queried \
+                             values until first action): {e:#}"
+                        );
+                        RelayViewState::default()
+                    }
+                    Err(e) => {
+                        log::warn!("relay [{session_name}]: view-state init task panicked: {e}");
+                        RelayViewState::default()
+                    }
+                }
             }
         };
         view_state_init.insert(
@@ -471,6 +503,110 @@ pub async fn attach_relay(
     Ok(Box::pin(stream) as ServerFrameStream)
 }
 
+// ─── Resume hint (additive AttachReq fields) ──────────────────────────────────
+
+/// Upper bound on an accepted `resume_space_id`, mirroring the `MAX_SPACE_ID_LEN`
+/// bound `grpc::space_ops` puts on the `SwitchSpace` verb — the hint addresses the
+/// same opaque backend space id, so it gets the same hygiene. Unlike SwitchSpace,
+/// a violation is **dropped, never rejected** (see [`resume_target`]).
+const MAX_RESUME_SPACE_ID_LEN: usize = 128;
+
+/// The resume hint this attach is allowed to carry: [`resume_target`] for a
+/// read-write attach, **nothing at all** for a read-only one.
+///
+/// A resume hint is navigation: it names the space/tab/pane this connection will
+/// render. Read-only relays are not permitted to navigate — the inbound loop drops
+/// exactly these moves for a read-only token (`relay/inbound.rs`: `FocusPane`
+/// dropped, `SwitchTab` skipped, `SwitchSpace` refused with an error reply; the
+/// `GoToTab`/`SwitchSpace` RPC gates reject earlier still). Honouring the hint at
+/// attach time would be the same navigation through a different door, and a wider
+/// one: it would let a read-only token steer its attach to *any* pane it can name
+/// (content disclosure beyond the daemon-focused pane) and take the herdr
+/// owner/resize locks on that pane.
+///
+/// **The two paths must not drift.** If read-only relays ever gain a sanctioned
+/// navigation story, this gate and the inbound-loop guards change together —
+/// neither is meaningful on its own.
+///
+/// The hint is *dropped*, never rejected: a read-only client that sends one still
+/// attaches, exactly as it does today, on the backend's own focused pane. An empty
+/// [`ResumeTarget`] also means the backend reports no `resumed_view`, so nothing
+/// downstream (view-state seeding included) can observe the difference between
+/// this and a hint-less attach.
+fn resume_target_for(attach: &AttachReq, read_only: bool) -> ResumeTarget {
+    if read_only {
+        // Log only when a hint was actually present, and never the values
+        // themselves (client-supplied strings stay out of the logs).
+        if !attach.resume_space_id.is_empty()
+            || attach.resume_tab_id != 0
+            || attach.resume_pane_id != 0
+        {
+            log::debug!(
+                "AttachTerminal: dropping resume hint on a read-only attach \
+                 (read-only relays do not navigate — see relay/inbound.rs)"
+            );
+        }
+        return ResumeTarget::default();
+    }
+    resume_target(attach)
+}
+
+/// Translate the additive `AttachReq.resume_*` fields into the neutral
+/// [`ResumeTarget`] the backend seam takes.
+///
+/// proto3 defaults ARE the "unset" encoding (`""` / `0`), so a client that does
+/// not know these fields — or an attach with no view history — yields an empty
+/// target, i.e. today's behavior byte for byte.
+///
+/// A malformed `resume_space_id` (over-long, or outside the `[A-Za-z0-9_-.:]`
+/// charset `SwitchSpace` enforces) is **dropped rather than rejected**: the whole
+/// contract of a resume hint is that a stale or garbage value degrades to the
+/// current behavior instead of failing the attach. Dropping it here also keeps an
+/// attacker-supplied string out of the backend call and the logs.
+fn resume_target(attach: &AttachReq) -> ResumeTarget {
+    let space_id = Some(attach.resume_space_id.as_str())
+        .filter(|s| !s.is_empty())
+        .filter(|s| {
+            let sane = s.len() <= MAX_RESUME_SPACE_ID_LEN
+                && s.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'));
+            if !sane {
+                log::debug!(
+                    "AttachTerminal: ignoring malformed resume_space_id ({} bytes)",
+                    s.len()
+                );
+            }
+            sane
+        })
+        .map(str::to_owned);
+
+    ResumeTarget {
+        space_id,
+        tab_id: Some(attach.resume_tab_id).filter(|id| *id != 0),
+        pane_id: Some(attach.resume_pane_id).filter(|id| *id != 0),
+    }
+}
+
+/// Seed a [`RelayViewState`] from the view an attach actually resolved
+/// ([`crate::multiplexer::DualHandle::resumed_view`]).
+///
+/// Same state shape the switch verbs maintain (`inbound.rs`): `active_tab` +
+/// `focused_pane` are what `get_layout`'s B-FOCUS pass overrides with, and
+/// `current_space` is what `GetSpaces` marks connection-active. Setting all three
+/// is what makes the client's FIRST `GetLayout`/`GetSpaces` after a resumed attach
+/// report the resumed view instead of the backend's daemon-global flags.
+fn view_state_from_resumed(view: &ResumedView) -> RelayViewState {
+    RelayViewState {
+        active_tab: Some(view.tab_id),
+        focused_pane: Some(view.pane),
+        // Unlike a hint-less attach (which lands on the daemon's focused
+        // workspace, so `None` is correct), a resumed attach may render a
+        // workspace the daemon does NOT consider active — record it so the
+        // per-connection override is truthful from the first poll.
+        current_space: Some(view.space_id.clone()),
+    }
+}
+
 // ─── Utilities ────────────────────────────────────────────────────────────────
 
 /// Upper bound on a single terminal dimension (rows or cols).
@@ -497,6 +633,182 @@ pub(crate) fn clamp_dim(v: u32, default: u16) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::multiplexer::PaneRef;
+
+    // ── Resume hint: wire → neutral target ───────────────────────────────────
+
+    /// An `AttachReq` carrying only the pre-resume fields.
+    fn bare_attach() -> AttachReq {
+        AttachReq {
+            session: "herdr:herdr".into(),
+            rows: 24,
+            cols: 80,
+            ..Default::default()
+        }
+    }
+
+    /// Backward compatibility (acceptance criterion 1): a client that does not
+    /// send the additive fields — i.e. proto3 defaults — yields an EMPTY target,
+    /// which is what makes the attach behave exactly as it did before.
+    #[test]
+    fn unset_resume_fields_yield_an_empty_target() {
+        let target = resume_target(&bare_attach());
+        assert!(target.is_empty(), "unset fields must mean no resume hint");
+        assert_eq!(target, crate::multiplexer::ResumeTarget::default());
+    }
+
+    #[test]
+    fn resume_fields_map_onto_the_neutral_target() {
+        let target = resume_target(&AttachReq {
+            resume_space_id: "ws-2".into(),
+            resume_tab_id: 7,
+            resume_pane_id: 21,
+            ..bare_attach()
+        });
+        assert!(!target.is_empty());
+        assert_eq!(target.space_id.as_deref(), Some("ws-2"));
+        assert_eq!(target.tab_id, Some(7));
+        assert_eq!(target.pane_id, Some(21));
+    }
+
+    /// Zero is the proto3 "unset" encoding for the numeric hints (registry ids
+    /// start at 1), so a zero must never be forwarded as a real hint.
+    #[test]
+    fn zero_ids_are_treated_as_unset() {
+        let target = resume_target(&AttachReq {
+            resume_space_id: "ws-2".into(),
+            resume_tab_id: 0,
+            resume_pane_id: 0,
+            ..bare_attach()
+        });
+        assert_eq!(target.space_id.as_deref(), Some("ws-2"));
+        assert!(target.tab_id.is_none() && target.pane_id.is_none());
+    }
+
+    /// A malformed space hint is DROPPED, never an error — the attach proceeds
+    /// with the remaining hints (a hint must not be able to fail an attach).
+    #[test]
+    fn malformed_space_hint_is_dropped_not_rejected() {
+        for bad in [
+            "ws 2".to_string(),                      // space
+            "ws/../../etc".to_string(),              // path traversal chars
+            "\u{1f4a5}".to_string(),                 // non-ascii
+            "w".repeat(MAX_RESUME_SPACE_ID_LEN + 1), // over-long
+        ] {
+            let target = resume_target(&AttachReq {
+                resume_space_id: bad.clone(),
+                resume_tab_id: 7,
+                resume_pane_id: 21,
+                ..bare_attach()
+            });
+            assert!(
+                target.space_id.is_none(),
+                "malformed space hint {bad:?} must be dropped"
+            );
+            assert_eq!(target.tab_id, Some(7), "other hints must survive");
+            assert_eq!(target.pane_id, Some(21));
+        }
+    }
+
+    #[test]
+    fn space_hint_at_the_length_limit_is_accepted() {
+        let ok = "w".repeat(MAX_RESUME_SPACE_ID_LEN);
+        let target = resume_target(&AttachReq {
+            resume_space_id: ok.clone(),
+            ..bare_attach()
+        });
+        assert_eq!(target.space_id.as_deref(), Some(ok.as_str()));
+    }
+
+    // ── Resume hint: read-only gate (Defect A) ───────────────────────────────
+
+    /// An `AttachReq` with every resume field set to a well-formed value.
+    fn fully_hinted_attach() -> AttachReq {
+        AttachReq {
+            resume_space_id: "ws-2".into(),
+            resume_tab_id: 7,
+            resume_pane_id: 21,
+            ..bare_attach()
+        }
+    }
+
+    /// A read-only attach ignores EVERY hint: the target it yields is byte-for-byte
+    /// the one a hint-less attach yields, so the whole downstream chain (no
+    /// `resumed_view` from the backend → no seeded view state → the usual live
+    /// view-state init) is identical. Read-only relays do not navigate — the
+    /// inbound loop drops the equivalent moves (`FocusPane`/`SwitchTab`/
+    /// `SwitchSpace`) for the same reason.
+    #[test]
+    fn read_only_attach_drops_every_resume_hint() {
+        let gated = resume_target_for(&fully_hinted_attach(), true);
+        assert!(
+            gated.is_empty(),
+            "a read-only attach must carry no resume hint at all"
+        );
+        assert_eq!(
+            gated,
+            resume_target_for(&bare_attach(), false),
+            "a hinted read-only attach must be indistinguishable from a hint-less one"
+        );
+        // An empty target is what makes the backend report no resumed view, which
+        // in turn is what keeps `attach_relay` on its normal view-state init path
+        // (the `Some(view)` seed arm is unreachable without one).
+        assert_eq!(gated, ResumeTarget::default());
+    }
+
+    /// Even a hint whose only usable axis is the space id is dropped for a
+    /// read-only attach — the gate is on the tier, not on which fields are set.
+    #[test]
+    fn read_only_attach_drops_a_space_only_hint() {
+        let space_only = AttachReq {
+            resume_space_id: "ws-2".into(),
+            ..bare_attach()
+        };
+        assert!(resume_target_for(&space_only, true).is_empty());
+    }
+
+    /// The read-write path is untouched: a corroborating hint survives the gate
+    /// exactly as `resume_target` produced it.
+    #[test]
+    fn read_write_attach_keeps_the_resume_hint() {
+        let attach = fully_hinted_attach();
+        assert_eq!(
+            resume_target_for(&attach, false),
+            resume_target(&attach),
+            "a read-write attach must forward the hint unchanged"
+        );
+    }
+
+    // ── Resume hint: resolved view → seeded B-FOCUS state ────────────────────
+
+    /// The seeded state is what `get_layout`'s B-FOCUS pass reads, so the first
+    /// poll after a resumed attach reports the resumed tab/pane rather than the
+    /// backend's daemon-global flags.
+    #[test]
+    fn resumed_view_seeds_active_tab_focused_pane_and_space() {
+        let state = view_state_from_resumed(&ResumedView {
+            space_id: "ws-2".into(),
+            tab_id: 7,
+            pane: PaneRef::terminal(21),
+        });
+        assert_eq!(state.active_tab, Some(7));
+        assert_eq!(state.focused_pane, Some(PaneRef::terminal(21)));
+        assert_eq!(
+            state.current_space.as_deref(),
+            Some("ws-2"),
+            "GetSpaces must mark the resumed space connection-active"
+        );
+    }
+
+    /// The hint-less path is unchanged: no resumed view means the relay keeps its
+    /// live-state init, whose default carries no override at all.
+    #[test]
+    fn default_view_state_carries_no_override() {
+        let state = RelayViewState::default();
+        assert!(state.active_tab.is_none());
+        assert!(state.focused_pane.is_none());
+        assert!(state.current_space.is_none());
+    }
 
     #[test]
     fn clamp_dim_caps_at_max_terminal_dim() {

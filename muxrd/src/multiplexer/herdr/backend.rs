@@ -57,7 +57,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 
 use crate::multiplexer::types::{
-    ActionAck, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ScrollDir, SpaceSnapshot,
+    ActionAck, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ResumeTarget, ScrollDir,
+    SpaceSnapshot,
 };
 use crate::multiplexer::{DualHandle, MuxBackend};
 
@@ -535,10 +536,25 @@ impl MuxBackend for HerdrBackend {
         cols: u16,
         read_only: bool,
     ) -> Result<DualHandle> {
+        // A hint-less attach is just the resume path with an empty target: the
+        // ladder's last rung IS today's "attach the workspace's focused pane".
+        self.open_attach_with_resume(session, rows, cols, read_only, &ResumeTarget::default())
+    }
+
+    fn open_attach_with_resume(
+        &self,
+        session: &str,
+        rows: u16,
+        cols: u16,
+        read_only: bool,
+        resume: &ResumeTarget,
+    ) -> Result<DualHandle> {
         // Option A: `session` is the daemon sentinel, not a workspace label —
-        // resolve the daemon's active-or-first workspace and attach its focused
-        // pane (relay::open_attach calls resolve_focused_terminal). The relay then
-        // holds this workspace_id and re-points it on switch_space (per-connection).
+        // resolve the daemon's active-or-first workspace, which is the FALLBACK
+        // for the resume ladder in `relay::open_attach` (a resume hint may name a
+        // different workspace, and wins when it still resolves). The relay then
+        // holds the workspace it actually landed on and re-points it on
+        // switch_space (per-connection).
         let workspace_id = self.resolve_workspace(session)?;
         relay::open_attach(
             Arc::clone(&self.control),
@@ -548,6 +564,7 @@ impl MuxBackend for HerdrBackend {
             rows,
             cols,
             read_only,
+            resume,
         )
     }
 

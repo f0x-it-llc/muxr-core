@@ -196,6 +196,62 @@ pub struct SpaceSnapshot {
     pub active: bool,
 }
 
+// ─── Attach resume hint ─────────────────────────────────────────────────────────
+
+/// A **best-effort** hint naming the view a fresh attach should land on
+/// (`AttachReq.resume_*`), so a reconnecting client resumes where it left off
+/// instead of snapping to the backend's daemon-global focus.
+///
+/// Every field is optional, but they are NOT independent: the pane hint is
+/// honoured only when the tab hint is also present and the named pane sits in
+/// that tab (a pane-only hint is ignored even when it resolves); the tab hint
+/// needs no corroboration; the space hint is the durable axis. Resolution falls
+/// through pane → tab → space on anything stale, unknown or uncorroborated. An
+/// unresolvable hint must NEVER fail the attach — an all-`None` target is
+/// exactly today's behavior (the session's currently-focused pane). Read-only
+/// attaches drop the entire hint before resolution
+/// (`relay::resume_target_for`).
+///
+/// Spaces/panes/tabs here are addressed with the *neutral* ids the gRPC layer
+/// speaks (`SpaceSnapshot::id`, `TabSnapshot::tab_id`, `PaneSnapshot::id`), so
+/// the hint round-trips a value the client read from `GetLayout`/`GetSpaces`.
+/// Only the herdr backend honours it (see
+/// [`MuxBackend::open_attach_with_resume`](super::MuxBackend::open_attach_with_resume)).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ResumeTarget {
+    /// Opaque backend space id (herdr `workspace_id`).
+    pub space_id: Option<String>,
+    /// Neutral tab id, as emitted by [`TabSnapshot::tab_id`].
+    pub tab_id: Option<u64>,
+    /// Neutral pane id, as emitted by [`PaneSnapshot::id`].
+    pub pane_id: Option<u32>,
+}
+
+impl ResumeTarget {
+    /// `true` when no hint at all was supplied — the caller then gets today's
+    /// behavior and the attach reports no resolved view.
+    pub fn is_empty(&self) -> bool {
+        self.space_id.is_none() && self.tab_id.is_none() && self.pane_id.is_none()
+    }
+}
+
+/// The view an attach actually landed on, reported back by a backend that
+/// resolved a [`ResumeTarget`] (herdr only).
+///
+/// The relay seeds its per-connection `RelayViewState` from this so the client's
+/// very first `GetLayout` — carrying the freshly-minted `connection_id` — gets a
+/// truthful B-FOCUS override (the resumed tab/pane) rather than the backend's
+/// raw daemon-global focus flags.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResumedView {
+    /// The space (herdr workspace) the attach resolved into.
+    pub space_id: String,
+    /// Neutral tab id of the resolved pane's tab.
+    pub tab_id: u64,
+    /// The resolved pane.
+    pub pane: PaneRef,
+}
+
 // ─── Attach-stream messages ─────────────────────────────────────────────────────
 
 /// A neutral message yielded by [`MuxReceiver::recv`] — the backend-agnostic

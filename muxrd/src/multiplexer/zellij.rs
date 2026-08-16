@@ -278,6 +278,11 @@ impl MuxBackend for ZellijBackend {
             sender: Box::new(ZellijMuxSender(sender)),
             receiver: Box::new(ZellijMuxReceiver(receiver)),
             session_name,
+            // zellij has no per-connection resume view: the stream is the whole
+            // composited session and follows the server's own focus, so the
+            // `AttachReq.resume_*` hints are ignored (see the trait default of
+            // `MuxBackend::open_attach_with_resume`).
+            resumed_view: None,
         })
     }
 

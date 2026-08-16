@@ -134,6 +134,9 @@ async fn main() -> Result<()> {
             session: args.session.clone(),
             rows: args.rows,
             cols: args.cols,
+            // No resume hint: this harness always attaches to the session's
+            // currently-focused pane (the additive resume_* fields default to unset).
+            ..Default::default()
         })))
         .await?;
         drop(tx);
@@ -192,6 +195,8 @@ async fn main() -> Result<()> {
         session: args.session.clone(),
         rows: args.rows,
         cols: args.cols,
+        // No resume hint (see the negative-test attach above).
+        ..Default::default()
     })))
     .await
     .context("send AttachReq")?;
