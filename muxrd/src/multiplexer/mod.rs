@@ -238,6 +238,46 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     // ── Spaces (herdr workspaces; default: unsupported) ──────────────────────
 
+    /// Whether this backend has a **space** axis at all.
+    ///
+    /// A cheap, side-effect-free capability predicate (no I/O): the gRPC layer
+    /// checks it before honouring an explicitly space-scoped request, so a client
+    /// that names a space on a backend without one gets a clean
+    /// `invalid_argument` instead of a silently space-less answer. The **default
+    /// is `false`** (zellij and every mock); herdr overrides it to `true`.
+    ///
+    /// It is deliberately NOT derived from `list_spaces` — that performs IPC and
+    /// an empty list is a legitimate answer for a live spaces backend.
+    fn supports_spaces(&self) -> bool {
+        false
+    }
+
+    /// Build a neutral [`LayoutSnapshot`] for a **specific** space of `session`.
+    ///
+    /// `space_id`:
+    /// - `None` → the session's ordinary layout; **byte-identical** to
+    ///   [`Self::query_layout`] (that is exactly what the default does).
+    /// - `Some(id)` → the layout of THAT space, read directly by its opaque id.
+    ///
+    /// **Read-only contract:** an override MUST NOT move any focus — not the
+    /// connection's, not the daemon's. Naming a foreign space here is a *peek*
+    /// (herdr's `workspace.*` reads are already workspace-scoped and
+    /// side-effect-free); a backend that could only answer by focusing the space
+    /// must return an error instead.
+    ///
+    /// The **default ignores `space_id`** and delegates to [`Self::query_layout`],
+    /// so zellij — and every mock/test impl — is untouched. Only a backend that
+    /// returns `true` from [`Self::supports_spaces`] is ever handed a `Some(id)`
+    /// by the gRPC layer.
+    fn query_layout_for_space(
+        &self,
+        session: &str,
+        space_id: Option<&str>,
+    ) -> anyhow::Result<LayoutSnapshot> {
+        let _ = space_id;
+        self.query_layout(session)
+    }
+
     /// List the backend's "spaces" for `session`.
     ///
     /// Spaces are a herdr-only axis (its workspaces, surfaced as in-place

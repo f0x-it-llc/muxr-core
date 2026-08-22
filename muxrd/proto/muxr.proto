@@ -347,6 +347,14 @@ message SessionRef {
   string session = 1;
   // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
   string connection_id = 2;
+  // optional; opaque herdr space id scoping a GetLayout READ to that space.
+  // herdr only: a non-empty value on a backend without spaces (zellij) is
+  // rejected with invalid_argument. empty ("") = today's behavior (the
+  // relay-focused space, or the backend's active-or-first workspace).
+  // Read-only peek: naming a space here returns THAT space's tabs/panes and
+  // never moves this connection's — or the daemon's — focus. Ignored by the
+  // other SessionRef RPCs (GetSpaces / KillSession / …).
+  string space_id = 3;
 }
 
 // List of sessions returned by ListSessions.

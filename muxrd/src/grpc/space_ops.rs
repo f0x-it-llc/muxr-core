@@ -563,8 +563,13 @@ fn validate_space_label(label: &str) -> Result<(), Status> {
 /// herdr ids are opaque slugs/uuids; we require a non-empty, length-bounded token
 /// of `[A-Za-z0-9_-.:]` (covers slug- and uuid-shaped ids) and reject whitespace,
 /// control characters, and path/shell metacharacters. (If herdr ever widens its
-/// id charset this guard must widen with it.)
-fn validate_space_id(space_id: &str) -> Result<(), Status> {
+/// id charset this guard must widen with it — as must the backend-side
+/// defence-in-depth copy in `multiplexer::herdr::backend::validate_workspace_id`.)
+///
+/// `pub(super)` so the space-scoped `GetLayout` read in [`super::layout`] applies
+/// the **same** guard to `SessionRef.space_id` as the mutating space ops do,
+/// rather than growing a second, drifting validator.
+pub(super) fn validate_space_id(space_id: &str) -> Result<(), Status> {
     if space_id.is_empty() {
         return Err(Status::invalid_argument("space_id must not be empty"));
     }

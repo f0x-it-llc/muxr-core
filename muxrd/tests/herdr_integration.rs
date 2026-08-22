@@ -21,6 +21,7 @@
 //! | `smoke_discovers_wire_protocol` | protocol discovery via `ping` (regression: herdr 0.7.2+) |
 //! | `smoke_create_query_kill`     | `create_session` / `query_layout` / `kill_session` round-trip |
 //! | `smoke_open_attach_render_input` | `open_attach` → read `Render` frames → send input → teardown |
+//! | `smoke_space_scoped_layout_is_a_read_only_peek` | `query_layout_for_space` on a NON-focused workspace — right tree, no focus moved |
 //!
 //! ## AGPL note
 //!
@@ -288,6 +289,108 @@ fn smoke_open_attach_render_input() {
     // Clean teardown.
     sender.send_client_exited().ok();
     println!("[herdr smoke] client exited; test complete");
+}
+
+// ─── smoke_space_scoped_layout_is_a_read_only_peek ────────────────────────────
+
+/// Read a **non-focused** workspace's layout by explicit space id and prove the
+/// call is a pure read.
+///
+/// This is the daemon half of the terminal side-sheet tree: a client names a space
+/// it is not currently viewing and gets that space's tabs/panes back — while
+/// neither its own connection nor any co-attached desktop client is yanked to it.
+///
+/// Asserts both halves of the contract:
+/// 1. the returned tree belongs to the **peeked** workspace (its tab ids are
+///    disjoint from the session's own active-or-first workspace),
+/// 2. the daemon's focused workspace is **unchanged** after the call — and
+///    `space_id = None` still answers exactly like `query_layout` (back-compat).
+///
+/// # Harness (two workspaces, one of them not focused)
+/// ```text
+/// herdr workspace create        # so the daemon has ≥ 2 workspaces
+/// HERDR_SOCKET_PATH=/path/to/herdr.sock \
+///   cargo test -p muxrd --test herdr_integration \
+///     smoke_space_scoped_layout_is_a_read_only_peek -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH)"]
+fn smoke_space_scoped_layout_is_a_read_only_peek() {
+    // The bare-name sentinel muxrd collapses the whole herdr daemon onto
+    // (`multiplexer::herdr::backend::HERDR_SESSION`, crate-private).
+    const HERDR_SESSION: &str = "herdr";
+
+    let b = backend();
+
+    let before = b.list_spaces(HERDR_SESSION).expect("list_spaces() failed");
+    assert!(
+        before.len() >= 2,
+        "this test needs ≥2 herdr workspaces (found {}) — create one before running",
+        before.len()
+    );
+    let focused_before = before
+        .iter()
+        .find(|s| s.active)
+        .map(|s| s.id.clone())
+        .expect("herdr must report a focused workspace");
+    let target = before
+        .iter()
+        .find(|s| !s.active)
+        .expect("this test needs a NON-focused workspace to peek at");
+    println!(
+        "[herdr smoke] focused={focused_before:?}  peeking at {:?} ({:?})",
+        target.id, target.name
+    );
+
+    // Baseline: the session's own (active-or-first) workspace layout.
+    let own = b
+        .query_layout(HERDR_SESSION)
+        .expect("query_layout() failed");
+    let own_tabs: Vec<u64> = own.tabs.iter().map(|t| t.tab_id).collect();
+
+    // (a) The peek returns the TARGET workspace's tree.
+    let scoped = b
+        .query_layout_for_space(HERDR_SESSION, Some(&target.id))
+        .expect("query_layout_for_space() failed for a non-focused workspace");
+    let scoped_tabs: Vec<u64> = scoped.tabs.iter().map(|t| t.tab_id).collect();
+    println!("[herdr smoke] own tabs={own_tabs:?}  peeked tabs={scoped_tabs:?}");
+    assert!(
+        !scoped.tabs.is_empty(),
+        "the peeked workspace must report at least one tab"
+    );
+    assert!(
+        scoped.tabs.iter().any(|t| !t.panes.is_empty()),
+        "the peeked workspace must report at least one pane"
+    );
+    assert!(
+        scoped_tabs.iter().all(|id| !own_tabs.contains(id)),
+        "tabs must come from the PEEKED workspace, not the focused one \
+         (own={own_tabs:?}, peeked={scoped_tabs:?})"
+    );
+
+    // (b) Nothing moved: the daemon's focused workspace is untouched.
+    let after = b
+        .list_spaces(HERDR_SESSION)
+        .expect("list_spaces() failed after the peek");
+    assert_eq!(
+        after.iter().find(|s| s.active).map(|s| s.id.as_str()),
+        Some(focused_before.as_str()),
+        "a space-scoped layout read must NOT move the daemon's focused workspace"
+    );
+
+    // Back-compat: no explicit space → identical to `query_layout`.
+    let none_tabs: Vec<u64> = b
+        .query_layout_for_space(HERDR_SESSION, None)
+        .expect("query_layout_for_space(None) failed")
+        .tabs
+        .iter()
+        .map(|t| t.tab_id)
+        .collect();
+    assert_eq!(
+        none_tabs, own_tabs,
+        "space_id=None must be byte-identical to the ordinary query_layout() path"
+    );
+    println!("[herdr smoke] PASS — peeked a non-focused workspace, focus unchanged");
 }
 
 // ─── smoke_switch_restores_pane_sizes (resize-lock leak regression) ───────────

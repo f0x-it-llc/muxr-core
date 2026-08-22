@@ -1,4 +1,20 @@
 //! GetLayout RPC implementation with relay-routed query and B-FOCUS override.
+//!
+//! Two mutually exclusive paths, chosen by `SessionRef.space_id`:
+//!
+//! - **empty `space_id` (every legacy client)** — "this connection's view": route
+//!   the query through the caller's relay when one is attached, fall back to an
+//!   ephemeral backend query, then apply the B-FOCUS per-connection view-state
+//!   override. Unchanged.
+//! - **non-empty `space_id`** — a **read-only peek** at an explicitly named herdr
+//!   space. It bypasses relay routing AND the B-FOCUS override entirely (a foreign
+//!   space is by definition *not* the connection's view, so the connection's
+//!   `active_tab`/`focused_pane` would be an actively wrong indicator for it), and
+//!   moves no focus — neither the connection's nor the daemon's.
+//!
+//! Both paths converge on the same snapshot → proto tail ([`build_layout`]), so
+//! the plugin-pane filter chokepoint cannot drift between them. GetLayout is a
+//! **read** on both paths: no `reject_if_read_only` gate (matching GetSpaces).
 
 use tonic::{Request, Response, Status};
 
@@ -8,6 +24,7 @@ use crate::relay::RelayViewState;
 
 use super::MuxrService;
 use super::helpers::short_conn;
+use super::space_ops::validate_space_id;
 
 /// Timeout for the oneshot reply when routing a `QueryLayout` through the relay.
 ///
@@ -33,6 +50,7 @@ impl MuxrService {
         // query path.
         let session = req.session;
         let connection_id = req.connection_id;
+        let space_id = req.space_id;
         let (backend, bare) = self.resolve_session(&session)?;
         // FS3: full connection_id must not appear in info/warn logs.
         log::info!(
@@ -40,6 +58,15 @@ impl MuxrService {
             short_conn(&connection_id)
         );
         log::debug!("GetLayout: session='{session}' connection_id='{connection_id}'");
+
+        // ── Space-scoped read: an explicit foreign-space peek ────────────────
+        // A named space is NOT this connection's view, so this path deliberately
+        // routes around BOTH the relay (its stream points at the connection's own
+        // space) and the B-FOCUS override below — `should_apply_view_state_override`
+        // must never run for it. Still a pure read: no focus moves anywhere.
+        if is_space_scoped(&space_id) {
+            return space_scoped_layout(&session, &backend, &bare, &space_id).await;
+        }
 
         // ── B-QUERY: route through relay if one is attached ─────────────────
         // Routing priority:
@@ -118,7 +145,7 @@ impl MuxrService {
                                 "GetLayout: relay query/parse failed for '{session}', \
                                  falling back to ephemeral: {e:#}"
                             );
-                            let snap = backend_query_layout(&backend, &bare).await?;
+                            let snap = backend_query_layout(&backend, &bare, None).await?;
                             (snap, false, String::new())
                         }
                         Ok(Err(_cancelled)) => {
@@ -126,7 +153,7 @@ impl MuxrService {
                                 "GetLayout: relay query oneshot cancelled for '{session}', \
                                  falling back to ephemeral"
                             );
-                            let snap = backend_query_layout(&backend, &bare).await?;
+                            let snap = backend_query_layout(&backend, &bare, None).await?;
                             (snap, false, String::new())
                         }
                         Err(_elapsed) => {
@@ -134,7 +161,7 @@ impl MuxrService {
                                 "GetLayout: relay query timed out for '{session}' \
                                  after {RELAY_QUERY_TIMEOUT:?}, falling back to ephemeral"
                             );
-                            let snap = backend_query_layout(&backend, &bare).await?;
+                            let snap = backend_query_layout(&backend, &bare, None).await?;
                             (snap, false, String::new())
                         }
                     }
@@ -144,13 +171,13 @@ impl MuxrService {
                         "GetLayout: relay sender closed for '{session}', \
                          falling back to ephemeral"
                     );
-                    let snap = backend_query_layout(&backend, &bare).await?;
+                    let snap = backend_query_layout(&backend, &bare, None).await?;
                     (snap, false, String::new())
                 }
             } else {
                 // No relay attached for this session — use the ephemeral backend path.
                 log::debug!("GetLayout: no relay for '{session}', using ephemeral query");
-                let snap = backend_query_layout(&backend, &bare).await?;
+                let snap = backend_query_layout(&backend, &bare, None).await?;
                 (snap, false, String::new())
             }
         };
@@ -206,7 +233,7 @@ impl MuxrService {
         }
 
         // ── Build proto from LayoutSnapshot + B-FOCUS override ────────────────
-        let tab_msgs: Vec<TabMsg> = build_tab_msgs(&snapshot, relay_vs.as_ref());
+        let layout = build_layout(&snapshot, relay_vs.as_ref());
 
         // FS3: relay_conn_id is the matched relay's connection_id (same 32-char secret);
         // redact to the 8-char prefix at info, keep the full value at debug only.
@@ -215,40 +242,88 @@ impl MuxrService {
              {} total pane group(s), via_relay={via_relay}",
             session,
             short_conn(&relay_conn_id),
-            tab_msgs.len(),
-            tab_msgs.iter().map(|t| t.panes.len()).sum::<usize>()
+            layout.tabs.len(),
+            layout.tabs.iter().map(|t| t.panes.len()).sum::<usize>()
         );
         log::debug!(
             "GetLayout: session='{}' relay_conn='{relay_conn_id}' → {} tab(s), \
              {} total pane group(s), via_relay={via_relay}",
             session,
-            tab_msgs.len(),
-            tab_msgs.iter().map(|t| t.panes.len()).sum::<usize>()
+            layout.tabs.len(),
+            layout.tabs.iter().map(|t| t.panes.len()).sum::<usize>()
         );
 
-        Ok(Response::new(Layout { tabs: tab_msgs }))
+        Ok(Response::new(layout))
     }
 }
 
-// ─── Private async helper ─────────────────────────────────────────────────────
+// ─── Private async helpers ────────────────────────────────────────────────────
 
-/// Call `backend.query_layout()` in a blocking task, mapping errors to
-/// [`Status`].
+/// Answer a GetLayout for an explicitly named space — a **read-only peek** at a
+/// space that is not (necessarily) the caller's own.
 ///
-/// Used by all ephemeral paths in `get_layout_impl` (no relay attached, relay
-/// fallback on error/timeout/cancel, relay sender closed). Replaces the old
-/// `ephemeral_query` free function that opened two separate IPC connections.
+/// Deliberately routes around the relay: the connection's relay stream points at
+/// the space the connection is *viewing*, and re-pointing it to read another one
+/// is exactly the focus move this feature must not make. It also skips the
+/// B-FOCUS override for the same reason — the caller's tracked
+/// `active_tab`/`focused_pane` belong to a different space, so applying them here
+/// would fabricate a wrong indicator (the raw queried values are the truth for a
+/// foreign space).
+///
+/// Errors:
+/// - malformed `space_id` → `invalid_argument` (same guard as the mutating space
+///   ops — [`validate_space_id`]),
+/// - a backend with no space axis (zellij) → `invalid_argument`,
+/// - backend failure → `internal` (chain logged, terse status out).
+async fn space_scoped_layout(
+    session: &str,
+    backend: &std::sync::Arc<dyn MuxBackend>,
+    bare: &str,
+    space_id: &str,
+) -> Result<Response<Layout>, Status> {
+    validate_space_id(space_id)?;
+    if rejects_space_scope(space_id, backend.supports_spaces()) {
+        log::info!(
+            "GetLayout: session='{session}' rejected space_id='{space_id}' — \
+             backend has no space axis"
+        );
+        return Err(Status::invalid_argument(
+            "space_id: this session's backend does not support spaces",
+        ));
+    }
+
+    let snapshot = backend_query_layout(backend, bare, Some(space_id)).await?;
+    let layout = build_layout(&snapshot, None);
+    log::info!(
+        "GetLayout: session='{session}' space_id='{space_id}' → {} tab(s), \
+         {} total pane group(s), space_scoped=true",
+        layout.tabs.len(),
+        layout.tabs.iter().map(|t| t.panes.len()).sum::<usize>()
+    );
+    Ok(Response::new(layout))
+}
+
+/// Query a backend layout in a blocking task, mapping errors to [`Status`].
+///
+/// `space_id`:
+/// - `None` — the session's own layout. Used by all ephemeral paths in
+///   `get_layout_impl` (no relay attached, relay fallback on
+///   error/timeout/cancel, relay sender closed). The backend default makes this
+///   byte-identical to the former direct `query_layout()` call.
+/// - `Some(id)` — the named space's layout (space-scoped read; herdr only).
 async fn backend_query_layout(
     backend: &std::sync::Arc<dyn MuxBackend>,
     session: &str,
+    space_id: Option<&str>,
 ) -> Result<LayoutSnapshot, Status> {
     let backend = backend.clone();
     let session = session.to_owned();
-    tokio::task::spawn_blocking(move || backend.query_layout(&session))
+    let space = space_id.map(str::to_owned);
+    tokio::task::spawn_blocking(move || backend.query_layout_for_space(&session, space.as_deref()))
         .await
         .map_err(|e| Status::internal(format!("GetLayout query task panicked: {e}")))?
         .map_err(|e| {
-            log::warn!("GetLayout ephemeral query failed: {e:#}");
+            log::warn!("GetLayout backend query failed (space_id={space_id:?}): {e:#}");
             Status::internal(format!("GetLayout query failed: {e:#}"))
         })
 }
@@ -259,6 +334,27 @@ async fn backend_query_layout(
 /// (background plugins + tab-bar/status-bar) are excluded from GetLayout.
 pub(crate) fn pane_is_client_visible(is_plugin: bool) -> bool {
     !is_plugin
+}
+
+/// Whether the request names an explicit space to read.
+///
+/// The **empty string is the back-compat contract**: every client written before
+/// space-scoped GetLayout sends it (proto3 scalars default to `""`), and it must
+/// mean "behave exactly as before" — relay-routed, B-FOCUS-overridden, bound to
+/// the connection's / backend's own space.
+pub(crate) fn is_space_scoped(space_id: &str) -> bool {
+    !space_id.is_empty()
+}
+
+/// Whether an explicit space scope must be **rejected** for this backend.
+///
+/// Naming a space only means something on a backend that has a space axis
+/// ([`MuxBackend::supports_spaces`] — herdr). Asking for one on zellij is a client
+/// error, not a request to silently ignore: answering with the session's ordinary
+/// layout would look like a successful peek at a space that does not exist. An
+/// empty `space_id` is never rejected — that is the legacy path on every backend.
+pub(crate) fn rejects_space_scope(space_id: &str, backend_supports_spaces: bool) -> bool {
+    is_space_scoped(space_id) && !backend_supports_spaces
 }
 
 /// Resolve the tab id the B-FOCUS override should be scoped to for this poll.
@@ -306,6 +402,19 @@ pub(crate) fn resolve_effective_active_tab(
                 .any(|p| p.id == fp.id && p.is_plugin == fp.is_plugin)
         })
         .map(|tab| tab.tab_id)
+}
+
+/// The single snapshot → proto [`Layout`] tail, shared by **both** GetLayout
+/// paths: the relay/ephemeral path (which passes its resolved `relay_vs`) and the
+/// space-scoped read (which always passes `None` — a foreign space has no
+/// per-connection view state).
+///
+/// Sharing it is the point: the tab/pane mapping — including the plugin-pane
+/// filter chokepoint inside [`build_tab_msgs`] — can never drift between the two.
+fn build_layout(snapshot: &LayoutSnapshot, relay_vs: Option<&RelayViewState>) -> Layout {
+    Layout {
+        tabs: build_tab_msgs(snapshot, relay_vs),
+    }
 }
 
 /// Build the proto tab list from a neutral [`LayoutSnapshot`], applying the
@@ -756,6 +865,376 @@ mod tests {
             resolve_effective_active_tab(Some(&empty), &snap),
             None,
             "an empty view state must not resolve a scope"
+        );
+    }
+
+    // ─── Space-scoped read: branch predicates ────────────────────────────────
+
+    #[test]
+    fn empty_space_id_is_not_space_scoped() {
+        // The back-compat contract: every pre-feature client sends "" and must
+        // keep the relay-routed / B-FOCUS-overridden path.
+        assert!(
+            !is_space_scoped(""),
+            "an empty space_id must take the legacy path"
+        );
+    }
+
+    #[test]
+    fn non_empty_space_id_is_space_scoped() {
+        assert!(is_space_scoped("ws-2"));
+    }
+
+    #[test]
+    fn space_scope_rejected_only_when_named_on_a_space_less_backend() {
+        // Named space + no space axis (zellij) → reject.
+        assert!(
+            rejects_space_scope("ws-2", false),
+            "naming a space on a backend without one must be rejected"
+        );
+        // Named space + space axis (herdr) → honour.
+        assert!(!rejects_space_scope("ws-2", true));
+        // No space named → never rejected, on either backend (legacy path).
+        assert!(!rejects_space_scope("", false));
+        assert!(!rejects_space_scope("", true));
+    }
+
+    // ─── Space-scoped read: shared mapping tail ──────────────────────────────
+
+    #[test]
+    fn space_scoped_mapping_matches_the_raw_relay_less_mapping() {
+        // Both paths converge on `build_layout`; the space path passes relay_vs
+        // = None, so its output must equal the normal path's raw (no view state)
+        // output for the same snapshot — plugin-pane filter included.
+        let snap = snapshot();
+        let layout = build_layout(&snap, None);
+        assert_eq!(layout.tabs, build_tab_msgs(&snap, None));
+        assert!(
+            layout.tabs[0].panes.iter().all(|p| !p.is_plugin),
+            "the plugin-pane chokepoint applies to the space-scoped path too"
+        );
+    }
+
+    // ─── Space-scoped read: end-to-end routing through get_layout_impl ────────
+
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    use crate::cli::BackendKind;
+    use crate::multiplexer::{
+        ActionAck, BackendSet, DualHandle, MuxBackend, ResizeDir, ResizeKind, ScrollDir,
+    };
+    use crate::proto::SessionRef;
+    use crate::relay::{ControlEntry, RelayControl, ViewStateEntry};
+    use tonic::Request;
+
+    /// A spaces-capable backend that reports which query arm was taken.
+    ///
+    /// `query_layout` (session path) yields tab 1; `query_layout_for_space`
+    /// with an explicit id yields tab 2 — so a test can tell from the response
+    /// alone which arm ran, and the recorded `last_space` proves the id reached
+    /// the backend verbatim.
+    #[derive(Debug, Default)]
+    struct SpacesBackend {
+        session_queries: AtomicUsize,
+        space_queries: AtomicUsize,
+        last_space: std::sync::Mutex<Option<String>>,
+    }
+
+    impl SpacesBackend {
+        /// One tab with two panes — the first focused. Two panes so that a
+        /// would-be B-FOCUS override is *visible* in the response (it would move
+        /// `is_focused` onto the tracked pane).
+        fn snapshot(tab_id: u64) -> LayoutSnapshot {
+            let base = tab_id as u32 * 10;
+            LayoutSnapshot {
+                tabs: vec![tab(
+                    tab_id,
+                    true,
+                    vec![pane(base, true, false), pane(base + 1, false, false)],
+                )],
+            }
+        }
+    }
+
+    impl MuxBackend for SpacesBackend {
+        fn supports_spaces(&self) -> bool {
+            true
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            self.session_queries.fetch_add(1, Ordering::Relaxed);
+            Ok(Self::snapshot(1))
+        }
+        fn query_layout_for_space(
+            &self,
+            session: &str,
+            space_id: Option<&str>,
+        ) -> anyhow::Result<LayoutSnapshot> {
+            match space_id {
+                Some(id) => {
+                    self.space_queries.fetch_add(1, Ordering::Relaxed);
+                    *self.last_space.lock().expect("last_space lock") = Some(id.to_owned());
+                    Ok(Self::snapshot(2))
+                }
+                // Mirrors the trait default: no space named → the session path.
+                None => self.query_layout(session),
+            }
+        }
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn resize_pane(
+            &self,
+            _: &str,
+            _: PaneRef,
+            _: ResizeKind,
+            _: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "spaces-stub".to_owned()
+        }
+    }
+
+    /// A service driving a single herdr-kind [`SpacesBackend`], plus a handle on
+    /// that backend so tests can read its call counters.
+    fn spaces_service() -> (MuxrService, Arc<SpacesBackend>) {
+        let backend = Arc::new(SpacesBackend::default());
+        let service = MuxrService::with_backends(BackendSet::single(
+            BackendKind::Herdr,
+            Arc::clone(&backend) as Arc<dyn MuxBackend>,
+        ));
+        (service, backend)
+    }
+
+    #[tokio::test]
+    async fn explicit_space_id_reads_that_space_without_the_relay() {
+        // The space arm must run — with the id forwarded verbatim — and the
+        // session arm must NOT (no relay is registered, so the legacy path would
+        // otherwise take the ephemeral session query).
+        let (service, backend) = spaces_service();
+        let layout = service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "herdr:herdr".to_owned(),
+                connection_id: "conn-1".to_owned(),
+                space_id: "ws-2".to_owned(),
+            }))
+            .await
+            .expect("space-scoped GetLayout must succeed")
+            .into_inner();
+
+        assert_eq!(
+            backend.space_queries.load(Ordering::Relaxed),
+            1,
+            "the space arm must have been queried"
+        );
+        assert_eq!(
+            backend.session_queries.load(Ordering::Relaxed),
+            0,
+            "the session arm must NOT run for an explicit space"
+        );
+        assert_eq!(
+            backend
+                .last_space
+                .lock()
+                .expect("last_space lock")
+                .as_deref(),
+            Some("ws-2"),
+            "the space id must reach the backend verbatim"
+        );
+        assert_eq!(
+            layout.tabs.iter().map(|t| t.tab_id).collect::<Vec<_>>(),
+            vec![2],
+            "the response must carry the NAMED space's tabs"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_space_id_takes_the_session_path() {
+        // Back-compat: "" must behave exactly as before — the ordinary
+        // (here relay-less → ephemeral) session query.
+        let (service, backend) = spaces_service();
+        let layout = service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "herdr:herdr".to_owned(),
+                connection_id: String::new(),
+                space_id: String::new(),
+            }))
+            .await
+            .expect("legacy GetLayout must succeed")
+            .into_inner();
+
+        assert_eq!(backend.session_queries.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            backend.space_queries.load(Ordering::Relaxed),
+            0,
+            "an empty space_id must never reach the space arm"
+        );
+        assert_eq!(
+            layout.tabs.iter().map(|t| t.tab_id).collect::<Vec<_>>(),
+            vec![1],
+            "the response must carry the session's own tabs"
+        );
+    }
+
+    #[tokio::test]
+    async fn space_id_on_a_zellij_session_is_invalid_argument() {
+        // zellij has no space axis: a named space is a client error, never a
+        // silently space-less answer. Rejected BEFORE any backend query.
+        let service = MuxrService::new(); // sole backend: zellij
+        let status = service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "zellij:dev".to_owned(),
+                connection_id: String::new(),
+                space_id: "ws-2".to_owned(),
+            }))
+            .await
+            .expect_err("a space_id on zellij must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert!(
+            status.message().contains("does not support spaces"),
+            "unexpected message: {}",
+            status.message()
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_space_id_bypasses_the_relay_and_the_b_focus_override() {
+        // The caller HAS a live relay and tracked view state for this session.
+        // A foreign-space peek must still bypass both: no RelayControl is queued,
+        // and the returned panes keep their RAW is_focused (the tracked pane
+        // belongs to the caller's own space, not the one being read).
+        let (service, backend) = spaces_service();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-1".to_owned(),
+            ControlEntry {
+                session: "herdr:herdr".to_owned(),
+                sender: tx,
+                read_only: false,
+            },
+        );
+        service.view_state.insert(
+            "conn-1".to_owned(),
+            ViewStateEntry {
+                session: "herdr:herdr".to_owned(),
+                state: RelayViewState {
+                    active_tab: Some(2),
+                    focused_pane: Some(PaneRef::terminal(21)),
+                    current_space: Some("ws-1".to_owned()),
+                },
+            },
+        );
+
+        let layout = service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "herdr:herdr".to_owned(),
+                connection_id: "conn-1".to_owned(),
+                space_id: "ws-2".to_owned(),
+            }))
+            .await
+            .expect("space-scoped GetLayout must succeed")
+            .into_inner();
+
+        assert!(
+            rx.try_recv().is_err(),
+            "the relay must not be asked to serve a foreign-space read"
+        );
+        assert_eq!(backend.space_queries.load(Ordering::Relaxed), 1);
+        assert!(
+            focused_of(&layout.tabs, 2, 20),
+            "raw is_focused must survive — the B-FOCUS override must not run"
+        );
+        assert!(
+            !focused_of(&layout.tabs, 2, 21),
+            "the caller's tracked pane must NOT be marked focused in a foreign space"
+        );
+    }
+
+    #[tokio::test]
+    async fn malformed_space_id_is_invalid_argument() {
+        // Same guard as the mutating space ops (`validate_space_id`): a
+        // path-traversal-shaped id never reaches the backend.
+        let (service, backend) = spaces_service();
+        let status = service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "herdr:herdr".to_owned(),
+                connection_id: String::new(),
+                space_id: "../escape".to_owned(),
+            }))
+            .await
+            .expect_err("a malformed space_id must be rejected");
+        assert_eq!(status.code(), tonic::Code::InvalidArgument);
+        assert_eq!(
+            backend.space_queries.load(Ordering::Relaxed),
+            0,
+            "a malformed id must not reach the backend"
         );
     }
 }
