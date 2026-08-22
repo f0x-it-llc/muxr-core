@@ -42,7 +42,7 @@ mod zellij;
 pub use types::{
     ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
     PaneSnapshot, ResizeDir, ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot,
-    TabSnapshot,
+    TabSnapshot, UnknownSpace,
 };
 pub use zellij::ZellijBackend;
 
@@ -259,11 +259,23 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     ///   [`Self::query_layout`] (that is exactly what the default does).
     /// - `Some(id)` → the layout of THAT space, read directly by its opaque id.
     ///
+    /// **`space_id` supersedes `session`.** On a backend that returns `true` from
+    /// [`Self::supports_spaces`], a `Some(id)` addresses the space *directly* and
+    /// `session` contributes nothing to the answer — it is not a scope, a filter,
+    /// or a tiebreak (herdr collapses the whole daemon onto one session, so there
+    /// is no session axis left to disambiguate with). Implementations must not
+    /// let `session` change which space is read; callers must not assume it does.
+    ///
     /// **Read-only contract:** an override MUST NOT move any focus — not the
     /// connection's, not the daemon's. Naming a foreign space here is a *peek*
     /// (herdr's `workspace.*` reads are already workspace-scoped and
     /// side-effect-free); a backend that could only answer by focusing the space
     /// must return an error instead.
+    ///
+    /// **Unknown ids:** an id that names no live space must fail with
+    /// [`UnknownSpace`] (wrapped in the returned `anyhow::Error`) — never with an
+    /// `Ok` empty layout, which a client cannot tell from a real, empty space. The
+    /// gRPC layer maps it to `not_found`.
     ///
     /// The **default ignores `space_id`** and delegates to [`Self::query_layout`],
     /// so zellij — and every mock/test impl — is untouched. Only a backend that

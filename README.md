@@ -121,6 +121,13 @@ The wire contract is `muxrd/proto/muxr.proto` (package
 their own stubs from the same file. A reference Dart client lives in
 [`muxrd/clients/dart_test_client/`](muxrd/clients/dart_test_client/).
 
+**Read-only tokens and spaces (deliberate trade-off):** reads are not gated by
+the read-only-token check, so a read-only token can list every herdr space
+(`GetSpaces`) and read any one space's tab/pane *structure* via
+`SessionRef.space_id` on `GetLayout` — not just the space its connection is
+viewing. Pane content still requires an attach, and neither call mutates
+anything or moves focus. See the `space_id` comment in `muxr.proto`.
+
 ## Releasing
 
 Releases are cut by the **Release** GitHub Actions workflow

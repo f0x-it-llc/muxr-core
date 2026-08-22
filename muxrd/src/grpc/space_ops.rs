@@ -406,16 +406,42 @@ impl MuxrService {
     ///
     /// [`RelayViewState`]: crate::relay::RelayViewState
     fn connection_current_space(&self, session: &str, connection_id: &str) -> Option<String> {
-        // Exact per-connection lookup only (clone out of the DashMap guard — never
-        // held across an `.await`; this is a sync helper anyway). No session-scoped
-        // fallback: it would leak a sibling connection's current_space.
-        if connection_id.is_empty() {
-            return None;
+        match self.connection_space(session, connection_id) {
+            ConnectionSpace::Space(id) => Some(id),
+            // Both "no view state" and "attached but never switched" are `None`
+            // here: GetSpaces/CloseSpace treat them identically (fall back to the
+            // backend-reported active). Callers that must tell them apart use
+            // [`Self::connection_space`] directly.
+            ConnectionSpace::Unknown | ConnectionSpace::DaemonActive => None,
         }
-        self.view_state
+    }
+
+    /// The three-way form of [`Self::connection_current_space`]: what this
+    /// connection's tracked view state says about the space it is viewing.
+    ///
+    /// Same fail-closed lookup rule (exact `connection_id`, validated against
+    /// `session`; no session-scoped fallback — S-M2/S-M4), but it does **not**
+    /// collapse [`ConnectionSpace::Unknown`] and [`ConnectionSpace::DaemonActive`]
+    /// into one `None`. The space-scoped `GetLayout` read needs that distinction to
+    /// decide whether a named space is the caller's OWN (see [`super::layout`]).
+    ///
+    /// `pub(super)` for that caller; the DashMap guard is dropped before returning
+    /// (the space id is cloned out), so no guard is ever held across an `.await`.
+    pub(super) fn connection_space(&self, session: &str, connection_id: &str) -> ConnectionSpace {
+        if connection_id.is_empty() {
+            return ConnectionSpace::Unknown;
+        }
+        match self
+            .view_state
             .get(connection_id)
             .filter(|entry| entry.session == session)
-            .and_then(|entry| entry.state.current_space.clone())
+        {
+            None => ConnectionSpace::Unknown,
+            Some(entry) => match entry.state.current_space.clone() {
+                Some(id) => ConnectionSpace::Space(id),
+                None => ConnectionSpace::DaemonActive,
+            },
+        }
     }
 
     /// Resolve the control sender for the connection's relay for a SwitchSpace.
@@ -516,6 +542,33 @@ impl MuxrService {
             Err(_elapsed) => log::warn!("CloseSpace: re-point timed out for '{session}'"),
         }
     }
+}
+
+// ─── Per-connection space resolution ────────────────────────────────────────────
+
+/// What a connection's tracked view state says about the space it is viewing.
+///
+/// Three-way on purpose: [`RelayViewState::current_space`] folds two very
+/// different situations into its own `None` (see its doc) —
+/// - **no relay / no view state for this connection**, and
+/// - **a relay that has simply never switched space**, which by construction is
+///   viewing the daemon's active workspace (a hint-less attach lands there).
+///
+/// `GetSpaces` can ignore the difference (both fall back to the backend-reported
+/// `active`), but the space-scoped `GetLayout` read cannot: only the second case
+/// lets it conclude that a *named* space is the caller's own.
+///
+/// [`RelayViewState::current_space`]: crate::relay::RelayViewState::current_space
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ConnectionSpace {
+    /// No per-connection view state (empty/mismatched `connection_id`, or no relay
+    /// attached): nothing is known about this caller's view.
+    Unknown,
+    /// A relay is attached but has never switched space, so it is viewing the
+    /// daemon's active-or-first workspace.
+    DaemonActive,
+    /// The relay switched to — and is viewing — this space.
+    Space(String),
 }
 
 // ─── Free validation / mapping helpers ──────────────────────────────────────────

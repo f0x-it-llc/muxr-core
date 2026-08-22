@@ -7,10 +7,19 @@
 //!   ephemeral backend query, then apply the B-FOCUS per-connection view-state
 //!   override. Unchanged.
 //! - **non-empty `space_id`** — a **read-only peek** at an explicitly named herdr
-//!   space. It bypasses relay routing AND the B-FOCUS override entirely (a foreign
-//!   space is by definition *not* the connection's view, so the connection's
-//!   `active_tab`/`focused_pane` would be an actively wrong indicator for it), and
-//!   moves no focus — neither the connection's nor the daemon's.
+//!   space. It always bypasses relay *routing* (the relay's stream points at the
+//!   space the connection is viewing, and re-pointing it to read another one is
+//!   exactly the focus move this feature must not make) and moves no focus —
+//!   neither the connection's nor the daemon's. Whether the B-FOCUS override
+//!   applies depends on **whose** space was named:
+//!   - the caller's **OWN** current space → the override applies exactly as on the
+//!     legacy path. It must: herdr's raw focus tracks the *desktop* (the relay is
+//!     pure re-attach — `switch_space`/`go_to_tab`/`focus_pane` never call herdr's
+//!     daemon-global focus), so without the override the same space would answer
+//!     differently depending on whether the client named it;
+//!   - a **foreign** space → no override, since the connection's tracked
+//!     `active_tab`/`focused_pane` belong to a different space and would be an
+//!     actively wrong indicator here.
 //!
 //! Both paths converge on the same snapshot → proto tail ([`build_layout`]), so
 //! the plugin-pane filter chokepoint cannot drift between them. GetLayout is a
@@ -18,13 +27,13 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::multiplexer::{LayoutSnapshot, MuxBackend};
+use crate::multiplexer::{LayoutSnapshot, MuxBackend, UnknownSpace};
 use crate::proto::{Layout, PaneMsg, SessionRef, TabMsg};
 use crate::relay::RelayViewState;
 
 use super::MuxrService;
 use super::helpers::short_conn;
-use super::space_ops::validate_space_id;
+use super::space_ops::{ConnectionSpace, validate_space_id};
 
 /// Timeout for the oneshot reply when routing a `QueryLayout` through the relay.
 ///
@@ -59,13 +68,18 @@ impl MuxrService {
         );
         log::debug!("GetLayout: session='{session}' connection_id='{connection_id}'");
 
-        // ── Space-scoped read: an explicit foreign-space peek ────────────────
-        // A named space is NOT this connection's view, so this path deliberately
-        // routes around BOTH the relay (its stream points at the connection's own
-        // space) and the B-FOCUS override below — `should_apply_view_state_override`
-        // must never run for it. Still a pure read: no focus moves anywhere.
+        // ── Space-scoped read: an explicit named-space peek ──────────────────
+        // Routes around the relay (its stream points at the space the connection
+        // is viewing) but NOT necessarily around the B-FOCUS override: the named
+        // space may well be the caller's own, and then the override is as correct
+        // here as it is on the legacy path. `space_scoped_layout` decides.
+        // `should_apply_view_state_override` still never runs for it — that
+        // predicate is about which RELAY served a query, and no relay served this
+        // one. Either way a pure read: no focus moves anywhere.
         if is_space_scoped(&space_id) {
-            return space_scoped_layout(&session, &backend, &bare, &space_id).await;
+            return self
+                .space_scoped_layout(&session, &connection_id, &backend, &bare, &space_id)
+                .await;
         }
 
         // ── B-QUERY: route through relay if one is attached ─────────────────
@@ -145,7 +159,7 @@ impl MuxrService {
                                 "GetLayout: relay query/parse failed for '{session}', \
                                  falling back to ephemeral: {e:#}"
                             );
-                            let snap = backend_query_layout(&backend, &bare, None).await?;
+                            let snap = backend_query_layout(&backend, &bare).await?;
                             (snap, false, String::new())
                         }
                         Ok(Err(_cancelled)) => {
@@ -153,7 +167,7 @@ impl MuxrService {
                                 "GetLayout: relay query oneshot cancelled for '{session}', \
                                  falling back to ephemeral"
                             );
-                            let snap = backend_query_layout(&backend, &bare, None).await?;
+                            let snap = backend_query_layout(&backend, &bare).await?;
                             (snap, false, String::new())
                         }
                         Err(_elapsed) => {
@@ -161,7 +175,7 @@ impl MuxrService {
                                 "GetLayout: relay query timed out for '{session}' \
                                  after {RELAY_QUERY_TIMEOUT:?}, falling back to ephemeral"
                             );
-                            let snap = backend_query_layout(&backend, &bare, None).await?;
+                            let snap = backend_query_layout(&backend, &bare).await?;
                             (snap, false, String::new())
                         }
                     }
@@ -171,13 +185,13 @@ impl MuxrService {
                         "GetLayout: relay sender closed for '{session}', \
                          falling back to ephemeral"
                     );
-                    let snap = backend_query_layout(&backend, &bare, None).await?;
+                    let snap = backend_query_layout(&backend, &bare).await?;
                     (snap, false, String::new())
                 }
             } else {
                 // No relay attached for this session — use the ephemeral backend path.
                 log::debug!("GetLayout: no relay for '{session}', using ephemeral query");
-                let snap = backend_query_layout(&backend, &bare, None).await?;
+                let snap = backend_query_layout(&backend, &bare).await?;
                 (snap, false, String::new())
             }
         };
@@ -255,77 +269,164 @@ impl MuxrService {
 
         Ok(Response::new(layout))
     }
+
+    // ── GetLayout, space-scoped read ────────────────────────────────────────
+
+    /// Answer a GetLayout for an explicitly named space — a **read-only peek**.
+    ///
+    /// Deliberately routes around the relay: the connection's relay stream points
+    /// at the space the connection is *viewing*, and re-pointing it to read
+    /// another one is exactly the focus move this feature must not make. The
+    /// answer therefore comes from a direct, workspace-scoped backend query.
+    ///
+    /// The B-FOCUS override is applied **iff the named space is the caller's own
+    /// current space** ([`space_is_own`], on the same per-connection rule GetSpaces
+    /// uses). That is not a nicety: the herdr relay is pure re-attach — it never
+    /// calls herdr's daemon-global focus — so the raw queried `active`/`is_focused`
+    /// track the DESKTOP's focus, not this connection's. Without the override,
+    /// `GetLayout{space_id: <my own space>}` would contradict the empty-`space_id`
+    /// answer for the very same space. For a genuinely foreign space the override
+    /// is skipped, since the caller's tracked `active_tab`/`focused_pane` live in a
+    /// different space and the raw values are the truth there.
+    ///
+    /// Errors:
+    /// - malformed `space_id` → `invalid_argument` (same guard as the mutating
+    ///   space ops — [`validate_space_id`]),
+    /// - a backend with no space axis (zellij) → `invalid_argument`,
+    /// - an id naming no live space → `not_found`,
+    /// - any other backend failure → a terse `internal` (see [`space_query_status`]).
+    async fn space_scoped_layout(
+        &self,
+        session: &str,
+        connection_id: &str,
+        backend: &std::sync::Arc<dyn MuxBackend>,
+        bare: &str,
+        space_id: &str,
+    ) -> Result<Response<Layout>, Status> {
+        validate_space_id(space_id)?;
+        if rejects_space_scope(space_id, backend.supports_spaces()) {
+            log::info!(
+                "GetLayout: session='{session}' rejected space_id='{space_id}' — \
+                 backend has no space axis"
+            );
+            return Err(Status::invalid_argument(
+                "space_id: this session's backend does not support spaces",
+            ));
+        }
+
+        // Query first: an unknown id fails here (`not_found`) before we spend a
+        // `list_spaces` round-trip on the own-space question below.
+        let snapshot = space_query_layout(backend, bare, space_id).await?;
+
+        // ── Is the named space the caller's OWN? ─────────────────────────────
+        // Same per-connection rule GetSpaces uses (`connection_space`, exact
+        // connection_id, no session-scoped fallback), keeping its subtlety: a
+        // relay that has never switched space tracks `current_space = None` and is
+        // by construction viewing the DAEMON-ACTIVE workspace, so that arm — and
+        // only that arm — resolves the daemon's active space to compare against.
+        let view = self.connection_space(session, connection_id);
+        let daemon_active = match view {
+            ConnectionSpace::DaemonActive => daemon_active_space(backend, bare).await,
+            ConnectionSpace::Unknown | ConnectionSpace::Space(_) => None,
+        };
+        let own_space = space_is_own(&view, space_id, daemon_active.as_deref());
+
+        // Own space → the tracked view state describes exactly this space; apply
+        // the same override the legacy path applies (clone out of the DashMap
+        // guard — never held across an `.await`).
+        let relay_vs: Option<RelayViewState> = if own_space {
+            self.view_state
+                .get(connection_id)
+                .filter(|entry| entry.session == session)
+                .map(|entry| entry.state.clone())
+        } else {
+            None
+        };
+
+        let layout = build_layout(&snapshot, relay_vs.as_ref());
+        log::info!(
+            "GetLayout: session='{session}' space_id='{space_id}' → {} tab(s), \
+             {} total pane group(s), space_scoped=true own_space={own_space}",
+            layout.tabs.len(),
+            layout.tabs.iter().map(|t| t.panes.len()).sum::<usize>()
+        );
+        Ok(Response::new(layout))
+    }
 }
 
 // ─── Private async helpers ────────────────────────────────────────────────────
 
-/// Answer a GetLayout for an explicitly named space — a **read-only peek** at a
-/// space that is not (necessarily) the caller's own.
+/// Query the **session's own** layout in a blocking task, mapping errors to
+/// [`Status`].
 ///
-/// Deliberately routes around the relay: the connection's relay stream points at
-/// the space the connection is *viewing*, and re-pointing it to read another one
-/// is exactly the focus move this feature must not make. It also skips the
-/// B-FOCUS override for the same reason — the caller's tracked
-/// `active_tab`/`focused_pane` belong to a different space, so applying them here
-/// would fabricate a wrong indicator (the raw queried values are the truth for a
-/// foreign space).
-///
-/// Errors:
-/// - malformed `space_id` → `invalid_argument` (same guard as the mutating space
-///   ops — [`validate_space_id`]),
-/// - a backend with no space axis (zellij) → `invalid_argument`,
-/// - backend failure → `internal` (chain logged, terse status out).
-async fn space_scoped_layout(
-    session: &str,
-    backend: &std::sync::Arc<dyn MuxBackend>,
-    bare: &str,
-    space_id: &str,
-) -> Result<Response<Layout>, Status> {
-    validate_space_id(space_id)?;
-    if rejects_space_scope(space_id, backend.supports_spaces()) {
-        log::info!(
-            "GetLayout: session='{session}' rejected space_id='{space_id}' — \
-             backend has no space axis"
-        );
-        return Err(Status::invalid_argument(
-            "space_id: this session's backend does not support spaces",
-        ));
-    }
-
-    let snapshot = backend_query_layout(backend, bare, Some(space_id)).await?;
-    let layout = build_layout(&snapshot, None);
-    log::info!(
-        "GetLayout: session='{session}' space_id='{space_id}' → {} tab(s), \
-         {} total pane group(s), space_scoped=true",
-        layout.tabs.len(),
-        layout.tabs.iter().map(|t| t.panes.len()).sum::<usize>()
-    );
-    Ok(Response::new(layout))
-}
-
-/// Query a backend layout in a blocking task, mapping errors to [`Status`].
-///
-/// `space_id`:
-/// - `None` — the session's own layout. Used by all ephemeral paths in
-///   `get_layout_impl` (no relay attached, relay fallback on
-///   error/timeout/cancel, relay sender closed). The backend default makes this
-///   byte-identical to the former direct `query_layout()` call.
-/// - `Some(id)` — the named space's layout (space-scoped read; herdr only).
+/// Used by all ephemeral paths in `get_layout_impl` (no relay attached, relay
+/// fallback on error/timeout/cancel, relay sender closed). Passes `None` for the
+/// space, which the backend default makes byte-identical to a direct
+/// `query_layout()` call. The space-scoped read has its own mapper
+/// ([`space_query_layout`]) because its error hygiene differs.
 async fn backend_query_layout(
     backend: &std::sync::Arc<dyn MuxBackend>,
     session: &str,
-    space_id: Option<&str>,
 ) -> Result<LayoutSnapshot, Status> {
     let backend = backend.clone();
     let session = session.to_owned();
-    let space = space_id.map(str::to_owned);
-    tokio::task::spawn_blocking(move || backend.query_layout_for_space(&session, space.as_deref()))
+    tokio::task::spawn_blocking(move || backend.query_layout_for_space(&session, None))
         .await
         .map_err(|e| Status::internal(format!("GetLayout query task panicked: {e}")))?
         .map_err(|e| {
-            log::warn!("GetLayout backend query failed (space_id={space_id:?}): {e:#}");
+            log::warn!("GetLayout backend query failed: {e:#}");
             Status::internal(format!("GetLayout query failed: {e:#}"))
         })
+}
+
+/// Query a **named space's** layout in a blocking task, mapping errors to terse
+/// statuses ([`space_query_status`]).
+async fn space_query_layout(
+    backend: &std::sync::Arc<dyn MuxBackend>,
+    session: &str,
+    space_id: &str,
+) -> Result<LayoutSnapshot, Status> {
+    let b = backend.clone();
+    let session_owned = session.to_owned();
+    let space = space_id.to_owned();
+    tokio::task::spawn_blocking(move || b.query_layout_for_space(&session_owned, Some(&space)))
+        .await
+        .map_err(|e| {
+            log::warn!("GetLayout: space-scoped query task panicked: {e}");
+            Status::internal("GetLayout: query task failed")
+        })?
+        .map_err(|e| space_query_status(space_id, &e))
+}
+
+/// The daemon's own active space id, or `None` when it cannot be determined.
+///
+/// Only the [`ConnectionSpace::DaemonActive`] arm of the own-space test needs it
+/// (a relay that never switched space is viewing whatever the daemon has active),
+/// so this extra `list_spaces` round-trip is paid on that arm alone.
+///
+/// Best-effort: any failure is logged and answered `None`, which makes the named
+/// space read as foreign — the override is skipped and the raw queried values are
+/// returned. That is the safe direction: a missing override is a stale indicator,
+/// a wrong override is an actively false one.
+async fn daemon_active_space(
+    backend: &std::sync::Arc<dyn MuxBackend>,
+    session: &str,
+) -> Option<String> {
+    let b = backend.clone();
+    let session_owned = session.to_owned();
+    match tokio::task::spawn_blocking(move || b.list_spaces(&session_owned)).await {
+        Ok(Ok(spaces)) => spaces.into_iter().find(|s| s.active).map(|s| s.id),
+        Ok(Err(e)) => {
+            log::warn!("GetLayout: list_spaces failed while resolving the active space: {e:#}");
+            None
+        }
+        Err(e) => {
+            log::warn!(
+                "GetLayout: list_spaces task panicked while resolving the active space: {e}"
+            );
+            None
+        }
+    }
 }
 
 // ─── Pure helpers (also used by tests) ───────────────────────────────────────
@@ -355,6 +456,58 @@ pub(crate) fn is_space_scoped(space_id: &str) -> bool {
 /// empty `space_id` is never rejected — that is the legacy path on every backend.
 pub(crate) fn rejects_space_scope(space_id: &str, backend_supports_spaces: bool) -> bool {
     is_space_scoped(space_id) && !backend_supports_spaces
+}
+
+/// Whether the named space is the **caller's own** current space — the condition
+/// under which the space-scoped read applies the B-FOCUS override.
+///
+/// `view` is the caller's tracked per-connection view
+/// ([`MuxrService::connection_space`]); `daemon_active` is the daemon's active
+/// space id, needed by — and resolved only for — the
+/// [`ConnectionSpace::DaemonActive`] arm:
+///
+/// - [`Unknown`](ConnectionSpace::Unknown) → `false`. No view state means no
+///   override to apply anyway (and no way to tell whose space this is).
+/// - [`DaemonActive`](ConnectionSpace::DaemonActive) → the relay is attached but
+///   has never switched space, so it is viewing the daemon's active workspace:
+///   own iff that is the space being named. An unresolved `daemon_active`
+///   (`None`) reads as foreign — the conservative direction.
+/// - [`Space(id)`](ConnectionSpace::Space) → own iff the ids match.
+pub(crate) fn space_is_own(
+    view: &ConnectionSpace,
+    space_id: &str,
+    daemon_active: Option<&str>,
+) -> bool {
+    match view {
+        ConnectionSpace::Unknown => false,
+        ConnectionSpace::DaemonActive => daemon_active == Some(space_id),
+        ConnectionSpace::Space(current) => current == space_id,
+    }
+}
+
+/// Map a space-scoped backend failure to a **terse** [`Status`].
+///
+/// Two rules, both deliberate:
+///
+/// 1. An [`UnknownSpace`] anywhere in the chain → `not_found`, so a client can
+///    tell "no such space" from "a real space that happens to be empty". Nothing
+///    else in the chain is inspected — no string matching.
+/// 2. Everything else → a fixed `internal` message. The error chain is logged
+///    server-side and **never forwarded**: it carries the herdr socket path, and
+///    its wording varies per failure mode, which would turn every error into a
+///    finer-grained existence oracle than the `not_found` above (that one is the
+///    deliberate, documented disclosure — see the `space_id` note in
+///    `muxr.proto`). The legacy path keeps its own chain-forwarding mapper; only
+///    the space path, which takes a client-chosen id, is hardened here.
+pub(crate) fn space_query_status(space_id: &str, err: &anyhow::Error) -> Status {
+    if UnknownSpace::in_chain(err) {
+        log::info!("GetLayout: space_id='{space_id}' names no live space → not_found");
+        log::debug!("GetLayout: unknown space_id='{space_id}': {err:#}");
+        Status::not_found("space_id: no such space")
+    } else {
+        log::warn!("GetLayout: space-scoped query failed for space_id='{space_id}': {err:#}");
+        Status::internal("GetLayout: backend error")
+    }
 }
 
 /// Resolve the tab id the B-FOCUS override should be scoped to for this poll.
@@ -932,15 +1085,32 @@ mod tests {
     /// A spaces-capable backend that reports which query arm was taken.
     ///
     /// `query_layout` (session path) yields tab 1; `query_layout_for_space`
-    /// with an explicit id yields tab 2 — so a test can tell from the response
-    /// alone which arm ran, and the recorded `last_space` proves the id reached
-    /// the backend verbatim.
+    /// with an explicit **known** id yields tab 2 — so a test can tell from the
+    /// response alone which arm ran, and the recorded `last_space` proves the id
+    /// reached the backend verbatim. The tab is the same for every known space:
+    /// which space was read is asserted through `last_space`, not the payload.
+    ///
+    /// It knows two spaces — [`DAEMON_ACTIVE_SPACE`] (the daemon's active one) and
+    /// [`OTHER_SPACE`] — and models the real herdr contract for anything else: an
+    /// unknown id fails with [`UnknownSpace`], wrapped in a context layer carrying
+    /// an internal-looking detail so tests can prove neither the chain nor the
+    /// socket path reaches the client.
     #[derive(Debug, Default)]
     struct SpacesBackend {
         session_queries: AtomicUsize,
         space_queries: AtomicUsize,
+        list_spaces_calls: AtomicUsize,
         last_space: std::sync::Mutex<Option<String>>,
     }
+
+    /// The stub daemon's active space (what a relay that never switched space is
+    /// viewing — the `current_space = None` case).
+    const DAEMON_ACTIVE_SPACE: &str = "ws-1";
+    /// A second, non-active space on the stub daemon.
+    const OTHER_SPACE: &str = "ws-2";
+    /// An internal detail the stub's error chain carries; it must never reach the
+    /// client (it stands in for the herdr socket path).
+    const STUB_INTERNAL_DETAIL: &str = "/run/user/1000/herdr.sock";
 
     impl SpacesBackend {
         /// One tab with two panes — the first focused. Two panes so that a
@@ -975,11 +1145,33 @@ mod tests {
                 Some(id) => {
                     self.space_queries.fetch_add(1, Ordering::Relaxed);
                     *self.last_space.lock().expect("last_space lock") = Some(id.to_owned());
+                    if !matches!(id, DAEMON_ACTIVE_SPACE | OTHER_SPACE) {
+                        // The herdr contract: unknown id → typed `UnknownSpace`,
+                        // never an empty Ok. Wrapped in context so the test also
+                        // proves `in_chain` looks THROUGH context layers.
+                        return Err(anyhow::Error::new(UnknownSpace::new(id))
+                            .context(format!("herdr: workspace.list via {STUB_INTERNAL_DETAIL}")));
+                    }
                     Ok(Self::snapshot(2))
                 }
                 // Mirrors the trait default: no space named → the session path.
                 None => self.query_layout(session),
             }
+        }
+        fn list_spaces(&self, _: &str) -> anyhow::Result<Vec<crate::multiplexer::SpaceSnapshot>> {
+            self.list_spaces_calls.fetch_add(1, Ordering::Relaxed);
+            Ok(vec![
+                crate::multiplexer::SpaceSnapshot {
+                    id: DAEMON_ACTIVE_SPACE.to_owned(),
+                    name: "one".to_owned(),
+                    active: true,
+                },
+                crate::multiplexer::SpaceSnapshot {
+                    id: OTHER_SPACE.to_owned(),
+                    name: "two".to_owned(),
+                    active: false,
+                },
+            ])
         }
         fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
             unimplemented!()
@@ -1165,11 +1357,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn explicit_space_id_bypasses_the_relay_and_the_b_focus_override() {
-        // The caller HAS a live relay and tracked view state for this session.
-        // A foreign-space peek must still bypass both: no RelayControl is queued,
-        // and the returned panes keep their RAW is_focused (the tracked pane
-        // belongs to the caller's own space, not the one being read).
+    async fn foreign_space_id_bypasses_the_relay_and_the_b_focus_override() {
+        // The caller HAS a live relay and tracked view state for this session, and
+        // is viewing ws-1 while asking for ws-2. A FOREIGN-space peek must bypass
+        // both: no RelayControl is queued, and the returned panes keep their RAW
+        // is_focused (the tracked pane belongs to the caller's own space, not the
+        // one being read).
         let (service, backend) = spaces_service();
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<RelayControl>();
         service.control.insert(
@@ -1214,6 +1407,232 @@ mod tests {
         assert!(
             !focused_of(&layout.tabs, 2, 21),
             "the caller's tracked pane must NOT be marked focused in a foreign space"
+        );
+    }
+
+    // ─── M1: the own-space B-FOCUS override ──────────────────────────────────
+
+    /// Register a live relay + per-connection view state for `conn-1`: tracking
+    /// pane 21 (in tab 2 — the tab every space query answers with) and viewing
+    /// `current_space`. Returns the relay's control receiver so a test can prove
+    /// nothing was routed through it.
+    fn attach_conn_1(
+        service: &MuxrService,
+        current_space: Option<&str>,
+    ) -> tokio::sync::mpsc::UnboundedReceiver<RelayControl> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-1".to_owned(),
+            ControlEntry {
+                session: "herdr:herdr".to_owned(),
+                sender: tx,
+                read_only: false,
+            },
+        );
+        service.view_state.insert(
+            "conn-1".to_owned(),
+            ViewStateEntry {
+                session: "herdr:herdr".to_owned(),
+                state: RelayViewState {
+                    active_tab: Some(2),
+                    focused_pane: Some(PaneRef::terminal(21)),
+                    current_space: current_space.map(str::to_owned),
+                },
+            },
+        );
+        rx
+    }
+
+    /// Ask for `space_id` as `conn-1`.
+    async fn space_layout_as_conn_1(
+        service: &MuxrService,
+        space_id: &str,
+    ) -> Result<Layout, Status> {
+        service
+            .get_layout_impl(Request::new(SessionRef {
+                session: "herdr:herdr".to_owned(),
+                connection_id: "conn-1".to_owned(),
+                space_id: space_id.to_owned(),
+            }))
+            .await
+            .map(Response::into_inner)
+    }
+
+    #[test]
+    fn own_space_predicate_covers_the_three_view_states() {
+        // A tracked current_space: plain id equality, no daemon lookup needed.
+        assert!(space_is_own(
+            &ConnectionSpace::Space(OTHER_SPACE.to_owned()),
+            OTHER_SPACE,
+            None
+        ));
+        assert!(!space_is_own(
+            &ConnectionSpace::Space(DAEMON_ACTIVE_SPACE.to_owned()),
+            OTHER_SPACE,
+            None
+        ));
+        // Never switched (current_space = None): own iff the named space is the
+        // daemon-active one …
+        assert!(space_is_own(
+            &ConnectionSpace::DaemonActive,
+            DAEMON_ACTIVE_SPACE,
+            Some(DAEMON_ACTIVE_SPACE)
+        ));
+        assert!(!space_is_own(
+            &ConnectionSpace::DaemonActive,
+            OTHER_SPACE,
+            Some(DAEMON_ACTIVE_SPACE)
+        ));
+        // … and an unresolvable daemon-active space reads as foreign (a missing
+        // override beats a wrong one).
+        assert!(!space_is_own(
+            &ConnectionSpace::DaemonActive,
+            DAEMON_ACTIVE_SPACE,
+            None
+        ));
+        // No view state at all: nothing to apply.
+        assert!(!space_is_own(
+            &ConnectionSpace::Unknown,
+            DAEMON_ACTIVE_SPACE,
+            Some(DAEMON_ACTIVE_SPACE)
+        ));
+    }
+
+    #[tokio::test]
+    async fn own_space_request_applies_the_b_focus_override() {
+        // M1: the named space IS the space this connection is viewing, so its
+        // tracked focus is the truth for it — the raw queried values track the
+        // DESKTOP's focus (the herdr relay is pure re-attach and never calls
+        // herdr's daemon-global focus). Without this, naming your own space would
+        // contradict the empty-space_id answer for that same space.
+        let (service, backend) = spaces_service();
+        let mut rx = attach_conn_1(&service, Some(OTHER_SPACE));
+
+        let layout = space_layout_as_conn_1(&service, OTHER_SPACE)
+            .await
+            .expect("own-space GetLayout must succeed");
+
+        assert!(
+            rx.try_recv().is_err(),
+            "an own-space read must still bypass relay ROUTING (no focus moves)"
+        );
+        assert_eq!(backend.space_queries.load(Ordering::Relaxed), 1);
+        assert!(
+            focused_of(&layout.tabs, 2, 21),
+            "the connection's tracked pane must be reported focused in its own space"
+        );
+        assert!(
+            !focused_of(&layout.tabs, 2, 20),
+            "the raw (desktop-focused) pane must lose is_focused under the override"
+        );
+        assert_eq!(
+            backend.list_spaces_calls.load(Ordering::Relaxed),
+            0,
+            "a tracked current_space answers the own-space question with no extra round trip"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_hint_less_relay_owns_the_daemon_active_space() {
+        // The `current_space == None` subtlety (RelayViewState): a relay that has
+        // never switched space landed on — and is viewing — the daemon's active
+        // workspace, so naming THAT space is an own-space request.
+        let (service, backend) = spaces_service();
+        let _rx = attach_conn_1(&service, None);
+
+        let layout = space_layout_as_conn_1(&service, DAEMON_ACTIVE_SPACE)
+            .await
+            .expect("own-space GetLayout must succeed");
+
+        assert_eq!(
+            backend.list_spaces_calls.load(Ordering::Relaxed),
+            1,
+            "the None case must resolve the daemon-active space to answer the question"
+        );
+        assert!(
+            focused_of(&layout.tabs, 2, 21),
+            "the tracked pane must be focused: the daemon-active space IS this relay's space"
+        );
+        assert!(!focused_of(&layout.tabs, 2, 20));
+    }
+
+    #[tokio::test]
+    async fn a_hint_less_relay_treats_a_non_active_space_as_foreign() {
+        // Same `current_space == None` relay, but naming a space the daemon does
+        // NOT have active — that is somebody else's space: raw values.
+        let (service, backend) = spaces_service();
+        let _rx = attach_conn_1(&service, None);
+
+        let layout = space_layout_as_conn_1(&service, OTHER_SPACE)
+            .await
+            .expect("foreign-space GetLayout must succeed");
+
+        assert_eq!(backend.list_spaces_calls.load(Ordering::Relaxed), 1);
+        assert!(
+            focused_of(&layout.tabs, 2, 20),
+            "raw is_focused must survive for a foreign space"
+        );
+        assert!(
+            !focused_of(&layout.tabs, 2, 21),
+            "the caller's tracked pane must NOT be marked focused in a foreign space"
+        );
+    }
+
+    // ─── M2: unknown space id + error hygiene ────────────────────────────────
+
+    #[tokio::test]
+    async fn unknown_space_id_is_not_found_with_no_internal_chain() {
+        // An id naming no live space must be distinguishable from a real (empty)
+        // space — and the status must carry none of the backend's chain, which
+        // includes the herdr socket path.
+        let (service, backend) = spaces_service();
+        let _rx = attach_conn_1(&service, Some(OTHER_SPACE));
+
+        let status = space_layout_as_conn_1(&service, "ws-nope")
+            .await
+            .expect_err("an unknown space_id must be rejected");
+
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        let msg = status.message();
+        assert!(msg.contains("no such space"), "unexpected message: {msg:?}");
+        assert!(
+            !msg.contains(STUB_INTERNAL_DETAIL),
+            "the herdr socket path must never reach the client: {msg:?}"
+        );
+        assert!(
+            !msg.contains("workspace.list"),
+            "no internal chain may reach the client: {msg:?}"
+        );
+        assert_eq!(
+            backend.space_queries.load(Ordering::Relaxed),
+            1,
+            "the id must have been resolved against the backend, not guessed at"
+        );
+    }
+
+    #[test]
+    fn space_query_status_is_not_found_for_unknown_and_terse_for_everything_else() {
+        // Both errors carry a context layer with an internal-looking detail: the
+        // unknown one must still be recognised THROUGH it, and neither may
+        // forward it.
+        let unknown = anyhow::Error::new(UnknownSpace::new("ws-9"))
+            .context(format!("herdr: workspace.list via {STUB_INTERNAL_DETAIL}"));
+        let status = space_query_status("ws-9", &unknown);
+        assert_eq!(status.code(), tonic::Code::NotFound);
+        assert!(
+            !status.message().contains(STUB_INTERNAL_DETAIL),
+            "unexpected message: {:?}",
+            status.message()
+        );
+
+        let other = anyhow::anyhow!("connection refused")
+            .context(format!("herdr: connect {STUB_INTERNAL_DETAIL}"));
+        let status = space_query_status("ws-9", &other);
+        assert_eq!(status.code(), tonic::Code::Internal);
+        assert_eq!(
+            status.message(),
+            "GetLayout: backend error",
+            "the error chain must never be forwarded on the space path"
         );
     }
 

@@ -545,10 +545,19 @@ impl MuxBackend for HerdrBackend {
             // branch resolves to the daemon's active-or-first workspace, which
             // would answer a foreign-space peek with the focused space instead.
             //
+            // `session` is therefore DECORATIVE on this arm — the trait contract
+            // says `space_id` supersedes it, and herdr has exactly one session
+            // (the sentinel) so there is nothing left for it to scope. It is not
+            // consulted; do not "fix" that by re-introducing `resolve_workspace`.
+            //
             // Read-only: `HerdrControl::query_layout` is already workspace-scoped
             // (`workspace.list` + `tab.list`/`pane.list` for that id) and never
             // calls `workspace.focus` — so this moves neither the daemon's focus
             // nor the calling connection's view (the relay is not involved at all).
+            //
+            // Unknown ids: `HerdrControl::query_layout` resolves the id against
+            // the `workspace.list` it already fetches and fails with
+            // `UnknownSpace` (→ gRPC `not_found`), never an empty `Ok` layout.
             Some(id) => {
                 validate_workspace_id(id)?;
                 self.control.query_layout(id)
