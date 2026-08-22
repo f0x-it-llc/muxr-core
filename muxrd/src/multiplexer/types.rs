@@ -196,6 +196,54 @@ pub struct SpaceSnapshot {
     pub active: bool,
 }
 
+// ─── Unknown-space error ────────────────────────────────────────────────────────
+
+/// Typed error: the space (herdr workspace) named by an explicit `space_id` does
+/// **not exist** on the backend.
+///
+/// Kept distinct from every other backend failure so the gRPC layer can answer a
+/// space-scoped read with `not_found` instead of a generic `internal` — an
+/// unknown id was previously indistinguishable from a real-but-empty space
+/// (`OK` + an empty layout) or from an IPC failure.
+///
+/// It travels inside an [`anyhow::Error`]; callers test for it with
+/// [`UnknownSpace::in_chain`] (which looks through any `.context(…)` layers added
+/// on the way up), never by string-matching a message. The `Display` text is for
+/// **server logs only** — the client-facing status is deliberately terse (a
+/// forwarded error chain leaks the herdr socket path).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSpace {
+    /// The opaque space id the caller asked for. Already charset- and
+    /// length-validated at the gRPC boundary (`grpc::space_ops::validate_space_id`).
+    pub space_id: String,
+}
+
+impl UnknownSpace {
+    /// Build the error for `space_id`.
+    pub fn new(space_id: impl Into<String>) -> Self {
+        Self {
+            space_id: space_id.into(),
+        }
+    }
+
+    /// Whether `err` **is**, or wraps, an [`UnknownSpace`].
+    ///
+    /// Walks the whole [`anyhow`] chain so a caller that adds context around the
+    /// backend error does not silently downgrade the client's `not_found` to an
+    /// `internal`.
+    pub fn in_chain(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| cause.is::<Self>())
+    }
+}
+
+impl std::fmt::Display for UnknownSpace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such space: '{}'", self.space_id)
+    }
+}
+
+impl std::error::Error for UnknownSpace {}
+
 // ─── Attach resume hint ─────────────────────────────────────────────────────────
 
 /// A **best-effort** hint naming the view a fresh attach should land on

@@ -40,7 +40,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 
-use crate::multiplexer::types::{ActionAck, LayoutSnapshot, PaneSnapshot, TabSnapshot};
+use crate::multiplexer::types::{
+    ActionAck, LayoutSnapshot, PaneSnapshot, TabSnapshot, UnknownSpace,
+};
 
 use super::api::{
     ApiRequest, ApiResponseBody, ApiResult, HerdrServerInfo, LayoutDescription, PaneCloseParams,
@@ -474,6 +476,14 @@ impl HerdrControl {
     /// Fetches the workspace's tabs (`tab.list`), its panes with `terminal_id`s
     /// (`pane.list`), and one absolute-cell layout per tab (`pane.layout`),
     /// populating the shared registries and transcoding into the neutral shape.
+    ///
+    /// **Existence:** `workspace_id` is resolved against the `workspace.list` this
+    /// method already fetches; an id that names no live workspace fails with
+    /// [`UnknownSpace`] rather than answering `Ok` with an empty layout. That
+    /// distinction is what lets the gRPC layer answer a space-scoped `GetLayout`
+    /// with `not_found`, and it is also the failure the `CloseSpace`
+    /// client-recovery contract expects when a relay polls a workspace that was
+    /// closed underneath it.
     pub fn query_layout(&self, workspace_id: &str) -> Result<LayoutSnapshot> {
         // M2: the per-session active tab comes from the workspace's own
         // `WorkspaceInfo.active_tab_id`, NOT from `TabInfo.focused`. herdr's
@@ -482,12 +492,17 @@ impl HerdrControl {
         // tab would report `focused=false`, leaving the snapshot with no active
         // tab. Resolve the workspace's own active tab id here (one extra
         // `workspace.list` round-trip; cheap over the local socket).
+        //
+        // The same lookup doubles as the EXISTENCE check: no matching workspace
+        // means the caller named an id that does not exist, so we fail with the
+        // typed `UnknownSpace` instead of the former `unwrap_or_default()` — which
+        // produced an empty-tab-id snapshot indistinguishable from a real space.
         let active_tab_id = self
             .list_workspaces()?
             .into_iter()
             .find(|w| w.workspace_id == workspace_id)
             .map(|w| w.active_tab_id)
-            .unwrap_or_default();
+            .ok_or_else(|| anyhow::Error::new(UnknownSpace::new(workspace_id)))?;
 
         let tabs = self.list_tabs(workspace_id)?;
         let panes = self.list_panes(workspace_id)?;

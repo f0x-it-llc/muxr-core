@@ -269,6 +269,35 @@ fn noop_ack() -> ActionAck {
     }
 }
 
+/// Reject a malformed explicit space (workspace) id before it is used as a herdr
+/// `workspace_id`.
+///
+/// [`MuxBackend::query_layout_for_space`] addresses an explicit id **directly**,
+/// deliberately skipping [`HerdrBackend::resolve_workspace`] — whose sentinel
+/// branch falls back to the daemon's active-or-first workspace, which would
+/// silently answer a foreign-space peek with the *focused* space instead. Nothing
+/// downstream re-checks the id, so it must be shaped like a herdr id here.
+///
+/// Defence in depth, not the primary gate: the client-facing guard is
+/// `grpc::space_ops::validate_space_id` (the same `[A-Za-z0-9_-.:]` allowlist plus
+/// a length bound), which every gRPC space request already passes through. This
+/// one covers any other caller of the trait. If herdr ever widens its id charset,
+/// widen both.
+fn validate_workspace_id(space_id: &str) -> Result<()> {
+    if space_id.is_empty() {
+        return Err(anyhow!("herdr: space_id must not be empty"));
+    }
+    if !space_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.' | b':'))
+    {
+        return Err(anyhow!(
+            "herdr: invalid space_id: only [A-Za-z0-9_-.:] characters are allowed"
+        ));
+    }
+    Ok(())
+}
+
 /// A failed acknowledgement for a real capability gap, so the client surfaces it.
 fn unsupported_ack(op: &str) -> ActionAck {
     ActionAck {
@@ -380,6 +409,12 @@ impl MuxBackend for HerdrBackend {
     // existing `workspace.*` control ops; the neutral `space_id` is herdr's opaque
     // `workspace_id` verbatim. T03 wires the gRPC GetSpaces/CreateSpace/RenameSpace/
     // CloseSpace handlers to these. `_session` is ignored — herdr has one daemon.
+
+    fn supports_spaces(&self) -> bool {
+        // Option A: herdr's workspaces ARE the space axis, so a request may name
+        // one explicitly (see `query_layout_for_space`).
+        true
+    }
 
     fn list_spaces(&self, _session: &str) -> Result<Vec<SpaceSnapshot>> {
         // `WorkspaceInfo.focused` (carried into SpaceSnapshot.active by
@@ -497,6 +532,39 @@ impl MuxBackend for HerdrBackend {
     fn query_layout(&self, session: &str) -> Result<LayoutSnapshot> {
         let workspace_id = self.resolve_workspace(session)?;
         self.control.query_layout(&workspace_id)
+    }
+
+    fn query_layout_for_space(
+        &self,
+        session: &str,
+        space_id: Option<&str>,
+    ) -> Result<LayoutSnapshot> {
+        match space_id {
+            // Explicit space → address the workspace DIRECTLY by its opaque id.
+            // `resolve_workspace` is bypassed on purpose: its [`HERDR_SESSION`]
+            // branch resolves to the daemon's active-or-first workspace, which
+            // would answer a foreign-space peek with the focused space instead.
+            //
+            // `session` is therefore DECORATIVE on this arm — the trait contract
+            // says `space_id` supersedes it, and herdr has exactly one session
+            // (the sentinel) so there is nothing left for it to scope. It is not
+            // consulted; do not "fix" that by re-introducing `resolve_workspace`.
+            //
+            // Read-only: `HerdrControl::query_layout` is already workspace-scoped
+            // (`workspace.list` + `tab.list`/`pane.list` for that id) and never
+            // calls `workspace.focus` — so this moves neither the daemon's focus
+            // nor the calling connection's view (the relay is not involved at all).
+            //
+            // Unknown ids: `HerdrControl::query_layout` resolves the id against
+            // the `workspace.list` it already fetches and fails with
+            // `UnknownSpace` (→ gRPC `not_found`), never an empty `Ok` layout.
+            Some(id) => {
+                validate_workspace_id(id)?;
+                self.control.query_layout(id)
+            }
+            // No explicit space → today's path, unchanged.
+            None => self.query_layout(session),
+        }
     }
 
     fn query_session_size(&self, session: &str) -> Result<(u16, u16)> {
@@ -756,6 +824,59 @@ mod tests {
     #[test]
     fn pick_active_or_first_is_none_for_empty_daemon() {
         assert!(pick_active_or_first(&[]).is_none());
+    }
+
+    // ── Space-scoped layout reads ─────────────────────────────────────────────
+
+    #[test]
+    fn herdr_supports_spaces() {
+        // The gRPC layer gates an explicitly space-scoped GetLayout on this
+        // predicate; herdr is the one backend that answers `true` (zellij and
+        // every mock keep the `false` default).
+        assert!(backend().supports_spaces());
+    }
+
+    #[test]
+    fn workspace_id_shape_accepts_herdr_ids_and_rejects_abuse() {
+        // Mirrors grpc::space_ops::validate_space_id's allowlist (defence in depth).
+        assert!(validate_workspace_id("ws-1").is_ok());
+        assert!(validate_workspace_id("01HF8Z9K3T4Qm-abc.def").is_ok());
+        assert!(validate_workspace_id("herdr:ws:7").is_ok());
+        assert!(validate_workspace_id("").is_err(), "empty rejected");
+        assert!(
+            validate_workspace_id("../escape").is_err(),
+            "path traversal rejected"
+        );
+        assert!(validate_workspace_id("a b").is_err(), "whitespace rejected");
+        assert!(validate_workspace_id("has\0nul").is_err());
+    }
+
+    #[test]
+    fn query_layout_for_space_rejects_a_malformed_id_before_any_io() {
+        // The nonexistent socket would fail any round-trip, so assert on the
+        // MESSAGE: a malformed id must be refused by the shape guard, never
+        // forwarded to herdr's JSON-API.
+        let b = backend();
+        let err = b
+            .query_layout_for_space(HERDR_SESSION, Some("../escape"))
+            .expect_err("a malformed space_id must be rejected");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid space_id"),
+            "expected the shape guard's message, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn query_layout_for_space_rejects_an_empty_id() {
+        // `Some("")` is a caller bug: "no space" is expressed as `None`, which
+        // falls through to the ordinary session path. Never resolve it to the
+        // active-or-first workspace by accident.
+        let b = backend();
+        let err = b
+            .query_layout_for_space(HERDR_SESSION, Some(""))
+            .expect_err("an empty space_id must be rejected");
+        assert!(format!("{err:#}").contains("must not be empty"));
     }
 
     // ── Single-session collapse (Option A) ────────────────────────────────────

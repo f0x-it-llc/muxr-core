@@ -347,6 +347,31 @@ message SessionRef {
   string session = 1;
   // optional; echoed from AttachTerminal's minted id to route per-connection (empty = legacy/fallback routing)
   string connection_id = 2;
+  // optional; opaque herdr space id scoping a GetLayout READ to that space.
+  // herdr only: a non-empty value on a backend without spaces (zellij) is
+  // rejected with invalid_argument. empty ("") = today's behavior (the
+  // relay-focused space, or the backend's active-or-first workspace).
+  // Read-only peek: naming a space here returns THAT space's tabs/panes and
+  // never moves this connection's — or the daemon's — focus. Ignored by the
+  // other SessionRef RPCs (GetSpaces / KillSession / …).
+  // Supersedes `session` on a spaces backend: the space is addressed directly by
+  // this id; `session` neither narrows nor disambiguates it.
+  // Naming YOUR OWN current space is answered with the same per-connection
+  // active_tab/is_focused view the empty-space_id path gives; a foreign space is
+  // answered with the backend's raw values.
+  // An id naming no live space answers NOT_FOUND (distinct from a real space
+  // that happens to be empty); every other backend failure is a terse INTERNAL
+  // that never carries the daemon's error chain.
+  // READ-ONLY-TOKEN TRADE-OFF (deliberate, recorded here): GetLayout is a read,
+  // so — like GetSpaces, which is likewise unguarded — it is NOT gated by the
+  // read-only-token check. A read-only token can therefore enumerate the
+  // daemon's spaces (GetSpaces) and read the tab/pane STRUCTURE of every one of
+  // them through this field, not just the space its own connection is viewing;
+  // the NOT_FOUND above also tells it which ids exist. Pane CONTENT still
+  // requires an attach, and nothing on this path mutates or moves focus. Do not
+  // "harden" it with a read-only rejection without revisiting GetSpaces — the
+  // two are one disclosure surface and must agree.
+  string space_id = 3;
 }
 
 // List of sessions returned by ListSessions.

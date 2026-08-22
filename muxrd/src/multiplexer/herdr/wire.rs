@@ -72,6 +72,11 @@ pub const HERDR_MIN_PROTOCOL: u32 = 14;
 /// `ClientMessage`/`ServerMessage`, none removed or reordered), so the layout below
 /// stayed valid; the warning is what tells us to re-verify if that ever stops
 /// being true.  Bump this after testing a newer herdr.
+///
+/// **Paired with the dev rig's pin:** `docker/Dockerfile`'s `ARG HERDR_VERSION`
+/// (and compose's `${HERDR_VERSION:-…}` fallbacks) name the release that ships
+/// this protocol — 0.7.5. Move both in the same commit, or the rig stops testing
+/// what this constant claims.
 pub const HERDR_MAX_TESTED_PROTOCOL: u32 = 17;
 
 /// Highest `ServerMessage` bincode tag this module can decode ([`ServerMessage`]

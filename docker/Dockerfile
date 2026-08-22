@@ -225,18 +225,29 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # boundary; herdr runs same-user/same-host (its sockets are 0600, no auth).
 FROM runtime AS runtime-herdr
 
-# The rig tracks the LATEST herdr release and is deliberately NOT pinned.
+# PINNED to the last herdr release muxrd has been TESTED against.
 #
-# muxrd discovers herdr's wire protocol version at runtime (JSON-API `ping`) and
-# echoes it in the relay handshake, so it is compatible with whatever herdr the
-# operator is running. Pinning here would only hide that: the rig would keep
-# testing one frozen protocol while real users moved on — which is exactly how
-# muxrd came to be stuck on protocol 14 after herdr shipped 16 and 17.
+# 0.7.5 is the release that ships wire protocol 17 — the value recorded in
+# `HERDR_MAX_TESTED_PROTOCOL` (muxrd/src/multiplexer/herdr/wire.rs). The two must
+# move together.
 #
-# `latest` resolves to the newest non-prerelease tag (herdr's `preview-*` builds are
-# flagged as prereleases, so they are correctly skipped). Override to reproduce a
-# specific version:  --build-arg HERDR_VERSION=0.7.4
-ARG HERDR_VERSION=latest
+# This used to default to `latest`, on the theory that muxrd negotiates the
+# protocol at runtime so the rig should track upstream. It does negotiate — but
+# this layer sits DOWNSTREAM of the muxrd binary layer, so `latest` meant any
+# unrelated muxrd rebuild silently swapped the herdr under the rig. That is
+# exactly how the rig came up on herdr 0.8.2 / protocol 20 against a muxrd whose
+# tested ceiling is 17, with nothing in the build output saying so.
+#
+# BUMPS MUST BE DELIBERATE: raising this version is a paired change — bump it
+# here, re-verify the wire layout against the new release, and update
+# `HERDR_MAX_TESTED_PROTOCOL` (and this comment) in the same commit. Keep
+# compose.yaml's `${HERDR_VERSION:-…}` default in step. To try another release
+# without committing to it:  --build-arg HERDR_VERSION=0.8.2
+#
+# `latest` is still accepted as an explicit opt-in and resolves to the newest
+# non-prerelease tag (herdr's `preview-*` builds are flagged as prereleases, so
+# they are correctly skipped) — an untested-by-construction rig, use knowingly.
+ARG HERDR_VERSION=0.7.5
 RUN set -eux; \
     if [ "${HERDR_VERSION}" = "latest" ]; then \
       resolved="$(curl -fsSL https://api.github.com/repos/ogulcancelik/herdr/releases/latest \

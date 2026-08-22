@@ -42,7 +42,7 @@ mod zellij;
 pub use types::{
     ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
     PaneSnapshot, ResizeDir, ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot,
-    TabSnapshot,
+    TabSnapshot, UnknownSpace,
 };
 pub use zellij::ZellijBackend;
 
@@ -238,6 +238,58 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     // ── Spaces (herdr workspaces; default: unsupported) ──────────────────────
 
+    /// Whether this backend has a **space** axis at all.
+    ///
+    /// A cheap, side-effect-free capability predicate (no I/O): the gRPC layer
+    /// checks it before honouring an explicitly space-scoped request, so a client
+    /// that names a space on a backend without one gets a clean
+    /// `invalid_argument` instead of a silently space-less answer. The **default
+    /// is `false`** (zellij and every mock); herdr overrides it to `true`.
+    ///
+    /// It is deliberately NOT derived from `list_spaces` — that performs IPC and
+    /// an empty list is a legitimate answer for a live spaces backend.
+    fn supports_spaces(&self) -> bool {
+        false
+    }
+
+    /// Build a neutral [`LayoutSnapshot`] for a **specific** space of `session`.
+    ///
+    /// `space_id`:
+    /// - `None` → the session's ordinary layout; **byte-identical** to
+    ///   [`Self::query_layout`] (that is exactly what the default does).
+    /// - `Some(id)` → the layout of THAT space, read directly by its opaque id.
+    ///
+    /// **`space_id` supersedes `session`.** On a backend that returns `true` from
+    /// [`Self::supports_spaces`], a `Some(id)` addresses the space *directly* and
+    /// `session` contributes nothing to the answer — it is not a scope, a filter,
+    /// or a tiebreak (herdr collapses the whole daemon onto one session, so there
+    /// is no session axis left to disambiguate with). Implementations must not
+    /// let `session` change which space is read; callers must not assume it does.
+    ///
+    /// **Read-only contract:** an override MUST NOT move any focus — not the
+    /// connection's, not the daemon's. Naming a foreign space here is a *peek*
+    /// (herdr's `workspace.*` reads are already workspace-scoped and
+    /// side-effect-free); a backend that could only answer by focusing the space
+    /// must return an error instead.
+    ///
+    /// **Unknown ids:** an id that names no live space must fail with
+    /// [`UnknownSpace`] (wrapped in the returned `anyhow::Error`) — never with an
+    /// `Ok` empty layout, which a client cannot tell from a real, empty space. The
+    /// gRPC layer maps it to `not_found`.
+    ///
+    /// The **default ignores `space_id`** and delegates to [`Self::query_layout`],
+    /// so zellij — and every mock/test impl — is untouched. Only a backend that
+    /// returns `true` from [`Self::supports_spaces`] is ever handed a `Some(id)`
+    /// by the gRPC layer.
+    fn query_layout_for_space(
+        &self,
+        session: &str,
+        space_id: Option<&str>,
+    ) -> anyhow::Result<LayoutSnapshot> {
+        let _ = space_id;
+        self.query_layout(session)
+    }
+
     /// List the backend's "spaces" for `session`.
     ///
     /// Spaces are a herdr-only axis (its workspaces, surfaced as in-place
@@ -272,6 +324,12 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     /// Build a neutral [`LayoutSnapshot`] for `session` (raw queried values;
     /// no per-relay-client override, plugin panes included).
+    ///
+    /// Note: a backend MAY fail this with [`UnknownSpace`] if the session's
+    /// backing workspace was closed concurrently (the herdr impl now does —
+    /// `session` resolves to a workspace id that can go stale between the resolve
+    /// and the query). Non-blocking: this arm is not currently given the
+    /// `not_found` treatment [`Self::query_layout_for_space`]'s callers apply.
     fn query_layout(&self, session: &str) -> anyhow::Result<LayoutSnapshot>;
 
     /// Current `(rows, cols)` of the session's active tab display area.

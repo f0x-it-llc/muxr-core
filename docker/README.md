@@ -73,23 +73,27 @@ docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr
 ```
 
 This builds the `runtime-herdr` image (an **unmodified** upstream herdr binary —
-`HERDR_VERSION`, default `latest`), starts a headless `herdr server`,
+`HERDR_VERSION`, default `0.7.5`), starts a headless `herdr server`,
 seeds a demo workspace, and exports `MUXRD_BACKEND=herdr` so the `muxrctl`-started
 daemon selects herdr automatically. Then SSH in and drive `muxrctl` exactly as for
 zellij (Configure → Cert → Tokens → **Server (start)** → Pair). The container is
 **`muxr-herdr-rig`**.
 
-> **herdr is deliberately NOT pinned** — `HERDR_VERSION` defaults to `latest`, so the
-> rig always exercises the herdr release real users are running. muxrd discovers the
-> server's wire protocol version at runtime (JSON-API `ping`) and echoes it in the
-> relay handshake, so there is no version to keep in sync. Set
-> `HERDR_VERSION=<x.y.z>` to reproduce a specific release.
+> **herdr is PINNED** — `HERDR_VERSION` defaults to `0.7.5`, the last release muxrd
+> has been tested against (it ships wire protocol 17 = `HERDR_MAX_TESTED_PROTOCOL`
+> in `muxrd/src/multiplexer/herdr/wire.rs`). It used to default to `latest`, but this
+> layer sits downstream of the muxrd binary layer, so any unrelated rebuild silently
+> upgraded herdr under the rig — which is how it once came up on 0.8.2 / protocol 20
+> with nothing in the build output saying so. Set `HERDR_VERSION=<x.y.z>` (or
+> `latest`) to try another release without committing to it.
 >
-> muxrd logs a warning when herdr reports a protocol newer than
-> `HERDR_MAX_TESTED_PROTOCOL` (`muxrd/src/multiplexer/herdr/wire.rs`) but still
-> attaches — herdr's protocol changes have been additive so far. If terminal output
-> ever misbehaves after a herdr release, that warning is the first thing to check;
-> re-run the herdr integration smoke tests and bump the constant once verified.
+> **Bumping the pin is a paired change:** update the Dockerfile default (and the
+> compose `${HERDR_VERSION:-…}` fallbacks), re-verify the wire layout against the new
+> release, re-run the herdr integration smoke tests, and update
+> `HERDR_MAX_TESTED_PROTOCOL` in the same commit. muxrd still only *warns* when herdr
+> reports a protocol newer than that constant and attaches anyway — herdr's protocol
+> changes have been additive so far, so if terminal output ever misbehaves after a
+> herdr release, that warning is the first thing to check.
 
 > **AGPL-3.0:** herdr is a separate, unmodified, user-installed binary that muxrd
 > drives only over its public `0600` Unix sockets. The rig downloads the official
