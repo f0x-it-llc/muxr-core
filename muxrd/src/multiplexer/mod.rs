@@ -324,6 +324,12 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     /// Build a neutral [`LayoutSnapshot`] for `session` (raw queried values;
     /// no per-relay-client override, plugin panes included).
+    ///
+    /// Note: a backend MAY fail this with [`UnknownSpace`] if the session's
+    /// backing workspace was closed concurrently (the herdr impl now does —
+    /// `session` resolves to a workspace id that can go stale between the resolve
+    /// and the query). Non-blocking: this arm is not currently given the
+    /// `not_found` treatment [`Self::query_layout_for_space`]'s callers apply.
     fn query_layout(&self, session: &str) -> anyhow::Result<LayoutSnapshot>;
 
     /// Current `(rows, cols)` of the session's active tab display area.

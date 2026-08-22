@@ -21,6 +21,13 @@
 //!     `active_tab`/`focused_pane` belong to a different space and would be an
 //!     actively wrong indicator here.
 //!
+//!   "Own" is decided ONLY from an exact tracked space id
+//!   ([`ConnectionSpace::Space`]). A hint-less relay (attached with no resume
+//!   hint) never gets one — its `current_space` stays `None` for the
+//!   connection's whole life — so its own-space peek gets NO override either;
+//!   see [`MuxrService::space_scoped_layout`] for why that gap is the correct,
+//!   if incomplete, answer.
+//!
 //! Both paths converge on the same snapshot → proto tail ([`build_layout`]), so
 //! the plugin-pane filter chokepoint cannot drift between them. GetLayout is a
 //! **read** on both paths: no `reject_if_read_only` gate (matching GetSpaces).
@@ -280,14 +287,37 @@ impl MuxrService {
     /// answer therefore comes from a direct, workspace-scoped backend query.
     ///
     /// The B-FOCUS override is applied **iff the named space is the caller's own
-    /// current space** ([`space_is_own`], on the same per-connection rule GetSpaces
-    /// uses). That is not a nicety: the herdr relay is pure re-attach — it never
-    /// calls herdr's daemon-global focus — so the raw queried `active`/`is_focused`
-    /// track the DESKTOP's focus, not this connection's. Without the override,
-    /// `GetLayout{space_id: <my own space>}` would contradict the empty-`space_id`
-    /// answer for the very same space. For a genuinely foreign space the override
-    /// is skipped, since the caller's tracked `active_tab`/`focused_pane` live in a
-    /// different space and the raw values are the truth there.
+    /// current space** ([`space_is_own`]) — decided ONLY from the exact tracked id
+    /// in [`ConnectionSpace::Space`]. That is not a nicety: the herdr relay is pure
+    /// re-attach — it never calls herdr's daemon-global focus — so the raw queried
+    /// `active`/`is_focused` track the DESKTOP's focus, not this connection's.
+    /// Without the override, `GetLayout{space_id: <my own space>}` would
+    /// contradict the empty-`space_id` answer for the very same space. For a
+    /// genuinely foreign space the override is skipped, since the caller's tracked
+    /// `active_tab`/`focused_pane` live in a different space and the raw values are
+    /// the truth there.
+    ///
+    /// **The DaemonActive gap.** [`ConnectionSpace::DaemonActive`] — a relay
+    /// attached with no resume hint, whose `current_space` therefore stays `None`
+    /// for its whole life — is treated as foreign here too, same as `Unknown`, even
+    /// though at attach time it *was* viewing the daemon's then-active workspace. A
+    /// round-1 predicate tried to resolve "own" for this case anyway by asking the
+    /// backend which space is CURRENTLY daemon-active
+    /// ([`crate::multiplexer::MuxBackend::list_spaces`]) and asserting the relay
+    /// must still be viewing it — sound only until the desktop switches workspaces
+    /// out from under the connection, after which it produces both a false
+    /// positive (a peek at the NEW daemon-active space wrongly inherits this
+    /// connection's stale view state) and a false negative (a peek at the
+    /// connection's own, unchanged space is wrongly judged foreign). Reverted for
+    /// exactly that reason: a missing override here is a stale indicator, but a
+    /// wrong one is an actively false one, and the raw (desktop-focus) values this
+    /// gap falls back to are never worse than what the legacy empty-`space_id` path
+    /// would report for the same hint-less connection. The real fix is seeding
+    /// `current_space` at attach time with the resolved target workspace id — the
+    /// `resumed_view_for` / `view_state_from_resumed` plumbing already does exactly
+    /// this for a *resumed* attach (see `multiplexer::herdr::relay` and
+    /// `relay::mod`); extending it to the hint-less case is the follow-up,
+    /// deliberately not done here to keep `relay/` untouched.
     ///
     /// Errors:
     /// - malformed `space_id` → `invalid_argument` (same guard as the mutating
@@ -314,22 +344,21 @@ impl MuxrService {
             ));
         }
 
-        // Query first: an unknown id fails here (`not_found`) before we spend a
-        // `list_spaces` round-trip on the own-space question below.
+        // Query first: an unknown id fails here (`not_found`) before we even ask
+        // the own-space question below.
         let snapshot = space_query_layout(backend, bare, space_id).await?;
 
         // ── Is the named space the caller's OWN? ─────────────────────────────
         // Same per-connection rule GetSpaces uses (`connection_space`, exact
-        // connection_id, no session-scoped fallback), keeping its subtlety: a
-        // relay that has never switched space tracks `current_space = None` and is
-        // by construction viewing the DAEMON-ACTIVE workspace, so that arm — and
-        // only that arm — resolves the daemon's active space to compare against.
+        // connection_id, no session-scoped fallback) — but unlike GetSpaces we do
+        // NOT collapse `DaemonActive` into a resolved answer. Only
+        // `ConnectionSpace::Space` names a space this connection is actually known
+        // to be viewing; `DaemonActive` (a hint-less relay whose own space was
+        // never tracked) and `Unknown` both read as foreign here — see this
+        // function's doc for why a stale-daemon-lookup resolution was tried and
+        // reverted.
         let view = self.connection_space(session, connection_id);
-        let daemon_active = match view {
-            ConnectionSpace::DaemonActive => daemon_active_space(backend, bare).await,
-            ConnectionSpace::Unknown | ConnectionSpace::Space(_) => None,
-        };
-        let own_space = space_is_own(&view, space_id, daemon_active.as_deref());
+        let own_space = space_is_own(&view, space_id);
 
         // Own space → the tracked view state describes exactly this space; apply
         // the same override the legacy path applies (clone out of the DashMap
@@ -398,37 +427,6 @@ async fn space_query_layout(
         .map_err(|e| space_query_status(space_id, &e))
 }
 
-/// The daemon's own active space id, or `None` when it cannot be determined.
-///
-/// Only the [`ConnectionSpace::DaemonActive`] arm of the own-space test needs it
-/// (a relay that never switched space is viewing whatever the daemon has active),
-/// so this extra `list_spaces` round-trip is paid on that arm alone.
-///
-/// Best-effort: any failure is logged and answered `None`, which makes the named
-/// space read as foreign — the override is skipped and the raw queried values are
-/// returned. That is the safe direction: a missing override is a stale indicator,
-/// a wrong override is an actively false one.
-async fn daemon_active_space(
-    backend: &std::sync::Arc<dyn MuxBackend>,
-    session: &str,
-) -> Option<String> {
-    let b = backend.clone();
-    let session_owned = session.to_owned();
-    match tokio::task::spawn_blocking(move || b.list_spaces(&session_owned)).await {
-        Ok(Ok(spaces)) => spaces.into_iter().find(|s| s.active).map(|s| s.id),
-        Ok(Err(e)) => {
-            log::warn!("GetLayout: list_spaces failed while resolving the active space: {e:#}");
-            None
-        }
-        Err(e) => {
-            log::warn!(
-                "GetLayout: list_spaces task panicked while resolving the active space: {e}"
-            );
-            None
-        }
-    }
-}
-
 // ─── Pure helpers (also used by tests) ───────────────────────────────────────
 
 /// A pane is client-visible iff it is a real terminal pane. Plugin panes
@@ -462,27 +460,26 @@ pub(crate) fn rejects_space_scope(space_id: &str, backend_supports_spaces: bool)
 /// under which the space-scoped read applies the B-FOCUS override.
 ///
 /// `view` is the caller's tracked per-connection view
-/// ([`MuxrService::connection_space`]); `daemon_active` is the daemon's active
-/// space id, needed by — and resolved only for — the
-/// [`ConnectionSpace::DaemonActive`] arm:
+/// ([`MuxrService::connection_space`]). Only [`ConnectionSpace::Space`] can
+/// answer "own": it is the one arm that carries an exact herdr workspace id this
+/// connection is known to be viewing (set only by `switch_space` / a resumed
+/// attach — see `relay::view_state_from_resumed`).
 ///
 /// - [`Unknown`](ConnectionSpace::Unknown) → `false`. No view state means no
 ///   override to apply anyway (and no way to tell whose space this is).
-/// - [`DaemonActive`](ConnectionSpace::DaemonActive) → the relay is attached but
-///   has never switched space, so it is viewing the daemon's active workspace:
-///   own iff that is the space being named. An unresolved `daemon_active`
-///   (`None`) reads as foreign — the conservative direction.
+/// - [`DaemonActive`](ConnectionSpace::DaemonActive) → `false`, always. A relay
+///   attached with no resume hint never gets a tracked `current_space` — it stays
+///   `None` for the connection's whole life, not just until the first switch —
+///   so there is no tracked id to compare against; treating it as foreign is the
+///   conservative answer (a missing override is a stale indicator, a wrong one is
+///   an actively false one). A round-1 predicate instead asked the backend which
+///   space is CURRENTLY daemon-active and compared against that, which is sound
+///   only until the desktop switches workspaces out from under the connection —
+///   reverted (see [`MuxrService::space_scoped_layout`] for the full failure
+///   mode).
 /// - [`Space(id)`](ConnectionSpace::Space) → own iff the ids match.
-pub(crate) fn space_is_own(
-    view: &ConnectionSpace,
-    space_id: &str,
-    daemon_active: Option<&str>,
-) -> bool {
-    match view {
-        ConnectionSpace::Unknown => false,
-        ConnectionSpace::DaemonActive => daemon_active == Some(space_id),
-        ConnectionSpace::Space(current) => current == space_id,
-    }
+pub(crate) fn space_is_own(view: &ConnectionSpace, space_id: &str) -> bool {
+    matches!(view, ConnectionSpace::Space(current) if current == space_id)
 }
 
 /// Map a space-scoped backend failure to a **terse** [`Status`].
@@ -1460,41 +1457,31 @@ mod tests {
 
     #[test]
     fn own_space_predicate_covers_the_three_view_states() {
-        // A tracked current_space: plain id equality, no daemon lookup needed.
+        // A tracked current_space: plain id equality — the only arm that can ever
+        // answer "own".
         assert!(space_is_own(
             &ConnectionSpace::Space(OTHER_SPACE.to_owned()),
             OTHER_SPACE,
-            None
         ));
         assert!(!space_is_own(
             &ConnectionSpace::Space(DAEMON_ACTIVE_SPACE.to_owned()),
             OTHER_SPACE,
-            None
         ));
-        // Never switched (current_space = None): own iff the named space is the
-        // daemon-active one …
-        assert!(space_is_own(
-            &ConnectionSpace::DaemonActive,
-            DAEMON_ACTIVE_SPACE,
-            Some(DAEMON_ACTIVE_SPACE)
-        ));
-        assert!(!space_is_own(
-            &ConnectionSpace::DaemonActive,
-            OTHER_SPACE,
-            Some(DAEMON_ACTIVE_SPACE)
-        ));
-        // … and an unresolvable daemon-active space reads as foreign (a missing
-        // override beats a wrong one).
+        // Never switched (current_space = None): the connection's own space was
+        // never tracked, so it is ALWAYS foreign here — regardless of which space
+        // is named, including the daemon's actual active one. (The regression this
+        // guards against: a round-1 predicate resolved this arm via a live
+        // daemon-active lookup, which went stale the moment the desktop switched
+        // workspaces out from under the connection.)
         assert!(!space_is_own(
             &ConnectionSpace::DaemonActive,
             DAEMON_ACTIVE_SPACE,
-            None
         ));
+        assert!(!space_is_own(&ConnectionSpace::DaemonActive, OTHER_SPACE));
         // No view state at all: nothing to apply.
         assert!(!space_is_own(
             &ConnectionSpace::Unknown,
             DAEMON_ACTIVE_SPACE,
-            Some(DAEMON_ACTIVE_SPACE)
         ));
     }
 
@@ -1533,33 +1520,42 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_hint_less_relay_owns_the_daemon_active_space() {
-        // The `current_space == None` subtlety (RelayViewState): a relay that has
-        // never switched space landed on — and is viewing — the daemon's active
-        // workspace, so naming THAT space is an own-space request.
+    async fn a_hint_less_relay_gets_no_override_for_the_daemon_active_space() {
+        // REGRESSION GUARD (round-1 revert): the `current_space == None` relay
+        // never gets its own space tracked — not "until the first switch", but for
+        // its whole life — so it must get NO override here, even when the named
+        // space happens to be the daemon's active one. A round-1 predicate
+        // resolved this via a live `daemon_active_space()` lookup and applied the
+        // override on a match; that broke the moment the desktop switched
+        // workspaces out from under the connection (this connection's stale view
+        // state could then land on a DIFFERENT, now-active space). No daemon
+        // lookup must run at all any more.
         let (service, backend) = spaces_service();
         let _rx = attach_conn_1(&service, None);
 
         let layout = space_layout_as_conn_1(&service, DAEMON_ACTIVE_SPACE)
             .await
-            .expect("own-space GetLayout must succeed");
+            .expect("space-scoped GetLayout must succeed");
 
         assert_eq!(
             backend.list_spaces_calls.load(Ordering::Relaxed),
-            1,
-            "the None case must resolve the daemon-active space to answer the question"
+            0,
+            "the DaemonActive arm must never resolve the daemon-active space any more"
         );
         assert!(
-            focused_of(&layout.tabs, 2, 21),
-            "the tracked pane must be focused: the daemon-active space IS this relay's space"
+            focused_of(&layout.tabs, 2, 20),
+            "raw is_focused must survive — a hint-less relay's own-space peek is untracked"
         );
-        assert!(!focused_of(&layout.tabs, 2, 20));
+        assert!(
+            !focused_of(&layout.tabs, 2, 21),
+            "the tracked pane must NOT be marked focused: no override applies"
+        );
     }
 
     #[tokio::test]
     async fn a_hint_less_relay_treats_a_non_active_space_as_foreign() {
-        // Same `current_space == None` relay, but naming a space the daemon does
-        // NOT have active — that is somebody else's space: raw values.
+        // Same `current_space == None` relay, naming a space the daemon does NOT
+        // have active — foreign either way, before or after the fix: raw values.
         let (service, backend) = spaces_service();
         let _rx = attach_conn_1(&service, None);
 
@@ -1567,7 +1563,11 @@ mod tests {
             .await
             .expect("foreign-space GetLayout must succeed");
 
-        assert_eq!(backend.list_spaces_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            backend.list_spaces_calls.load(Ordering::Relaxed),
+            0,
+            "the DaemonActive arm never resolves a daemon lookup any more"
+        );
         assert!(
             focused_of(&layout.tabs, 2, 20),
             "raw is_focused must survive for a foreign space"
