@@ -143,6 +143,14 @@ backend_label=zellij
 [[ "${BOTH}" -eq 1 ]]  && backend_label="both (zellij+herdr)"
 
 echo "[run.sh] BIND_ADDR=${BIND_ADDR}  backend=${backend_label}"
+if [[ "${HERDR}" -eq 1 || "${BOTH}" -eq 1 ]]; then
+  # Surface the herdr release this build will install. The compose default is
+  # PINNED to the last wire-protocol-tested release (see Dockerfile) — an
+  # HERDR_VERSION from the environment overrides it, so say which one won.
+  # ("latest" silently upgrading herdr past muxrd's tested protocol is exactly
+  # how the 0.8.2/proto-20 attach breakage happened.)
+  echo "[run.sh] herdr release: ${HERDR_VERSION:-0.7.5 (pinned default)}"
+fi
 echo "[run.sh] publishing  gRPC ${BIND_ADDR}:${GRPC_PORT:-50051}  +  SSH ${BIND_ADDR}:${SSH_PORT:-2222}"
 echo "[run.sh] after boot:  ./docker/ssh.sh ${BIND_ADDR} ${SSH_PORT:-2222}  then run  muxrctl"
 echo ""
