@@ -58,7 +58,7 @@ cargo run -p muxrctl
 For the **zellij** backend, requires the matching `zellij` binary on `PATH` (the
 server pins a Zellij version and refuses to start against a different one). For the
 **herdr** backend, requires a running `herdr` instance — a separate, unmodified,
-user-installed binary (AGPL-3.0). muxrd discovers herdr's wire protocol version at
+user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at
 runtime rather than pinning one, so it works across herdr releases. muxrd
 auto-detects which backends are available and serves all of them; pass `--backend`
 / `MUXRD_BACKEND` to restrict to one.
@@ -166,4 +166,5 @@ version computation via the anchored `tag_pattern` in `cliff.toml`.
 
 ## License
 
-[MIT](LICENSE).
+[MIT](LICENSE). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
+Apache-2.0 attribution covering the portions derived from herdr's source.
