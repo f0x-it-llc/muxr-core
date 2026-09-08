@@ -2,9 +2,12 @@
 # Muxr — muxrd gRPC backend rig
 #
 # Multi-stage build:
-#   builder        — rust:1.92-alpine, static musl binaries (muxrd + muxrctl +
-#                    muxr-notify — the whole workspace)
-#   runtime        — debian:trixie-slim with full terminal tooling + zellij 0.44.3,
+#   builder        — rust:1.95-alpine, static musl binaries (muxrd + muxrctl +
+#                    muxr-notify — the whole workspace). 1.95 is the workspace's
+#                    `rust-version` floor (raised for zellij 0.45.1) and cargo
+#                    enforces it per package, so an older base image cannot build
+#                    this workspace at all
+#   runtime        — debian:trixie-slim with full terminal tooling + zellij 0.45.1,
 #                    an SSH server, muxrctl to configure/start the server, and
 #                    muxr-notify (started in-container by the entrypoint in
 #                    FCM_MODE=log, so `MUXRD_NOTIFY_RELAY_URL` has a local target
@@ -26,6 +29,15 @@
 # image is muxr-notify/Dockerfile. It only rides in THIS rig image so the rig
 # can exercise the full push-notification path end-to-end.
 #
+# ARCHITECTURE: every third-party binary this image downloads (zellij, herdr,
+# lazygit) is selected from BuildKit's automatic `TARGETARCH`, so the rig builds
+# natively on an amd64 host and on an arm64 one with nothing to configure. The
+# three upstreams do NOT agree on how to spell the ARM asset — zellij and herdr
+# publish `aarch64`, lazygit publishes `arm64` — so each download maps
+# `TARGETARCH` itself instead of sharing one token: a shared token passes on
+# amd64 and 404s only on arm64. To force the amd64 image under emulation:
+#   DOCKER_DEFAULT_PLATFORM=linux/amd64 ./docker/run.sh …
+#
 # Build context: repo root  (compose sets context: ..)
 #   docker compose -f docker/compose.yaml up --build                              # zellij (default)
 #   docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr  # herdr only
@@ -35,7 +47,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 — builder: compile the workspace (muxrd + muxrctl) as musl
 # ══════════════════════════════════════════════════════════════════════════════
-FROM rust:1.92-alpine AS builder
+FROM rust:1.95-alpine AS builder
 
 # Static-build deps (A3 working recipe):
 # - musl-dev            — libc headers for the musl native host
@@ -90,7 +102,7 @@ RUN OPENSSL_STATIC=1 PKG_CONFIG_ALL_STATIC=1 \
     cargo build --release --workspace
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Stage 2 — runtime: Debian tooling image + zellij 0.44.3 pinned (DEFAULT image)
+# Stage 2 — runtime: Debian tooling image + zellij 0.45.1 pinned (DEFAULT image)
 # ══════════════════════════════════════════════════════════════════════════════
 FROM debian:trixie-slim AS runtime
 
@@ -118,19 +130,40 @@ RUN apt-get install -y --no-install-recommends \
       cmatrix sl cowsay fortune-mod fastfetch ; \
     rm -rf /var/lib/apt/lists/*
 
-# ── Zellij PINNED v0.44.3 (the version muxrd is compiled against) ──────
-# muxrd refuses to start on any other version — do NOT change this.
-RUN curl -fsSL \
-      https://github.com/zellij-org/zellij/releases/download/v0.44.3/zellij-x86_64-unknown-linux-musl.tar.gz \
-      | tar -xz -C /usr/local/bin \
-    && chmod +x /usr/local/bin/zellij \
-    && zellij --version \
-    && zellij --version | grep -q "0.44.3" || (echo "ERROR: zellij version is not 0.44.3" && exit 1)
+# ── Zellij PINNED v0.45.1 (the version muxrd is compiled against) ──────
+# muxrd refuses to start on any other version — do NOT change this. The version
+# in the URL and the version asserted below are ONE pin in two places: moving
+# either alone ships a mismatched server or fails the build for the wrong reason.
+#
+# Architecture-aware: `TARGETARCH` is `amd64`/`arm64`, while zellij names its
+# assets after Rust target triples — hence the mapping to `x86_64`/`aarch64`.
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) zj_arch=x86_64 ;; \
+      arm64) zj_arch=aarch64 ;; \
+      *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL \
+      "https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
+      | tar -xz -C /usr/local/bin; \
+    chmod +x /usr/local/bin/zellij; \
+    zellij --version; \
+    zellij --version | grep -q "0.45.1" || { echo "ERROR: zellij version is not 0.45.1" >&2; exit 1; }
 
 # ── lazygit (release binary; not in apt) ─────────────────────────────────────
+# lazygit spells its ARM asset `arm64`, NOT `aarch64` like zellij and herdr, so
+# it maps `TARGETARCH` on its own — reusing the zellij/herdr token here would
+# build fine on amd64 and 404 only on an arm64 host.
+ARG TARGETARCH
 RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) lg_arch=x86_64 ;; \
+      arm64) lg_arch=arm64 ;; \
+      *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
     LG_VER="$(curl -fsSL https://api.github.com/repos/jesseduffield/lazygit/releases/latest | jq -r .tag_name | sed 's/^v//')"; \
-    curl -fsSL "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LG_VER}_Linux_x86_64.tar.gz" \
+    curl -fsSL "https://github.com/jesseduffield/lazygit/releases/latest/download/lazygit_${LG_VER}_linux_${lg_arch}.tar.gz" \
       | tar -xz -C /usr/local/bin lazygit; \
     lazygit --version
 
@@ -210,7 +243,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Stage 3 — runtime-herdr: the runtime image (zellij) + a pinned, UNMODIFIED herdr
 #           binary → an image carrying BOTH backends
 # ══════════════════════════════════════════════════════════════════════════════
-# Opt-in variant. Because it extends `runtime` (which already has zellij 0.44.3)
+# Opt-in variant. Because it extends `runtime` (which already has zellij 0.45.1)
 # and adds the herdr binary, this single image can run muxrd against herdr alone
 # (`BACKEND=herdr`) OR against zellij AND herdr simultaneously (`BACKEND=both`,
 # Phase 3 serve-all — the on-device multi-backend test rig). The entrypoint
@@ -218,7 +251,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # `target: runtime-herdr`, so the DEFAULT zellij rig (`target: runtime`) never
 # pulls herdr.
 #
-# AGPL-3.0 discipline: herdr is a SEPARATE, UNMODIFIED, user-installed binary that
+# Apache-2.0 discipline: herdr is a SEPARATE, UNMODIFIED, user-installed binary that
 # muxrd drives only over its public Unix sockets. We download the official upstream
 # release here for a LOCAL dev rig (not a distributed image) and never bundle into
 # the default image, modify, or redistribute herdr. muxrd remains the TLS/bearer
@@ -227,7 +260,7 @@ FROM runtime AS runtime-herdr
 
 # PINNED to the last herdr release muxrd has been TESTED against.
 #
-# 0.7.5 is the release that ships wire protocol 17 — the value recorded in
+# 0.9.0 is the release that ships wire protocol 22 — the value recorded in
 # `HERDR_MAX_TESTED_PROTOCOL` (muxrd/src/multiplexer/herdr/wire.rs). The two must
 # move together.
 #
@@ -236,28 +269,37 @@ FROM runtime AS runtime-herdr
 # this layer sits DOWNSTREAM of the muxrd binary layer, so `latest` meant any
 # unrelated muxrd rebuild silently swapped the herdr under the rig. That is
 # exactly how the rig came up on herdr 0.8.2 / protocol 20 against a muxrd whose
-# tested ceiling is 17, with nothing in the build output saying so.
+# tested ceiling was then 17, with nothing in the build output saying so.
 #
 # BUMPS MUST BE DELIBERATE: raising this version is a paired change — bump it
 # here, re-verify the wire layout against the new release, and update
 # `HERDR_MAX_TESTED_PROTOCOL` (and this comment) in the same commit. Keep
-# compose.yaml's `${HERDR_VERSION:-…}` default in step. To try another release
-# without committing to it:  --build-arg HERDR_VERSION=0.8.2
+# compose.yaml's two `${HERDR_VERSION:-…}` defaults and run.sh's banner in step.
+# To try another release without committing to it:
+#   --build-arg HERDR_VERSION=<x.y.z>
 #
 # `latest` is still accepted as an explicit opt-in and resolves to the newest
 # non-prerelease tag (herdr's `preview-*` builds are flagged as prereleases, so
 # they are correctly skipped) — an untested-by-construction rig, use knowingly.
-ARG HERDR_VERSION=0.7.5
+ARG HERDR_VERSION=0.9.0
+
+# herdr spells its ARM asset `aarch64` (like zellij, unlike lazygit).
+ARG TARGETARCH
 RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) herdr_arch=x86_64 ;; \
+      arm64) herdr_arch=aarch64 ;; \
+      *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
+    esac; \
     if [ "${HERDR_VERSION}" = "latest" ]; then \
-      resolved="$(curl -fsSL https://api.github.com/repos/ogulcancelik/herdr/releases/latest \
+      resolved="$(curl -fsSL https://api.github.com/repos/herdrdev/herdr/releases/latest \
         | jq -r .tag_name | sed 's/^v//')"; \
       [ -n "${resolved}" ] && [ "${resolved}" != "null" ]; \
     else \
       resolved="${HERDR_VERSION}"; \
     fi; \
     curl -fsSL -o /usr/local/bin/herdr \
-      "https://github.com/ogulcancelik/herdr/releases/download/v${resolved}/herdr-linux-x86_64"; \
+      "https://github.com/herdrdev/herdr/releases/download/v${resolved}/herdr-linux-${herdr_arch}"; \
     chmod +x /usr/local/bin/herdr; \
     # Sanity: the download is a real Linux ELF (curl -f already failed on 404).
     head -c 64 /usr/local/bin/herdr | grep -q ELF; \
