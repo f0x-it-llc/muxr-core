@@ -45,12 +45,12 @@ use crate::multiplexer::types::{
 };
 
 use super::api::{
-    ApiRequest, ApiResponseBody, ApiResult, HerdrServerInfo, LayoutDescription, PaneCloseParams,
-    PaneDirection, PaneFocusDirectionParams, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot,
-    PaneRenameParams, PaneSplitParams, PaneZoomMode, PaneZoomParams, PingParams, SplitDirection,
-    TabCloseParams, TabCreateParams, TabFocusParams, TabInfo, TabRenameParams,
-    WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo, WorkspaceListParams,
-    WorkspaceRenameParams,
+    ApiErrorBody, ApiRequest, ApiResponseBody, ApiResult, HerdrServerInfo, LayoutDescription,
+    PaneCloseParams, PaneDirection, PaneFocusDirectionParams, PaneInfo, PaneLayoutParams,
+    PaneLayoutSnapshot, PaneRenameParams, PaneSplitParams, PaneZoomMode, PaneZoomParams,
+    PingParams, SplitDirection, TabCloseParams, TabCreateParams, TabFocusParams, TabInfo,
+    TabRenameParams, WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo,
+    WorkspaceListParams, WorkspaceRenameParams,
 };
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 
@@ -197,12 +197,21 @@ impl HerdrControl {
     /// A herdr API-level error becomes a failed ack (not an `Err`); only transport
     /// failures propagate as `Err`. The success payload is intentionally ignored —
     /// only success/failure matters at the action boundary.
+    ///
+    /// herdr 0.9.0 added two refusal codes for a close that would take a whole
+    /// worktree group down with it: `workspace_group_close_required` from
+    /// `workspace.close` (defended against here even though
+    /// [`Self::close_workspace`] always sends `close_group: true`, so it should
+    /// not fire in practice), and `confirmation_required` from `tab.close` /
+    /// `pane.close`, which carry no equivalent flag at all. Both are recognised
+    /// and reworded — via [`worktree_group_refusal`] — so the caller learns *why*
+    /// (a worktree group) and *how to proceed* (close the space), instead of the
+    /// generic `"<code>: <message>"` every other API error gets.
     fn call_action(&self, method: &str, params: serde_json::Value) -> Result<ActionAck> {
         match self.call_raw(method, params)? {
             ApiResponseBody::Ok { .. } => Ok(ack_ok()),
-            ApiResponseBody::Err { error } => {
-                Ok(ack_err(format!("{}: {}", error.code, error.message)))
-            }
+            ApiResponseBody::Err { error } => Ok(worktree_group_refusal(&error)
+                .unwrap_or_else(|| ack_err(format!("{}: {}", error.code, error.message)))),
         }
     }
 
@@ -267,11 +276,21 @@ impl HerdrControl {
     }
 
     /// `workspace.close`.
+    ///
+    /// Always requests a **group** close (`close_group: true`). herdr 0.9.0
+    /// refuses to close a worktree-group primary workspace without this flag —
+    /// defaulting to `false`, i.e. close just this workspace and leave the rest
+    /// of the group open — but muxrd's `CloseSpace` is an explicit, authenticated
+    /// mutating RPC over one workspace the caller named, so group intent is
+    /// implied by the call: closing the primary and silently leaving its group
+    /// open would be the more surprising outcome. Harmless when `workspace_id`
+    /// is not a worktree-group primary — herdr ignores the flag then.
     pub fn close_workspace(&self, workspace_id: &str) -> Result<ActionAck> {
         let params = Self::to_params(
             "workspace.close",
             WorkspaceCloseParams {
                 workspace_id: workspace_id.to_string(),
+                close_group: true,
             },
         )?;
         self.call_action("workspace.close", params)
@@ -697,6 +716,33 @@ fn unexpected(method: &str, result: &ApiResult) -> anyhow::Error {
     anyhow!("herdr {method} returned unexpected result: {result:?}")
 }
 
+/// Reword herdr's two worktree-group-close refusal codes (new in 0.9.0) into an
+/// [`ActionAck`] that names the cause and the fix, or `None` for any other error
+/// code so [`HerdrControl::call_action`] falls back to the generic
+/// `"<code>: <message>"` shape.
+fn worktree_group_refusal(error: &ApiErrorBody) -> Option<ActionAck> {
+    match error.code.as_str() {
+        // `workspace.close` without `close_group` on a worktree-group primary.
+        // `HerdrControl::close_workspace` always sends `close_group: true`, so
+        // this is defence-in-depth rather than an expected path.
+        "workspace_group_close_required" => Some(ack_err(format!(
+            "closing this workspace would leave its worktree group open — close it \
+             as a group instead ({})",
+            error.message
+        ))),
+        // `tab.close` / `pane.close` on the last tab/pane of a worktree-group
+        // primary. Neither method has a flag to override this — closing the
+        // *space* (workspace.close, which HerdrControl always group-closes) is
+        // the only way through.
+        "confirmation_required" => Some(ack_err(format!(
+            "this would close a worktree group — close the space instead of just \
+             this tab or pane ({})",
+            error.message
+        ))),
+        _ => None,
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -972,5 +1018,178 @@ mod tests {
     #[allow(dead_code)]
     fn _agent_status_is_reachable() -> AgentStatus {
         AgentStatus::Idle
+    }
+
+    // ── worktree-group close refusals (herdr 0.9.0) ───────────────────────────
+    //
+    // These drive a real `HerdrControl` against a one-shot fake herdr JSON-API
+    // server on a throwaway Unix socket — the only way to prove what actually
+    // goes out on the wire (Change One) and how a canned refusal comes back
+    // (Change Two) without a live herdr instance.
+
+    use std::os::unix::net::UnixListener;
+    use std::sync::atomic::AtomicUsize;
+
+    fn unique_socket_path(tag: &str) -> PathBuf {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "mxr_hr_ctl_{tag}_{}_{nanos}_{n}.sock",
+            std::process::id()
+        ))
+    }
+
+    /// Spawn a one-shot fake herdr JSON-API server: bind, accept a single
+    /// connection, read one request line, reply with `response_json` (a bare
+    /// JSON object — the trailing newline is added here), then hand the raw
+    /// request line back to the caller for inspection.
+    fn fake_herdr_once(
+        sock: &std::path::Path,
+        response_json: &str,
+    ) -> std::thread::JoinHandle<String> {
+        let listener = UnixListener::bind(sock).expect("bind fake herdr socket");
+        let mut response = response_json.to_string();
+        response.push('\n');
+        std::thread::spawn(move || {
+            let (conn, _) = listener.accept().expect("accept fake herdr connection");
+            let mut reader = BufReader::new(&conn);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read request line");
+            (&conn)
+                .write_all(response.as_bytes())
+                .expect("write fake herdr response");
+            line
+        })
+    }
+
+    fn control_over(sock: &std::path::Path) -> HerdrControl {
+        HerdrControl::new(
+            sock.to_path_buf(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        )
+    }
+
+    /// Change One: `close_workspace` must actually put `close_group: true` on
+    /// the wire, not just carry it in the Rust struct.
+    #[test]
+    fn close_workspace_sends_close_group_true_on_the_wire() {
+        let sock = unique_socket_path("wsclose");
+        let server = fake_herdr_once(&sock, r#"{"id":"muxrd-1","result":{"type":"ok"}}"#);
+        let control = control_over(&sock);
+
+        let ack = control
+            .close_workspace("ws-1")
+            .expect("close_workspace must round-trip over the fake socket");
+        assert!(ack.ok);
+
+        let sent = server.join().expect("fake server thread must not panic");
+        let req: serde_json::Value =
+            serde_json::from_str(sent.trim_end()).expect("sent line must be JSON");
+        assert_eq!(req["method"], "workspace.close");
+        assert_eq!(req["params"]["workspace_id"], "ws-1");
+        assert_eq!(req["params"]["close_group"], true);
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Change Two: `workspace_group_close_required` (the workspace.close-side
+    /// refusal, defended against even though `close_workspace` always sends the
+    /// flag) is surfaced as a distinct, worktree-group-naming refusal rather than
+    /// a bare `"<code>: <message>"`.
+    #[test]
+    fn workspace_group_close_required_is_surfaced_distinctly() {
+        let sock = unique_socket_path("wsgroup");
+        let _server = fake_herdr_once(
+            &sock,
+            r#"{"id":"muxrd-1","error":{"code":"workspace_group_close_required","message":"workspace has linked worktree workspaces; use --group (close_group=true in the API) to close the group"}}"#,
+        );
+        let control = control_over(&sock);
+
+        let ack = control
+            .close_workspace("ws-1")
+            .expect("a herdr API error is a failed ack, not a transport Err");
+        assert!(!ack.ok);
+        let msg = ack.error.expect("refusal must carry a message");
+        assert!(msg.contains("worktree group"), "message: {msg}");
+        assert!(msg.to_lowercase().contains("group"), "message: {msg}");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Change Two: `confirmation_required` from `tab.close` — closing the last
+    /// tab of a worktree-group primary — is surfaced distinctly, naming the
+    /// worktree-group cause and pointing at closing the space.
+    #[test]
+    fn confirmation_required_on_tab_close_is_surfaced_distinctly() {
+        let sock = unique_socket_path("tabclose");
+        let _server = fake_herdr_once(
+            &sock,
+            r#"{"id":"muxrd-1","error":{"code":"confirmation_required","message":"closing this tab would close a worktree group"}}"#,
+        );
+        let panes = Arc::new(HerdrPaneRegistry::new());
+        let tabs = Arc::new(HerdrTabRegistry::new());
+        let tab_id = tabs.assign_or_get("tab-1");
+        let control = HerdrControl::new(sock.clone(), panes, tabs);
+
+        let ack = control
+            .close_tab(tab_id)
+            .expect("a herdr API error is a failed ack, not a transport Err");
+        assert!(!ack.ok);
+        let msg = ack.error.expect("refusal must carry a message");
+        assert!(msg.contains("worktree group"), "message: {msg}");
+        assert!(msg.to_lowercase().contains("space"), "message: {msg}");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Change Two: `confirmation_required` from `pane.close` — closing the last
+    /// pane of a worktree-group primary — is surfaced distinctly, naming the
+    /// worktree-group cause and pointing at closing the space.
+    #[test]
+    fn confirmation_required_on_pane_close_is_surfaced_distinctly() {
+        let sock = unique_socket_path("paneclose");
+        let _server = fake_herdr_once(
+            &sock,
+            r#"{"id":"muxrd-1","error":{"code":"confirmation_required","message":"closing this pane would close a worktree group"}}"#,
+        );
+        let panes = Arc::new(HerdrPaneRegistry::new());
+        let pane_id = panes.assign_or_get("pane-1", "term-1");
+        let tabs = Arc::new(HerdrTabRegistry::new());
+        let control = HerdrControl::new(sock.clone(), panes, tabs);
+
+        let ack = control
+            .close_pane(pane_id)
+            .expect("a herdr API error is a failed ack, not a transport Err");
+        assert!(!ack.ok);
+        let msg = ack.error.expect("refusal must carry a message");
+        assert!(msg.contains("worktree group"), "message: {msg}");
+        assert!(msg.to_lowercase().contains("space"), "message: {msg}");
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A plain, unrelated herdr API error must still fall back to the generic
+    /// `"<code>: <message>"` shape — the two new codes are the only ones reworded.
+    #[test]
+    fn unrelated_error_code_keeps_the_generic_shape() {
+        let sock = unique_socket_path("plainerr");
+        let _server = fake_herdr_once(
+            &sock,
+            r#"{"id":"muxrd-1","error":{"code":"not_found","message":"workspace not found"}}"#,
+        );
+        let control = control_over(&sock);
+
+        let ack = control
+            .close_workspace("ws-missing")
+            .expect("a herdr API error is a failed ack, not a transport Err");
+        assert!(!ack.ok);
+        assert_eq!(ack.error.as_deref(), Some("not_found: workspace not found"));
+
+        let _ = std::fs::remove_file(&sock);
     }
 }
