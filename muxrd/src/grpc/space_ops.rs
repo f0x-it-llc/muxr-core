@@ -1119,7 +1119,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {

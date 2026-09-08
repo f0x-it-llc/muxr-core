@@ -174,20 +174,7 @@ impl HerdrBackend {
     /// manufacture a duplicate label, so the ambiguous case only arises from
     /// out-of-band herdr usage; we fail closed when it does.
     fn workspace_id_for(&self, session: &str) -> Result<String> {
-        let mut matching = self
-            .control
-            .list_workspaces()?
-            .into_iter()
-            .filter(|w| w.label == session);
-        let first = matching
-            .next()
-            .ok_or_else(|| anyhow!("herdr: no workspace with label '{session}'"))?;
-        if matching.next().is_some() {
-            return Err(anyhow!(
-                "herdr: ambiguous session: multiple herdr workspaces labeled '{session}'"
-            ));
-        }
-        Ok(first.workspace_id)
+        workspace_id_in(&self.control.list_workspaces()?, session)
     }
 
     /// The daemon's **active (focused)** workspace id, falling back to the **first
@@ -267,6 +254,35 @@ fn space_from_workspace(w: WorkspaceInfo) -> SpaceSnapshot {
 /// An id that names no listed workspace answers `[space_id]`: the close itself
 /// will fail with `workspace_not_found`, and claiming a larger removal set for an
 /// id that does not exist would be a worse guess than the honest minimum.
+/// Would killing one session leave the daemon with no herdr space at all?
+///
+/// The KillSession counterpart of `space_ops::would_close_last_space`. A kill
+/// resolves to exactly one workspace (this path never group-closes), so a plain
+/// cardinality test is sufficient here — unlike the CloseSpace group path, which
+/// must reason about the whole removal set.
+fn would_kill_last_space(count: usize) -> bool {
+    count <= 1
+}
+
+/// Resolve the workspace id for a session label within an ALREADY-FETCHED listing.
+///
+/// Split out of [`HerdrBackend::workspace_id_for`] so a caller that also needs the
+/// workspace *cardinality* can take both from ONE `workspace.list` snapshot. Two
+/// values read from two separate listings can disagree if a close lands between
+/// them, and a guard comparing them across that gap is weaker than it looks.
+fn workspace_id_in(workspaces: &[WorkspaceInfo], session: &str) -> Result<String> {
+    let mut matching = workspaces.iter().filter(|w| w.label == session);
+    let first = matching
+        .next()
+        .ok_or_else(|| anyhow!("herdr: no workspace with label '{session}'"))?;
+    if matching.next().is_some() {
+        return Err(anyhow!(
+            "herdr: ambiguous session: multiple herdr workspaces labeled '{session}'"
+        ));
+    }
+    Ok(first.workspace_id.clone())
+}
+
 fn spaces_removed_by_workspace_close(
     workspaces: &[WorkspaceInfo],
     space_id: &str,
@@ -411,33 +427,48 @@ impl MuxBackend for HerdrBackend {
         self.control.create_workspace(Some(name.to_string()))
     }
 
-    fn kill_session(&self, session: &str) -> Result<()> {
+    fn kill_session(&self, session: &str) -> Result<ActionAck> {
         // Decision 5 (S-M3): the singular herdr session is not killable — there is
         // no session object to destroy (its workspaces are the managed unit, closed
-        // via CloseSpace). Reject cleanly rather than resolving the sentinel to a
-        // workspace and returning the opaque "no workspace with label 'herdr'".
+        // via CloseSpace). A clean `ok:false` ack beats the opaque "no workspace with
+        // label 'herdr'" that resolving the sentinel would otherwise produce, and it
+        // matches `rename_session`'s handling of the same sentinel.
         // The gRPC handler additionally short-circuits this to `invalid_argument`
         // before reaching the backend; this guard is defence-in-depth (and covers
         // the legacy bare-name path that the handler's collapsed-session check misses).
         if session == HERDR_SESSION {
-            return Err(anyhow!(HERDR_SESSION_IMMUTABLE_MSG));
+            return Ok(ActionAck {
+                ok: false,
+                error: Some(HERDR_SESSION_IMMUTABLE_MSG.to_owned()),
+                info: None,
+            });
         }
-        let workspace_id = self.workspace_id_for(session)?;
+        // ONE `workspace.list` serves BOTH the id resolution and the cardinality
+        // guard below. Reading them from two separate listings would let a close
+        // landing in between defeat the guard in the unsafe direction.
+        let workspaces = self.control.list_workspaces()?;
+        let workspace_id = workspace_id_in(&workspaces, session)?;
+        // Killing the daemon's last workspace leaves it spaceless — the state
+        // CloseSpace's own last-space guard exists to prevent. KillSession reaches
+        // the same `workspace.close` through an older entry point, so it needs the
+        // same refusal; without it the zero-space guarantee is only half true.
+        if would_kill_last_space(workspaces.len()) {
+            return Ok(ActionAck {
+                ok: false,
+                error: Some(format!(
+                    "cannot kill '{session}': it is the last herdr space on this \
+                     daemon, and closing it would leave none"
+                )),
+                info: None,
+            });
+        }
         // NEVER group-close here. A KillSession names one session, which resolves to
         // exactly one workspace; taking that workspace's sibling worktree workspaces
-        // down with it would destroy sessions the caller never named, and this path
-        // has no cardinality guard of any kind (unlike CloseSpace). If the target is
-        // a worktree-group primary, herdr's `workspace_group_close_required` refusal
-        // is the correct outcome and propagates out of here as an error.
-        let ack = self.control.close_workspace(&workspace_id, false)?;
-        if ack.ok {
-            Ok(())
-        } else {
-            Err(anyhow!(
-                "herdr workspace.close failed: {}",
-                ack.error.unwrap_or_else(|| "unknown error".into())
-            ))
-        }
+        // down with it would destroy sessions the caller never named. If the target
+        // is a worktree-group primary, herdr's `workspace_group_close_required`
+        // refusal is the correct outcome and now reaches the caller as a failed ack
+        // rather than collapsing into a transport error.
+        self.control.close_workspace(&workspace_id, false)
     }
 
     fn rename_session(&self, session: &str, new_name: String) -> Result<ActionAck> {
@@ -1091,17 +1122,58 @@ mod tests {
     #[test]
     fn kill_session_rejects_the_sentinel_cleanly() {
         // The backend (nonexistent socket) must reject the sentinel WITHOUT any
-        // I/O — no workspace.list round-trip — and with a clean message, not the
-        // opaque "no workspace with label 'herdr'" that workspace_id_for produces.
+        // I/O — no workspace.list round-trip — and as a clean `ok:false` ack rather
+        // than an Err, so the refusal reaches the client as an unsuccessful
+        // acknowledgement instead of a transport error. Mirrors rename_session.
         let b = backend();
-        let err = b
+        let ack = b
             .kill_session(HERDR_SESSION)
-            .expect_err("the herdr session must not be killable");
-        let msg = format!("{err:#}");
+            .expect("sentinel kill must be Ok(ack), not Err");
+        assert!(!ack.ok, "killing the herdr session must report ok:false");
+        let msg = ack.error.as_deref().unwrap_or_default();
         assert_eq!(msg, HERDR_SESSION_IMMUTABLE_MSG);
         assert!(
             !msg.contains("no workspace with label"),
             "must not leak the opaque workspace-not-found error: {msg}"
+        );
+    }
+
+    #[test]
+    fn kill_session_refuses_to_remove_the_last_space() {
+        // The KillSession counterpart of CloseSpace's S-M1 guard. Killing the sole
+        // remaining workspace would leave the daemon spaceless, which is exactly
+        // what the CloseSpace guard prevents; reaching the same `workspace.close`
+        // through KillSession must not bypass it.
+        assert!(would_kill_last_space(0), "zero spaces: refuse");
+        assert!(would_kill_last_space(1), "the last space: refuse");
+        assert!(!would_kill_last_space(2), "two spaces: safe to kill one");
+        assert!(!would_kill_last_space(7));
+    }
+
+    #[test]
+    fn workspace_id_in_resolves_ambiguity_and_absence_without_io() {
+        // `kill_session` takes the id and the cardinality from ONE listing, so the
+        // resolution has to work against an already-fetched slice. Not-found and
+        // ambiguous both stay Err: they are caller/state errors, not refusals.
+        let list = vec![
+            workspace("w1", "alpha", true),
+            workspace("w2", "beta", false),
+            workspace("w3", "beta", false),
+        ];
+
+        assert_eq!(
+            workspace_id_in(&list, "alpha").expect("unique label resolves"),
+            "w1"
+        );
+        let err = format!("{:#}", workspace_id_in(&list, "beta").unwrap_err());
+        assert!(
+            err.contains("ambiguous"),
+            "duplicate labels must fail: {err}"
+        );
+        let err = format!("{:#}", workspace_id_in(&list, "nope").unwrap_err());
+        assert!(
+            err.contains("no workspace with label"),
+            "absent label must fail: {err}"
         );
     }
 

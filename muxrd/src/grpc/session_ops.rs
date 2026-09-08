@@ -296,18 +296,13 @@ impl MuxrService {
         }
         let (backend, session) = self.resolve_session(&req.session)?;
         log::info!("KillSession: session='{session}'");
-        tokio::task::spawn_blocking(move || backend.kill_session(&session))
-            .await
-            .map_err(|e| Status::internal(format!("KillSession task panicked: {e}")))?
-            .map_err(|e| {
-                log::warn!("KillSession: failed: {e:#}");
-                Status::internal(format!("KillSession: {e:#}"))
-            })?;
-        Ok(Response::new(ProtoAck {
-            ok: true,
-            error: String::new(),
-            info: String::new(),
-        }))
+        // Routed through `run_action` like every other action RPC: a backend that
+        // DECLINES the kill (herdr refusing a worktree-group primary, or the last
+        // remaining space) answers `Ok(Ack{ok:false})`, and only an IPC or join
+        // failure becomes a `Status`. Collapsing a refusal into `Status::internal`
+        // would contradict the error-handling contract and mis-report a deliberate
+        // refusal as a reachable bug.
+        run_action("KillSession", move || backend.kill_session(&session)).await
     }
 
     /// Create a new detached session. MUTATING (read-only rejected).
@@ -438,7 +433,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
@@ -528,7 +523,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
@@ -619,7 +614,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
@@ -835,7 +830,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
@@ -934,7 +929,7 @@ mod tests {
         fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
-        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
             unimplemented!()
         }
         fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {

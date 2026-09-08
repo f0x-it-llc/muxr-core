@@ -181,7 +181,12 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     fn create_session(&self, name: &str, layout: Option<String>) -> anyhow::Result<ActionAck>;
 
     /// Kill a session.
-    fn kill_session(&self, session: &str) -> anyhow::Result<()>;
+    ///
+    /// Returns a **failed** [`ActionAck`] when the backend DECLINES the kill — a
+    /// logical refusal, such as herdr refusing to close a worktree-group primary
+    /// or to remove the last remaining space. `Err` is reserved for IPC and join
+    /// failures. A refusal must never reach the client as a transport error.
+    fn kill_session(&self, session: &str) -> anyhow::Result<ActionAck>;
 
     /// Rename a session.
     fn rename_session(&self, session: &str, new_name: String) -> anyhow::Result<ActionAck>;
