@@ -255,9 +255,9 @@ fn parse_version_standard() {
             .to_string()
     }
 
-    assert_eq!(parse("zellij 0.44.3"), "0.44.3");
-    assert_eq!(parse("zellij 0.44.3\n"), "0.44.3");
-    assert_eq!(parse("  zellij   0.44.3  "), "0.44.3");
+    assert_eq!(parse("zellij 0.45.1"), "0.45.1");
+    assert_eq!(parse("zellij 0.45.1\n"), "0.45.1");
+    assert_eq!(parse("  zellij   0.45.1  "), "0.45.1");
     assert_eq!(parse(""), "");
     // Unexpected single-token format → last token is the whole string.
     assert_eq!(parse("zellij"), "zellij");

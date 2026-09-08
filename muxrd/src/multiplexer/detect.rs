@@ -8,6 +8,13 @@
 //! (T03 wires it into `cmd_start`). [`probe_zellij`] is also called directly
 //! by the startup version check in `bin/muxrd.rs` so the two code paths share
 //! the same algorithm without duplication.
+//!
+//! **Containment note:** `multiplexer::zellij` describes itself as the only
+//! file in this module importing `zellij_utils`. This file is the one
+//! deliberate exception: [`probe_zellij`] reads `zellij_utils::consts::VERSION`
+//! to compare the linked crate version against the separately installed
+//! `zellij` binary, which is a startup concern the zellij backend itself has
+//! no need to see.
 
 use anyhow::{Result, bail};
 
@@ -32,7 +39,7 @@ const VERSION_CHECK_TIMEOUT: std::time::Duration = std::time::Duration::from_sec
 ///   `zellij` binary is present on PATH — version is not checked.
 /// - Otherwise: the `zellij` binary is found on PATH, `zellij --version`
 ///   completes within 5 s, and its version matches the linked
-///   `zellij_utils::consts::VERSION` ("0.44.3").
+///   `zellij_utils::consts::VERSION` ("0.45.1").
 ///
 /// All failures are logged at `debug` level and reduce to `false`. Never
 /// panics or propagates errors — callers receive a boolean verdict only.
@@ -123,7 +130,7 @@ pub fn probe_zellij() -> bool {
 
 /// Parse the version string out of `zellij --version` output.
 ///
-/// `"zellij 0.44.3\n"` → `"0.44.3"`. Returns `""` when unparseable.
+/// `"zellij 0.45.1\n"` → `"0.45.1"`. Returns `""` when unparseable.
 ///
 /// Split out as a private pure function so the unit test exercises it directly
 /// without needing a live process.
@@ -196,7 +203,7 @@ pub fn probe_herdr() -> bool {
 ///   its probe passes, or `Err("requested backend {kind} not available: …")`.
 /// - `None` — probe all backends in declaration order (zellij first, then
 ///   herdr); return the subset that passes.  If **none** pass, returns
-///   `Err("No usable backend: install zellij 0.44.3 or start herdr")`.
+///   `Err("No usable backend: install zellij 0.45.1 or start herdr")`.
 ///
 /// ### Thread safety
 ///
@@ -225,7 +232,7 @@ pub fn detect_backends(override_kind: Option<BackendKind>) -> Result<Vec<Backend
                 available.push(BackendKind::Herdr);
             }
             if available.is_empty() {
-                bail!("No usable backend: install zellij 0.44.3 or start herdr");
+                bail!("No usable backend: install zellij 0.45.1 or start herdr");
             }
             Ok(available)
         }
@@ -243,8 +250,8 @@ mod tests {
 
     #[test]
     fn parse_version_extracts_semver_from_typical_output() {
-        assert_eq!(parse_zellij_version("zellij 0.44.3\n"), "0.44.3");
-        assert_eq!(parse_zellij_version("zellij 0.44.3"), "0.44.3");
+        assert_eq!(parse_zellij_version("zellij 0.45.1\n"), "0.45.1");
+        assert_eq!(parse_zellij_version("zellij 0.45.1"), "0.45.1");
     }
 
     #[test]

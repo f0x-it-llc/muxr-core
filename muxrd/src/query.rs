@@ -10,7 +10,7 @@
 //! without holding a long-lived attachment.
 //!
 //! **Verified on the dev host (C1):** A bare `connect → Action(is_cli_client=true) →
-//! recv` does NOT receive a Log reply in 0.44.3 — the server never delivers Log
+//! recv` does NOT receive a Log reply in 0.45.1 — the server never delivers Log
 //! to a client that has not completed the `AttachClient` handshake.  We therefore
 //! do a minimal attach first (invisible `is_web_client=false` attach) before
 //! sending the query action, then drain messages until `Log` or a terminal
@@ -35,11 +35,13 @@ use interprocess::local_socket::prelude::*;
 
 /// Neutral-large terminal size for ephemeral query/action AttachClients (FA).
 ///
-/// zellij sizes the shared session to the MINIMUM across all attached clients.
-/// Ephemeral query/action clients must therefore attach at a size LARGER than any
-/// real client so they never become the minimum and shrink the session (which, in
-/// single-pane mode, would shrink the fullscreened pane the phone sees). Modest
-/// enough to avoid a giant grid allocation; larger than any phone viewport.
+/// zellij sizes a tab from the MINIMUM across the clients currently focused on
+/// that tab (a per-tab minimum since 0.45.1, no longer session-wide). Ephemeral
+/// query/action clients must therefore attach at a size LARGER than any real
+/// client so they never become that minimum and shrink the tab they land on
+/// (which, in single-pane mode, would shrink the fullscreened pane the phone
+/// sees). Modest enough to avoid a giant grid allocation; larger than any phone
+/// viewport.
 pub const NEUTRAL_ATTACH_ROWS: u16 = 100;
 pub const NEUTRAL_ATTACH_COLS: u16 = 320;
 
@@ -69,7 +71,7 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 /// Issue a single query [`Action`] to a named session and return the `Log` lines.
 ///
 /// Opens a short-lived IPC connection, performs a minimal `AttachClient`
-/// handshake (required in 0.44.3), sends the action with `is_cli_client=true`,
+/// handshake (required in 0.45.1), sends the action with `is_cli_client=true`,
 /// drains messages until `ServerToClientMsg::Log` (success) or a terminal
 /// condition (error).
 ///
@@ -117,17 +119,18 @@ pub fn query_session(session: &str, action: Action) -> Result<Vec<String>> {
     let mut receiver = sender.get_receiver::<ServerToClientMsg>();
 
     // ── Minimal AttachClient handshake ───────────────────────────────────────
-    // In zellij 0.44.3 the server does not route a Log reply to clients that
+    // In zellij 0.45.1 the server does not route a Log reply to clients that
     // have not completed the attach handshake.  We send a minimal invisible
     // attach (web_client=false) to register with the router, then immediately
     // send the query action.
     //
-    // FA: attach at a NEUTRAL-LARGE size, NOT 24×80. zellij sizes the shared
-    // session to the MINIMUM terminal size across all attached clients; a 24×80
-    // ephemeral query client would transiently shrink the session (and, in
-    // single-pane mode, the fullscreened pane tracks it → the phone sees a tiny
-    // pane). A large size keeps this transient client from ever becoming the
-    // minimum, so it never perturbs the real client's geometry.
+    // FA: attach at a NEUTRAL-LARGE size, NOT 24×80. zellij sizes a tab from the
+    // MINIMUM terminal size across the clients currently focused on that tab
+    // (per-tab since 0.45.1); a 24×80 ephemeral query client would transiently
+    // shrink the tab it lands on (and, in single-pane mode, the fullscreened
+    // pane tracks it → the phone sees a tiny pane). A large size keeps this
+    // transient client from ever becoming that minimum, so it never perturbs
+    // the real client's geometry.
     use zellij_utils::input::cli_assets::CliAssets;
     let cli_assets = CliAssets {
         terminal_window_size: Size {
@@ -250,14 +253,17 @@ pub fn query_list_panes_json(session: &str) -> Result<String> {
 ///
 /// Used by the relay for **read-only attaches** (review round-2 Major A): a
 /// read-only observer must attach with the session's *current* size, never its
-/// own (possibly tiny) client size, because zellij resizes the shared session
-/// to the **minimum** terminal size across all attached clients on every
-/// `AttachClient` (`zellij-server/src/lib.rs::min_client_terminal_size`).  A
-/// small read-only client would otherwise shrink the writer's session.
+/// own (possibly tiny) client size. `zellij-server/src/lib.rs`'s
+/// `min_client_terminal_size`, which used to resize the whole session to the
+/// minimum across every attached client, was deleted in 0.45.1: resizing is
+/// now recomputed per tab, from only the clients currently focused on that
+/// tab. A small read-only client would otherwise shrink the writer's tab.
 ///
 /// Returns `(rows, cols)` taken from the **active** tab's
 /// `display_area_rows`/`display_area_columns` (falling back to the first tab if
-/// none is marked active).  Blocking — call from `spawn_blocking`.
+/// none is marked active) — reading per-tab dimensions is now more correct than
+/// before, since tabs can legitimately differ in size. Blocking — call from
+/// `spawn_blocking`.
 pub fn query_session_size(session: &str) -> Result<(u16, u16)> {
     let json = query_list_tabs_json(session)
         .with_context(|| format!("query_session_size: session '{session}'"))?;

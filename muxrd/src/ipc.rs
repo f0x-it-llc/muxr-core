@@ -116,14 +116,16 @@ impl AttachHandle {
     /// Sends the `AttachClient` handshake message before returning.
     ///
     /// **Security (review round-2 Major A — read-only attach must not drive
-    /// shared session geometry):** zellij resizes the shared session to the
-    /// **minimum** terminal size across *all* attached clients on every
-    /// `AttachClient` handshake (`zellij-server/src/lib.rs`).  The caller is
-    /// therefore responsible for passing a size that won't shrink writers for a
-    /// read-only attach: the relay resolves the session's *current* size (via
-    /// [`crate::query::query_session_size`]) and passes that here, rather than
-    /// the read-only client's own (possibly tiny) dimensions.  This function
-    /// just sends whatever size it's given — the gate lives in `attach_relay`.
+    /// shared session geometry):** on every `AttachClient` handshake zellij
+    /// recomputes the size of the tab the client lands on from only the
+    /// clients currently focused on that tab (`zellij-server/src/lib.rs`) — a
+    /// per-tab minimum, not a session-wide one since 0.45.1.  The caller is
+    /// therefore responsible for passing a size that won't shrink writers on
+    /// that tab for a read-only attach: the relay resolves the session's
+    /// *current* size (via [`crate::query::query_session_size`]) and passes
+    /// that here, rather than the read-only client's own (possibly tiny)
+    /// dimensions.  This function just sends whatever size it's given — the
+    /// gate lives in `attach_relay`.
     pub fn open(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
         // Defence in depth (Major G): never build a socket path from an
         // unvalidated name, even if a caller forgot to gate it.

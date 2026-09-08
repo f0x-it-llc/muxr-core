@@ -43,8 +43,7 @@ path = "examples/session_client.rs"
 [dependencies]
 # Zellij IPC / utils — exact version so structs match the running server.
 # web_server_capability enables web_authentication_tokens (bundled SQLite via rusqlite).
-zellij-client = { version = "0.44.3", default-features = false }
-zellij-utils  = { version = "0.44.3", default-features = false, features = ["web_server_capability"] }
+zellij-utils = { version = "0.45.1", default-features = false, features = ["web_server_capability"] }
 
 # gRPC stack — tls-ring adds rustls/ring-backed TLS support to tonic transport.
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }

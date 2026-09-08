@@ -1,7 +1,7 @@
 //! client_count — per-session count of mobile clients attached **through
 //! muxrd** (Phase F).
 //!
-//! zellij 0.44.3 exposes no per-session connected-client count (its
+//! zellij 0.45.1 exposes no per-session connected-client count (its
 //! `get_sessions()` returns only name + age), so we count what muxrd
 //! itself knows: the number of live `AttachTerminal` relays per session.
 //!
