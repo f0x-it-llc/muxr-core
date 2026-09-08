@@ -423,6 +423,12 @@ async fn run_notifier<T: RelayTransport>(
                     Ok(MuxEvent::AgentStatusChanged(ev)) => {
                         handle_event(&ev, &verbosity, &mut debouncer, &store, &transport).await;
                     }
+                    Ok(MuxEvent::LayoutChanged(_)) => {
+                        // Not a notification source. This notifier pushes agent
+                        // *attention* events ("your agent needs you"); a pane
+                        // layout moving is neither attention-worthy nor
+                        // something a push payload could usefully carry.
+                    }
                     Err(RecvError::Lagged(n)) => {
                         log::warn!("notify: event bus lagged, dropped {n} event(s)");
                     }

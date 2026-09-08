@@ -6,6 +6,10 @@
 //! is the shared foundation for the notifications notifier (task 05) and the
 //! future agents screen — both are just *consumers* of this same bus.
 //!
+//! Two event families ride it today: [`AgentStatusChanged`], which a consumer may
+//! act on directly because a status is a level, and [`LayoutChanged`], which is
+//! purely a hint to re-query. Neither is guaranteed delivery.
+//!
 //! ## Design notes
 //!
 //! - The types here are **neutral**: they carry muxrd's own numeric pane ids
@@ -26,9 +30,10 @@
 use tokio::sync::broadcast;
 
 /// Broadcast-bus capacity. Agent-status transitions are infrequent (human-paced
-/// agent activity), so 256 buffered events is generous headroom; a consumer that
-/// still lags simply observes [`Lagged`](tokio::sync::broadcast::error::RecvError::Lagged)
-/// and reconciles from the next event / resync.
+/// agent activity) and layout changes are paced by the same human hands, so 256
+/// buffered events is generous headroom; a consumer that still lags simply
+/// observes [`Lagged`](tokio::sync::broadcast::error::RecvError::Lagged) and
+/// reconciles from the next event / resync / re-query.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
 /// High-level agent activity status for a pane — muxrd's neutral mirror of
@@ -69,15 +74,37 @@ pub struct AgentStatusChanged {
     pub synthetic: bool,
 }
 
+/// A tab's pane layout changed — panes split, closed, zoomed, focused or
+/// resized.
+///
+/// This is a **hint that something moved**, not a delivery of what it moved to:
+/// the bus is lossy and bounded (see [`EVENT_BUS_CAPACITY`]), so a consumer that
+/// needs the new structure re-queries the layout rather than reconstructing it
+/// from a stream of these. That is also why the event stays this small — there
+/// is nothing here to tempt a consumer into trusting it as state.
+///
+/// Modelled on [`AgentStatusChanged`]: the herdr `workspace_id` is carried raw
+/// for routing/labelling, and the tab is muxrd's neutral registry-translated
+/// `u64` so no `herdr::api` shape crosses this seam.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LayoutChanged {
+    /// herdr workspace id (raw opaque string) whose tab changed.
+    pub workspace_id: String,
+    /// Neutral tab id (registry-translated from herdr's opaque `tab_id`).
+    pub tab: u64,
+}
+
 /// A neutral event published on the internal bus.
 ///
-/// Currently a single variant; kept as an enum so the notifier / agents-screen
-/// consumers can grow to further herdr event families
-/// (`pane.exited`, `workspace.closed`, …) without a breaking bus-type change.
+/// An enum so the notifier / agents-screen consumers can grow to further herdr
+/// event families (`pane.exited`, `workspace.closed`, …) without a breaking
+/// bus-type change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MuxEvent {
     /// A pane's agent status changed (or was re-observed on resync).
     AgentStatusChanged(AgentStatusChanged),
+    /// A tab's pane layout changed. Advisory — see [`LayoutChanged`].
+    LayoutChanged(LayoutChanged),
 }
 
 /// The producer half of the internal event bus. The event kernel holds one and
@@ -102,6 +129,30 @@ mod tests {
         });
         tx.send(ev.clone()).expect("a subscriber exists");
         assert_eq!(rx.try_recv().expect("one buffered event"), ev);
+    }
+
+    #[test]
+    fn bus_carries_layout_changes_alongside_agent_status() {
+        // The layout hint must ride the SAME bus as agent status — a second
+        // channel would give consumers two things to poll.
+        let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let mut rx = tx.subscribe();
+        let layout = MuxEvent::LayoutChanged(LayoutChanged {
+            workspace_id: "ws-1".into(),
+            tab: 7,
+        });
+        let status = MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            pane: 2,
+            workspace_id: "ws-1".into(),
+            workspace_name: None,
+            status: AgentStatus::Working,
+            title: None,
+            synthetic: false,
+        });
+        tx.send(layout.clone()).expect("a subscriber exists");
+        tx.send(status.clone()).expect("a subscriber exists");
+        assert_eq!(rx.try_recv().expect("layout event"), layout);
+        assert_eq!(rx.try_recv().expect("status event"), status);
     }
 
     #[test]
