@@ -200,8 +200,8 @@ RUN MUXR_INSTALL_DIR=/usr/local/bin bash -c \
     && rm -f /usr/local/bin/muxrctl \
     && muxrd --version
 
-# ── nvim wrapper: point neovim's config resolution at the read-only, baked
-# NvChad install instead of $XDG_CONFIG_HOME ─────────────────────────────────
+# ── nvim wrapper: point neovim's config AND data resolution at the read-only,
+# baked NvChad install instead of $XDG_CONFIG_HOME / $XDG_DATA_HOME ──────────
 # $XDG_CONFIG_HOME is tmpfs (/run/demo/.config, wiped every restart — see the
 # ENV block below), so NvChad's config can't live there: it would need a full
 # `Lazy sync` + treesitter parser build on every container restart, which is
@@ -213,10 +213,30 @@ RUN MUXR_INSTALL_DIR=/usr/local/bin bash -c \
 # NOT survive lazy.nvim's own setup(), which resets 'runtimepath' back to
 # whatever `stdpath("config")` already says — so the override has to happen
 # before nvim resolves stdpath, not after, via a manually-extended rtp.
+#
+# The SAME trick is applied here to $XDG_DATA_HOME, pointed at
+# /opt/demo/nvim-data (lazy.nvim's plugin installs + nvim-treesitter's parser
+# builds — baked in below) instead of the container-wide $XDG_DATA_HOME
+# (/var/lib/demo). /var/lib/demo is a PERSISTED named volume — it survives
+# container recreation on purpose, so muxrd's cert and zellij's token DB (and
+# a published pairing QR pinned to that cert) keep working across restarts.
+# But Docker only prepopulates a named volume the FIRST time it's created
+# empty; once it holds content, a later `docker compose pull && up` reuses
+# that same volume unchanged — verified empirically (built two images writing
+# different content to the same path, ran v1 against a fresh volume, then v2
+# against that same non-empty volume: v2 still saw v1's content). Baking
+# NvChad's plugins/parsers into that path would mean every image upgrade ships
+# a NEW nvim paired with STALE plugins/parsers from whatever image first
+# created the volume — the exact class of silent version-skew bug this whole
+# rebaseline exists to fix, reintroduced through the upgrade door. Keeping
+# nvim's data on the read-only, always-matches-this-image /opt/demo/nvim-data
+# instead avoids that entirely, and leaves $XDG_DATA_HOME holding only what
+# actually needs to persist: the cert + token DB.
 RUN printf '%s\n' \
       '#!/bin/sh' \
       '# Muxr demo nvim wrapper — see demo/Dockerfile for why this exists.' \
       'export XDG_CONFIG_HOME=/opt/demo' \
+      'export XDG_DATA_HOME=/opt/demo/nvim-data' \
       'exec /opt/nvim/bin/nvim "$@"' \
       > /usr/local/bin/nvim \
     && chmod 0755 /usr/local/bin/nvim
@@ -247,21 +267,16 @@ RUN git config --system --add safe.directory /opt/demo/muxr-core
 # is precisely how an incompatible neovim/NvChad pairing shipped unnoticed;
 # every command below is checked and the RUN fails loudly on any Lua error.
 #
-# XDG_DATA_HOME is set here (matching the runtime ENV block below) so
-# lazy.nvim's plugin installs and nvim-treesitter's parser installs land
-# straight into /var/lib/demo — the same path the persisted named volume
-# mounts onto at runtime. Docker prepopulates a fresh named volume from the
-# image's existing content at its mountpoint on first `docker run`, so this
-# bakes an instant first nvim attach with no runtime egress required, exactly
-# like the muxrd cert/token durability this same path was chosen for (see
-# demo/entrypoint.sh).
+# XDG_DATA_HOME is overridden to /opt/demo/nvim-data for these commands only
+# (matching the nvim wrapper above), NOT the container-wide $XDG_DATA_HOME —
+# see the wrapper comment for why baking nvim's plugins/parsers onto the
+# persisted volume would go stale across an image upgrade instead.
 RUN git clone --depth 1 https://github.com/NvChad/starter /opt/demo/nvim \
     && rm -rf /opt/demo/nvim/.git
-ENV XDG_DATA_HOME=/var/lib/demo
 RUN set -eu; \
     run_nvim_checked() { \
       desc="$1"; shift; \
-      out="$(XDG_CONFIG_HOME=/opt/demo HOME=/root /opt/nvim/bin/nvim --headless "$@" 2>&1)"; \
+      out="$(XDG_CONFIG_HOME=/opt/demo XDG_DATA_HOME=/opt/demo/nvim-data HOME=/root /opt/nvim/bin/nvim --headless "$@" 2>&1)"; \
       printf '%s\n' "$out"; \
       if printf '%s' "$out" | grep -qiE 'error detected|error in command line|E[0-9]{3,4}:|lua: '; then \
         echo "ERROR: $desc reported a Lua/startup error (see output above)" >&2; \
@@ -293,21 +308,29 @@ RUN apt-get purge -y curl xz-utils build-essential \
     && rm -rf /var/lib/apt/lists/* \
     && rm -f /usr/local/bin/tree-sitter
 
-# $XDG_DATA_HOME is the ONE writable-by-demo persisted path (muxrd's cert +
-# zellij's token DB, both minted by the entrypoint as the demo user — plus the
-# NvChad data baked in above). Hand it to the demo user now that every
-# build-time write into it is done.
-RUN chown -R 10001:10001 /var/lib/demo
+# $XDG_DATA_HOME (/var/lib/demo, set in the ENV block below) is the ONE
+# writable-by-demo PERSISTED path — muxrd's cert + zellij's token DB, both
+# minted by the entrypoint as the demo user, and NOTHING else (see the nvim
+# wrapper comment above for why NvChad's data deliberately does not live
+# here). Nothing bakes content into it at build time any more, so create it
+# empty and hand it to the demo user; compose's named volume mounts here and
+# Docker prepopulates a fresh volume from this empty, correctly-owned
+# directory on first run.
+RUN mkdir -p /var/lib/demo \
+    && chown 10001:10001 /var/lib/demo
 
 # ── HARDENING: lock down every staged/cloned path, then neutralise every
 # setuid/setgid binary in the image (run last, after every install above) ───
+# This covers /opt/demo/nvim-data too (NvChad's baked plugins/parsers), which
+# only ever needs to be read by nvim at runtime, never written.
 RUN chmod -R a-w /opt/demo \
     && find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -exec chmod ug-s {} +
 
-# XDG_DATA_HOME was already pinned above (build-time NvChad data landed
-# there); HOME + the remaining XDG paths point under the tmpfs mount so a
-# read-only rootfs is possible — see compose.yaml.
+# XDG_DATA_HOME is the persisted named volume mountpoint (compose.yaml) —
+# cert + token DB ONLY, see above. HOME + the remaining XDG paths point under
+# the tmpfs mount so a read-only rootfs is possible.
 ENV HOME=/run/demo \
+    XDG_DATA_HOME=/var/lib/demo \
     XDG_CONFIG_HOME=/run/demo/.config \
     XDG_CACHE_HOME=/run/demo/.cache \
     XDG_RUNTIME_DIR=/run/demo/xdg \
