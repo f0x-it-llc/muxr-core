@@ -91,8 +91,8 @@
           <ul>
             <li><strong>A terminal multiplexer</strong> — at least one of:
               <ul>
-                <li><strong>zellij <code>0.44.3</code></strong> on your <code>PATH</code> for the zellij backend. The server validates the version at startup and refuses to start against a mismatched binary; set <code>MUXRD_SKIP_VERSION_CHECK=1</code> to bypass this check in development.</li>
-                <li><strong>herdr <code>0.7.1</code></strong> (wire protocol 14) running for the herdr backend — a separate, unmodified, user-installed binary (AGPL-3.0). muxrd asserts the protocol version on the wire handshake and fails clearly on a mismatch.</li>
+                <li><strong>zellij <code>0.45.1</code></strong> on your <code>PATH</code> for the zellij backend. The server validates the version at startup and refuses to start against a mismatched binary; set <code>MUXRD_SKIP_VERSION_CHECK=1</code> to bypass this check in development.</li>
+                <li><strong>herdr <code>0.9.0</code></strong> (wire protocol 22) running for the herdr backend — a separate, unmodified, user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at runtime over the JSON control socket and echoes it back on the handshake, since herdr enforces strict protocol equality and rejects clients that are either older or newer than itself.</li>
               </ul>
               muxrd auto-detects whichever are present and serves all available backends simultaneously; pass <code>--backend</code> / <code>MUXRD_BACKEND</code> to restrict to one.</li>
             <li><strong>Rust 1.92</strong> (edition 2024) — required only if building from source.</li>
