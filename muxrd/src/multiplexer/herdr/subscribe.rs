@@ -65,11 +65,13 @@
 //! its acknowledgement. Buffer that stream while calling … then apply the
 //! buffered events in order"*).
 //!
-//! - **Connection A — the lifecycle watcher.** Subscribes only to the *bare*
-//!   `pane.created`, `pane.closed` and `pane.exited` entries. None takes a pane
-//!   id, so A is **complete the moment it is acked**: it never needs to widen,
-//!   never reconnects to widen, and has no bootstrap gap of its own. A is the
-//!   authoritative signal that a new pane exists.
+//! - **Connection A — the lifecycle watcher.** Subscribes only to *bare*
+//!   entries: `pane.created`, `pane.closed`, `pane.exited` and `layout.updated`.
+//!   None takes a pane id, so A is **complete the moment it is acked**: it never
+//!   needs to widen, never reconnects to widen, and has no bootstrap gap of its
+//!   own. A is the authoritative signal that a new pane exists, and — since a
+//!   bare entry costs no reconnect churn — the right home for the layout push
+//!   too.
 //! - **Connection B — the agent-status watcher.** Carries the per-pane
 //!   `pane.agent_status_changed` entries, and is the only connection torn down
 //!   and re-established when the pane set widens.
@@ -180,6 +182,12 @@
 //!   `EventKind` (`"pane_created"`), and `data` is the tagged `EventData`:
 //!   `{"event":"pane_created","data":{"type":"pane_created","pane":{…,"pane_id":"w1:p2"}}}`;
 //!   `pane_closed` / `pane_exited` carry `pane_id` at the top of `data`.
+//! - **Pushed layout event** — the same envelope shape, carrying one whole-tab
+//!   `PaneLayoutSnapshot`:
+//!   `{"event":"layout.updated","data":{"type":"layout_updated","layout":{"workspace_id":…,"tab_id":…,…}}}`.
+//!   Only the two ids are read; the neutral
+//!   [`LayoutChanged`](crate::multiplexer::events::LayoutChanged) it becomes is a
+//!   hint to re-query, never a carrier of geometry.
 //! - **Pushed agent-status event** — a *different* envelope whose event name is
 //!   the dotted `SubscriptionEventKind`, with an untagged payload:
 //!   `{"event":"pane.agent_status_changed","data":{"pane_id":"w1:p1",
@@ -237,7 +245,9 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
-use crate::multiplexer::events::{AgentStatus, AgentStatusChanged, EventBus, MuxEvent};
+use crate::multiplexer::events::{
+    AgentStatus, AgentStatusChanged, EventBus, LayoutChanged, MuxEvent,
+};
 
 use super::api::{AgentStatus as HerdrAgentStatus, ApiRequest};
 use super::backend::HerdrBackend;
@@ -317,6 +327,28 @@ const SUBSCRIBE_PANE_CLOSED_TYPE: &str = "pane.closed";
 /// classification path has always understood `pane.exited`; before the split the
 /// request never asked for it, so that branch was dead.
 const SUBSCRIBE_PANE_EXITED_TYPE: &str = "pane.exited";
+
+/// Layout-updated subscription type (bare, no `pane_id`) — connection A.
+///
+/// herdr models it as `Subscription::LayoutUpdated {}` — empty braces, no
+/// arguments (v0.9.0 `src/api/schema/events.rs:84`), resolving to a plain event
+/// subscription with no per-pane state (`src/api/subscriptions.rs:160`). Being
+/// bare is what makes it belong on connection A: it is complete at ack, costs no
+/// reconnect churn, and never widens.
+///
+/// It rides A's single `events.subscribe` array, so on a herdr that does not
+/// know the type the *whole* array is rejected and the lifecycle watcher never
+/// comes up. That is inside the declared support envelope rather than a risk
+/// taken quietly: this module mirrors exactly one wire protocol, 22
+/// ([`HERDR_MIN_PROTOCOL`](super::wire::HERDR_MIN_PROTOCOL)), on which every
+/// attach already fails against an older herdr.
+///
+/// A `layout.updated` pushed while connection B is being (re)built is buffered
+/// with the rest of A's traffic and then discarded by [`bootstrap_pane_set`],
+/// which extracts only pane-set changes. Losing a hint in that window is exactly
+/// what the lossy-bus contract on
+/// [`LayoutChanged`](crate::multiplexer::events::LayoutChanged) allows.
+const SUBSCRIBE_LAYOUT_UPDATED_TYPE: &str = "layout.updated";
 
 /// Request id used for connection A, echoed back on its ack.
 const LIFECYCLE_REQUEST_ID: &str = "muxrd-events-lifecycle";
@@ -748,7 +780,7 @@ async fn connect_lifecycle(kernel: &Kernel, shutdown: &mut watch::Receiver<bool>
     .await;
     if matches!(brought, Bring::Ready(_)) {
         log::info!(
-            "herdr event kernel: lifecycle watcher subscribed ({SUBSCRIBE_PANE_CREATED_TYPE}/{SUBSCRIBE_PANE_CLOSED_TYPE}/{SUBSCRIBE_PANE_EXITED_TYPE})"
+            "herdr event kernel: lifecycle watcher subscribed ({SUBSCRIBE_PANE_CREATED_TYPE}/{SUBSCRIBE_PANE_CLOSED_TYPE}/{SUBSCRIBE_PANE_EXITED_TYPE}/{SUBSCRIBE_LAYOUT_UPDATED_TYPE})"
         );
     }
     brought
@@ -991,6 +1023,10 @@ async fn pump(
                             subscribed.remove(&hid);
                         }
                     }
+                    Pushed::LayoutUpdated {
+                        workspace_id,
+                        herdr_tab_id,
+                    } => publish_layout(kernel, workspace_id, &herdr_tab_id),
                     // Not expected on A (it carries no agent-status entry), but
                     // publishing it is strictly better than dropping it.
                     Pushed::AgentStatus(ev) => publish(kernel, ev),
@@ -1073,6 +1109,29 @@ fn publish(kernel: &Kernel, ev: AgentStatusChanged) {
     );
     // No receivers yet is fine (broadcast → recoverable Err).
     let _ = kernel.bus.send(MuxEvent::AgentStatusChanged(ev));
+}
+
+/// Translate one `layout.updated` push into the neutral
+/// [`LayoutChanged`](crate::multiplexer::events::LayoutChanged) hint and publish
+/// it.
+///
+/// Tab translation goes through the registry's **mutating** `assign_or_get`,
+/// where the pane path deliberately uses a non-mutating lookup. The asymmetry is
+/// the point: a pane's registry entry also carries its `terminal_id` (the relay's
+/// attach key), which a push does not, so assigning from a push could clobber a
+/// live attach. A tab entry is nothing but a monotonic `u64` ↔ `tab_id` pair, so
+/// minting one for a tab muxrd has not polled yet is harmless and hands the
+/// consumer the same id the next layout query will.
+///
+/// Publishing is best-effort: no receivers, or a lagging one, is the lossy bus
+/// working as designed — the hint's whole contract is that the consumer
+/// re-queries.
+fn publish_layout(kernel: &Kernel, workspace_id: String, herdr_tab_id: &str) {
+    let tab = kernel.control.tab_registry().assign_or_get(herdr_tab_id);
+    log::debug!("herdr event kernel: layout changed ws={workspace_id} tab={tab}");
+    let _ = kernel
+        .bus
+        .send(MuxEvent::LayoutChanged(LayoutChanged { workspace_id, tab }));
 }
 
 /// Outcome of draining connection A for the coalesce window.
@@ -1359,6 +1418,13 @@ enum Pushed {
         herdr_pane_id: Option<String>,
         pane: Option<u32>,
     },
+    /// A `layout.updated` push: herdr's own ids, translated by the caller (which
+    /// holds the tab registry) rather than here, keeping the parse pure and
+    /// registry-free like [`lifecycle_change`].
+    LayoutUpdated {
+        workspace_id: String,
+        herdr_tab_id: String,
+    },
     /// Anything not consumed (ack, unknown event, malformed) — ignored.
     Ignored,
 }
@@ -1403,6 +1469,7 @@ fn classify_pushed(line: &str, panes: &HerdrPaneRegistry) -> Pushed {
         "pane_agent_status_changed" => parse_agent_status(data.as_ref(), panes),
         "pane_created" => Pushed::PaneCreated(pane_created_id(data.as_ref())),
         "pane_closed" | "pane_exited" => parse_pane_gone(data.as_ref(), panes),
+        "layout_updated" => parse_layout_updated(data.as_ref()),
         other => {
             log::trace!("herdr event kernel: ignoring event {other}");
             Pushed::Ignored
@@ -1453,6 +1520,33 @@ fn parse_agent_status(data: Option<&Value>, panes: &HerdrPaneRegistry) -> Pushed
             .map(str::to_string),
         synthetic: false,
     })
+}
+
+/// Parse a `layout.updated` payload into the ids the neutral event needs.
+///
+/// herdr's envelope is
+/// `{"event":"layout.updated","data":{"type":"layout_updated","layout":{…}}}`
+/// where `layout` is a full `PaneLayoutSnapshot` (v0.9.0
+/// `src/api/schema/events.rs:553`, `src/api/schema/panes.rs:669`). Only its
+/// `workspace_id` / `tab_id` are read: the neutral event is a hint to re-query,
+/// so decoding the geometry here would be work whose result is thrown away —
+/// and it keeps the parse tolerant of any field herdr adds to that struct.
+fn parse_layout_updated(data: Option<&Value>) -> Pushed {
+    let Some(layout) = data.and_then(|d| d.get("layout")) else {
+        log::debug!("herdr event kernel: layout.updated without a layout payload ignored");
+        return Pushed::Ignored;
+    };
+    let (Some(workspace_id), Some(tab_id)) = (
+        layout.get("workspace_id").and_then(Value::as_str),
+        layout.get("tab_id").and_then(Value::as_str),
+    ) else {
+        log::debug!("herdr event kernel: malformed layout.updated event ignored");
+        return Pushed::Ignored;
+    };
+    Pushed::LayoutUpdated {
+        workspace_id: workspace_id.to_string(),
+        herdr_tab_id: tab_id.to_string(),
+    }
 }
 
 /// Parse a `pane.closed` / `pane.exited` payload into both id forms.
@@ -1593,15 +1687,16 @@ fn map_status(status: HerdrAgentStatus) -> AgentStatus {
     }
 }
 
-/// Connection A's request: the three *bare* lifecycle entries. None takes a pane
-/// id, so this subscription is complete the moment it is acked and never needs to
-/// widen — which is exactly why the lifecycle watcher can be the authority on new
-/// panes.
+/// Connection A's request: the four *bare* entries. None takes a pane id, so this
+/// subscription is complete the moment it is acked and never needs to widen —
+/// which is exactly why the lifecycle watcher can be the authority on new panes,
+/// and why `layout.updated` belongs here rather than on the widening connection.
 fn lifecycle_request_line() -> Result<String> {
     let subscriptions = serde_json::json!([
         { "type": SUBSCRIBE_PANE_CREATED_TYPE },
         { "type": SUBSCRIBE_PANE_CLOSED_TYPE },
         { "type": SUBSCRIBE_PANE_EXITED_TYPE },
+        { "type": SUBSCRIBE_LAYOUT_UPDATED_TYPE },
     ]);
     request_line(LIFECYCLE_REQUEST_ID, subscriptions)
 }
@@ -2153,7 +2248,7 @@ mod tests {
     // ── subscribe request shapes (the two connections) ───────────────────────
 
     #[test]
-    fn lifecycle_request_is_three_bare_entries_and_never_carries_a_pane_id() {
+    fn lifecycle_request_is_four_bare_entries_and_never_carries_a_pane_id() {
         let line = lifecycle_request_line().expect("build lifecycle line");
         assert!(line.ends_with('\n'), "request must be newline-terminated");
         let value: Value = serde_json::from_str(line.trim_end()).expect("valid JSON");
@@ -2162,17 +2257,127 @@ mod tests {
         let subs = value["params"]["subscriptions"]
             .as_array()
             .expect("params.subscriptions must be an array");
-        assert_eq!(subs.len(), 3);
+        assert_eq!(subs.len(), 4);
         assert_eq!(subs[0]["type"], SUBSCRIBE_PANE_CREATED_TYPE);
         assert_eq!(subs[1]["type"], SUBSCRIBE_PANE_CLOSED_TYPE);
         assert_eq!(
             subs[2]["type"], SUBSCRIBE_PANE_EXITED_TYPE,
             "pane.exited was parsed but never subscribed to before the split"
         );
+        assert_eq!(
+            subs[3]["type"], SUBSCRIBE_LAYOUT_UPDATED_TYPE,
+            "the layout push belongs on the connection that never widens"
+        );
         assert!(
             subs.iter().all(|s| s.get("pane_id").is_none()),
             "every lifecycle entry is bare — that is why A never widens"
         );
+    }
+
+    /// The layout entry must stay off connection B: every entry there carries a
+    /// pane id and B is torn down whenever the pane set widens, so a bare
+    /// subscription parked on it would be needlessly re-established.
+    #[test]
+    fn the_agent_status_request_never_carries_the_layout_entry() {
+        let line = agent_status_request_line(&["w1:p1".to_string()]).expect("build B line");
+        let value: Value = serde_json::from_str(line.trim_end()).expect("valid JSON");
+        let subs = value["params"]["subscriptions"]
+            .as_array()
+            .expect("params.subscriptions must be an array");
+        assert!(
+            subs.iter()
+                .all(|s| s["type"] == SUBSCRIBE_AGENT_STATUS_TYPE),
+            "connection B carries per-pane agent-status entries and nothing else"
+        );
+    }
+
+    #[test]
+    fn classifies_layout_updated_and_keeps_only_the_two_ids() {
+        let panes = HerdrPaneRegistry::new();
+        let line = serde_json::json!({
+            "event": "layout.updated",
+            "data": {
+                "type": "layout_updated",
+                "layout": {
+                    "workspace_id": "w1",
+                    "tab_id": "w1:t2",
+                    "zoomed": true,
+                    "area": { "x": 0, "y": 0, "width": 80, "height": 24 },
+                    "focused_pane_id": "w1:p1",
+                    "panes": [],
+                    "splits": [],
+                }
+            }
+        })
+        .to_string();
+        match classify_pushed(&line, &panes) {
+            Pushed::LayoutUpdated {
+                workspace_id,
+                herdr_tab_id,
+            } => {
+                assert_eq!(workspace_id, "w1");
+                assert_eq!(herdr_tab_id, "w1:t2");
+            }
+            _ => panic!("layout.updated must classify as a layout push"),
+        }
+    }
+
+    /// The dotted and underscored envelope names are both accepted, exactly as
+    /// they are for the pane lifecycle events.
+    #[test]
+    fn classifies_layout_updated_underscore_event_name_too() {
+        let panes = HerdrPaneRegistry::new();
+        let line = serde_json::json!({
+            "event": "layout_updated",
+            "data": { "type": "layout_updated", "layout": {
+                "workspace_id": "w9", "tab_id": "w9:t1" } }
+        })
+        .to_string();
+        assert!(matches!(
+            classify_pushed(&line, &panes),
+            Pushed::LayoutUpdated { .. }
+        ));
+    }
+
+    /// A layout push whose payload is missing or malformed is dropped, never
+    /// published as a half-built hint — and never allowed to abort the pump.
+    #[test]
+    fn malformed_layout_updated_is_ignored() {
+        let panes = HerdrPaneRegistry::new();
+        for line in [
+            serde_json::json!({ "event": "layout.updated", "data": {} }).to_string(),
+            serde_json::json!({
+                "event": "layout.updated",
+                "data": { "layout": { "workspace_id": "w1" } }
+            })
+            .to_string(),
+            serde_json::json!({
+                "event": "layout.updated",
+                "data": { "layout": { "tab_id": "w1:t1" } }
+            })
+            .to_string(),
+        ] {
+            assert!(
+                matches!(classify_pushed(&line, &panes), Pushed::Ignored),
+                "malformed layout push must be ignored: {line}"
+            );
+        }
+    }
+
+    /// A buffered `layout.updated` must not disturb the pane-set bootstrap: it is
+    /// neither a pane creation nor a pane removal.
+    #[test]
+    fn a_buffered_layout_update_does_not_change_the_bootstrap_pane_set() {
+        let buffered = vec![
+            serde_json::json!({
+                "event": "layout.updated",
+                "data": { "type": "layout_updated", "layout": {
+                    "workspace_id": "w1", "tab_id": "w1:t1" } }
+            })
+            .to_string(),
+        ];
+        let set = bootstrap_pane_set(vec!["w1:p1".to_string()], &buffered);
+        assert_eq!(set, vec!["w1:p1".to_string()]);
     }
 
     #[test]
@@ -2844,6 +3049,62 @@ mod tests {
             vec!["w1:p1".to_string(), "w1:p2".to_string()],
             "the pane created during the enumeration must be in the FIRST \
              agent-status subscription — nothing ever re-announces it"
+        );
+        kernel.stop().await;
+    }
+
+    /// End to end, through the real kernel: a `layout.updated` pushed on
+    /// connection A becomes a neutral `MuxEvent::LayoutChanged` on the internal
+    /// bus — the pump arm, the registry translation and the publish, in one
+    /// piece. It does **not** cover the subscription entry itself (the fake
+    /// forwards whatever a test pushes, regardless of what was subscribed to);
+    /// `lifecycle_request_is_four_bare_entries_and_never_carries_a_pane_id` is
+    /// what pins that.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_pushed_layout_update_reaches_the_internal_bus() {
+        let fake = FakeHerdr::start(FakeState {
+            panes: vec![pane("w1:p1", HerdrAgentStatus::Idle)],
+            ..FakeState::default()
+        });
+        let mut kernel = RunningKernel::start(&fake, no_probe_tuning());
+
+        fake.wait_for("the lifecycle subscription", |s| s.lifecycle_tx.is_some())
+            .await;
+        let tx = fake
+            .with(|s| s.lifecycle_tx.clone())
+            .expect("connection A is up");
+        let line = serde_json::json!({
+            "event": "layout.updated",
+            "data": { "type": "layout_updated", "layout": {
+                "workspace_id": "w1", "tab_id": "w1:t1", "zoomed": false,
+                "area": { "x": 0, "y": 0, "width": 80, "height": 24 },
+                "focused_pane_id": "w1:p1", "panes": [], "splits": []
+            }}
+        })
+        .to_string();
+
+        let ev = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                // Re-push each round. A line delivered while connection B is
+                // still being built is buffered with the rest of A's traffic and
+                // then discarded by `bootstrap_pane_set`, which is documented and
+                // intended (the bus is lossy); repeating takes that startup race
+                // out of the test without papering over it with a sleep.
+                let _ = tx.send(line.clone());
+                match tokio::time::timeout(Duration::from_millis(100), kernel.events.recv()).await {
+                    Ok(Ok(MuxEvent::LayoutChanged(ev))) => return ev,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("a pushed layout update must reach the bus");
+
+        assert_eq!(ev.workspace_id, "w1");
+        assert_eq!(
+            ev.tab, 1,
+            "the tab must be the registry's neutral id — the first tab ever seen \
+             is 1, the same id a layout query would hand out"
         );
         kernel.stop().await;
     }

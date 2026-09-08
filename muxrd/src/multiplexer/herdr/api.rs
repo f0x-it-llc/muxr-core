@@ -172,6 +172,17 @@ pub enum ApiResult {
         #[serde(default, deserialize_with = "deserialize_capabilities")]
         capabilities: HashMap<String, serde_json::Value>,
     },
+    /// `session.snapshot` — the whole bootstrap in one response.
+    ///
+    /// herdr `ResponseResult::SessionSnapshot { snapshot: Box<SessionSnapshot> }`
+    /// (v0.9.0 `src/api/schema/response.rs:51`). The `Box` is serde-transparent,
+    /// so on the wire this is
+    /// `{"type":"session_snapshot","snapshot":{…}}`; it is boxed here for the
+    /// same reason herdr boxes it — [`SessionSnapshot`] is by far the largest
+    /// payload in this enum (`clippy::large_enum_variant`).
+    SessionSnapshot {
+        snapshot: Box<SessionSnapshot>,
+    },
     WorkspaceList {
         workspaces: Vec<WorkspaceInfo>,
     },
@@ -235,6 +246,12 @@ where
 //
 // One struct per method we call. Serialize with `serde_json::to_value` to
 // produce the `params` field of an `ApiRequest`.
+
+/// `session.snapshot` — no params.  herdr models the request as `EmptyParams`
+/// (v0.9.0 `src/api/schema.rs:74`) and its own client sends `"params":{}`
+/// (`src/protocol/wire.rs:2160`), which is what this serializes to.
+#[derive(Debug, Default, Serialize)]
+pub struct SessionSnapshotParams {}
 
 /// `ping` — no params.  Used to discover the server's wire protocol version.
 #[derive(Debug, Default, Serialize)]
@@ -559,6 +576,51 @@ pub struct PaneLayoutSnapshot {
     pub focused_pane_id: String,
     pub panes: Vec<PaneLayoutPane>,
     pub splits: Vec<PaneLayoutSplit>,
+}
+
+/// Whole-daemon bootstrap returned by `session.snapshot` — the one-call
+/// replacement for muxrd's `workspace.list` + `tab.list` + `pane.list` + one
+/// `pane.layout` per tab fan-out.
+///
+/// Derived from herdr's `SessionSnapshot` (v0.9.0
+/// `src/api/schema/session.rs`), and **modified**: only the fields muxrd's
+/// layout path consumes are mirrored. serde ignores unknown fields, so herdr's
+/// `focused_workspace_id` / `focused_tab_id` / `focused_pane_id` and its
+/// `agents: Vec<AgentInfo>` are deliberately absent rather than modelled —
+/// muxrd derives the per-workspace active tab from
+/// [`WorkspaceInfo::active_tab_id`] exactly as the fan-out does (herdr's global
+/// focus is *not* per-workspace; see [`super::control`]'s `query_layout`), and
+/// nothing here consumes agent records. Not modelling `AgentInfo` also keeps a
+/// second copy of that type out of this file.
+///
+/// Every field carries `#[serde(default)]`, which herdr's own struct does not:
+/// the whole point of this method is that it is an *optimisation* over a
+/// fallback that still works, so a snapshot that drops or renames a field muxrd
+/// does not need must not take the layout path down with it. An empty
+/// `workspaces` simply means "no such workspace here", which the caller answers
+/// by falling back to the fan-out.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct SessionSnapshot {
+    /// herdr's own release version (e.g. `"0.9.0"`) — diagnostics only.
+    #[serde(default)]
+    pub version: String,
+    /// Wire protocol version the server speaks — diagnostics only; the relay
+    /// handshake still discovers it per connection through `ping`.
+    #[serde(default)]
+    pub protocol: u32,
+    /// Every workspace on the daemon (the `workspace.list` payload).
+    #[serde(default)]
+    pub workspaces: Vec<WorkspaceInfo>,
+    /// Every tab on the daemon, across all workspaces (`tab.list`, unscoped).
+    #[serde(default)]
+    pub tabs: Vec<TabInfo>,
+    /// Every pane on the daemon, across all workspaces (`pane.list`, unscoped).
+    #[serde(default)]
+    pub panes: Vec<PaneInfo>,
+    /// One absolute-cell layout per tab (`pane.layout`, one call per tab in the
+    /// fan-out). Each entry names its own `workspace_id` / `tab_id`.
+    #[serde(default)]
+    pub layouts: Vec<PaneLayoutSnapshot>,
 }
 
 /// Reason a directional focus change did not take effect.
