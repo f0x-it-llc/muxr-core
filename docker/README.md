@@ -6,7 +6,7 @@ Zellij session and a full set of terminal tools so the mobile client has a real,
 interesting target. You SSH into the container and drive everything with
 `muxrctl`.
 
-**Zellij is pinned to v0.44.3** (the version muxrd was compiled against;
+**Zellij is pinned to v0.45.1** (the version muxrd was compiled against;
 it refuses to start on any other version).
 
 > The rig defaults to the **zellij** backend. To exercise muxrd's **herdr**
@@ -24,11 +24,26 @@ it refuses to start on any other version).
   `muxrd`'s notifier has a local e2e target. Set `NOTIFY_ENABLED=0` to skip it. See
   [`muxr-notify/README.md`](../muxr-notify/README.md) — it is a **separate,
   independently-deployed artifact**, never part of the muxr-core release suite.
-- **Zellij v0.44.3** running a pre-populated `backend-dev` session (see `layout.kdl`):
+- **Zellij v0.45.1** running a pre-populated `backend-dev` session (see `layout.kdl`):
   an `editor` tab (nvim + shell + btop), a `shell` tab (shell + htop), and a
   `logs` tab (live log stream).
 - Terminal tooling: **Neovim + NvChad**, **btop**, htop, lazygit, ripgrep, fd,
   fzf, bat, tree, jq, ncdu, tmux, git, node/npm, python3, plus toys.
+
+**Architecture:** the image builds natively on both `amd64` and `arm64` hosts —
+zellij, herdr and lazygit are each downloaded for the build platform (BuildKit's
+automatic `TARGETARCH`), so on Apple silicon or an ARM Linux box there is nothing
+to set and nothing runs under emulation. To force the amd64 image anyway:
+
+```bash
+DOCKER_DEFAULT_PLATFORM=linux/amd64 ./docker/run.sh --herdr
+```
+
+> The three upstreams disagree on how to spell the ARM asset — zellij and herdr
+> publish `aarch64`, lazygit publishes `arm64` — so the Dockerfile maps
+> `TARGETARCH` once **per download** rather than sharing one variable. A shared
+> token builds fine on amd64 and 404s only on arm64, which is exactly the kind of
+> failure that shows up late. Keep them separate when adding a fourth tool.
 
 ## Quickstart — loopback (local testing)
 
@@ -73,29 +88,32 @@ docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr
 ```
 
 This builds the `runtime-herdr` image (an **unmodified** upstream herdr binary —
-`HERDR_VERSION`, default `0.7.5`), starts a headless `herdr server`,
+`HERDR_VERSION`, default `0.9.0`), starts a headless `herdr server`,
 seeds a demo workspace, and exports `MUXRD_BACKEND=herdr` so the `muxrctl`-started
 daemon selects herdr automatically. Then SSH in and drive `muxrctl` exactly as for
 zellij (Configure → Cert → Tokens → **Server (start)** → Pair). The container is
 **`muxr-herdr-rig`**.
 
-> **herdr is PINNED** — `HERDR_VERSION` defaults to `0.7.5`, the last release muxrd
-> has been tested against (it ships wire protocol 17 = `HERDR_MAX_TESTED_PROTOCOL`
+> **herdr is PINNED** — `HERDR_VERSION` defaults to `0.9.0`, the last release muxrd
+> has been tested against (it ships wire protocol 22 = `HERDR_MAX_TESTED_PROTOCOL`
 > in `muxrd/src/multiplexer/herdr/wire.rs`). It used to default to `latest`, but this
 > layer sits downstream of the muxrd binary layer, so any unrelated rebuild silently
 > upgraded herdr under the rig — which is how it once came up on 0.8.2 / protocol 20
-> with nothing in the build output saying so. Set `HERDR_VERSION=<x.y.z>` (or
-> `latest`) to try another release without committing to it.
+> against a muxrd then tested only to 17, with nothing in the build output saying so.
+> Set `HERDR_VERSION=<x.y.z>` (or `latest`) to try another release without committing
+> to it.
 >
-> **Bumping the pin is a paired change:** update the Dockerfile default (and the
-> compose `${HERDR_VERSION:-…}` fallbacks), re-verify the wire layout against the new
-> release, re-run the herdr integration smoke tests, and update
-> `HERDR_MAX_TESTED_PROTOCOL` in the same commit. muxrd still only *warns* when herdr
-> reports a protocol newer than that constant and attaches anyway — herdr's protocol
-> changes have been additive so far, so if terminal output ever misbehaves after a
-> herdr release, that warning is the first thing to check.
+> **Bumping the pin is a paired change — all four must agree:** the Dockerfile
+> default (`ARG HERDR_VERSION`), **both** compose `${HERDR_VERSION:-…}` fallbacks
+> (the `herdr` *and* `both` services), and the `run.sh` banner. In the same commit:
+> re-verify the wire layout against the new release, re-run the herdr integration
+> smoke tests (`cargo test -p muxrd --test herdr_integration -- --ignored` against a
+> live rig), and update `HERDR_MAX_TESTED_PROTOCOL`. muxrd still only *warns* when
+> herdr reports a protocol newer than that constant and attaches anyway — herdr's
+> protocol changes have been additive so far, so if terminal output ever misbehaves
+> after a herdr release, that warning is the first thing to check.
 
-> **AGPL-3.0:** herdr is a separate, unmodified, user-installed binary that muxrd
+> **Apache-2.0:** herdr is a separate, unmodified, user-installed binary that muxrd
 > drives only over its public `0600` Unix sockets. The rig downloads the official
 > upstream release for **local** dev use (it is not bundled into the default image,
 > modified, or redistributed). muxrd stays the TLS/bearer boundary; herdr runs
@@ -242,6 +260,30 @@ If a "rebuild" ever serves an old `muxrd` binary, that's the Docker layer
 cache: use `./docker/run.sh --fresh` (scoped `--no-cache` rebuild) or
 `./docker/stop.sh --purge` (daemon-wide build-cache prune).
 
+## Troubleshooting
+
+### Upgrading zellij: kill stale servers first
+
+zellij's client–server contract version did **not** change between 0.44.3 and
+0.45.1 (`CLIENT_SERVER_CONTRACT_VERSION = 1` in both), so the two releases share
+one socket directory (`…/contract_version_1`). A zellij **server** left running
+from the old release therefore survives the upgrade: it stays listable with
+`zellij list-sessions`, and a 0.45.1-linked `muxrd` will connect to it — muxrd's
+version gate checks the installed `zellij` **binary**, not each live session. The
+mismatch then shows up as odd behaviour at attach time instead of a clean
+startup error.
+
+After upgrading, kill the old servers before starting new ones:
+
+```bash
+zellij kill-all-sessions               # stop every running server
+zellij delete-all-sessions --yes       # also drop resurrectable session state
+```
+
+A rig started fresh with `./docker/run.sh` is unaffected — a new container has an
+empty socket directory. The trap applies to a zellij on the **host**, and to a
+long-lived rig container whose zellij was upgraded in place.
+
 ## Notes
 
 - **TLS mode:** this rig runs the **self-signed + QR-fingerprint-pinned** path (the direct/LAN
@@ -255,8 +297,10 @@ cache: use `./docker/run.sh --fresh` (scoped `--no-cache` rebuild) or
   dev-rig only). `SSH_PORT` changes the published SSH port (default `2222`).
   Connect via `./docker/ssh.sh` — host keys change on every rebuild, so plain
   `ssh` trips the known_hosts check (see Quickstart).
-- **Zellij version:** must remain 0.44.3. Upgrading zellij without recompiling
-  muxrd will cause a version-mismatch error at startup.
+- **Zellij version:** must remain 0.45.1. Upgrading zellij without recompiling
+  muxrd will cause a version-mismatch error at startup. Moving *up* from 0.44.3
+  has a second trap — a server left running from the old release survives the
+  upgrade; see [Troubleshooting](#troubleshooting).
 - **muxr-notify:** `NOTIFY_ENABLED` (default `1`) and `NOTIFY_PORT` (default `8090`)
   control the in-container relay. It always runs `FCM_MODE=log` in the rig — no
   real FCM send happens, the would-be message is logged (`docker exec <container>

@@ -102,7 +102,7 @@ start_zellij() {
 }
 
 start_herdr() {
-  # herdr: a SEPARATE, UNMODIFIED, user-installed binary (AGPL-3.0). muxrd drives
+  # herdr: a SEPARATE, UNMODIFIED, user-installed binary (Apache-2.0). muxrd drives
   # it only over its public 0600 sockets; muxrd stays the TLS/bearer boundary.
   # Start a headless herdr server and seed 3 demo workspaces (spaces) so the
   # spaces menu is exercisable on device.
@@ -137,10 +137,11 @@ start_herdr() {
 
 # Describe the herdr actually installed in this image, for the banner.
 #
-# The rig no longer pins a herdr version and muxrd no longer pins a wire protocol
-# (it discovers the server's via the JSON-API `ping`), so the banner must report
-# what is really running instead of a hard-coded number. Falls back gracefully when
-# an older herdr's `status server` does not print a protocol line.
+# The rig DOES pin a herdr version (the Dockerfile's `ARG HERDR_VERSION`, currently
+# 0.9.0) — that pin is deliberate. What is NOT pinned is the wire protocol: muxrd
+# discovers the server's via the JSON-API `ping` rather than hard-coding one, so the
+# banner reports the protocol actually running instead of a compiled-in number.
+# Falls back gracefully when an older herdr's `status server` prints no protocol line.
 herdr_wire_desc() {
   _hv="$(herdr --version 2>/dev/null | awk '{print $2}')"
   _hp="$(herdr status server 2>/dev/null | sed -n 's/^[[:space:]]*protocol:[[:space:]]*//p' | head -1)"
