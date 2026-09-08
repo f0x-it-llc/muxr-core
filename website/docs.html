@@ -95,7 +95,7 @@
                 <li><strong>herdr <code>0.9.0</code></strong> (wire protocol 22) running for the herdr backend — a separate, unmodified, user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at runtime over the JSON control socket and echoes it back on the handshake, since herdr enforces strict protocol equality and rejects clients that are either older or newer than itself.</li>
               </ul>
               muxrd auto-detects whichever are present and serves all available backends simultaneously; pass <code>--backend</code> / <code>MUXRD_BACKEND</code> to restrict to one.</li>
-            <li><strong>Rust 1.92</strong> (edition 2024) — required only if building from source.</li>
+            <li><strong>Rust 1.95</strong> (edition 2024) — required only if building from source.</li>
             <li><strong>Docker</strong> — optional; use the dev rig instead of building if you prefer (see <a href="#docker">Docker dev rig</a>).</li>
           </ul>
         </section>
@@ -109,7 +109,7 @@
             <li><code>muxrd</code> — the gRPC backend daemon.</li>
             <li><code>muxrctl</code> — the ratatui setup TUI.</li>
           </ul>
-          <p>Prefer to build from source? Clone and compile with a Rust 1.92+ toolchain:</p>
+          <p>Prefer to build from source? Clone and compile with a Rust 1.95+ toolchain:</p>
           <div class="code-block"><pre><code>git clone https://github.com/f0x-it-llc/muxr-core
 cd muxr-core
 cargo build --release</code></pre></div>
