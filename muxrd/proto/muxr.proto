@@ -682,4 +682,20 @@ message CloseSpaceReq {
   string space_id      = 2;
   // optional; per-connection routing.
   string connection_id = 3;
+  // OPT-IN worktree-group close. Defaults to false — close ONLY the named
+  // space — so every client that predates this field gets the safe behaviour.
+  //
+  // On herdr a space can be the PRIMARY of a worktree group: the workspaces
+  // for its linked git worktrees share its repo key, and herdr closes the whole
+  // group as one unit. With this false herdr REFUSES to close such a primary,
+  // and muxrd surfaces that refusal as ActionAck{ok:false} naming the group and
+  // how to proceed. That refusal is the intended, surfaced outcome — not an
+  // error to route around: it is the only way the operator learns that closing
+  // one space would have destroyed several.
+  //
+  // Set it to true to remove the primary AND every linked-worktree space with
+  // it; the ack's `info` then names each space that was removed, so the client
+  // can reconcile its space list. muxrd still refuses a group close that would
+  // leave the daemon with zero spaces.
+  bool close_group     = 4;
 }
