@@ -191,7 +191,7 @@ pub(super) fn render_loop(
             // `Other` by the backend's receiver and drained here — preserving the
             // per-message loop cadence (stop-flag checks, query draining).
             //
-            // Known 0.44.3 limitation: no per-change push for tab/pane structure
+            // Known 0.45.1 limitation: no per-change push for tab/pane structure
             // changes or bell notifications. Clients that need up-to-date
             // layout/bell state should poll GetLayout.
             MuxServerMsg::Other => {
@@ -342,8 +342,10 @@ pub(super) struct ShutdownGuard {
     pub(super) cols: u16,
     /// When set, this attach is read-only and must NOT emit the teardown resize
     /// nudge (review round-2 Major A): the nudge is a `TerminalResize`, which
-    /// re-runs zellij's `min_client_terminal_size` and could disturb a writer's
-    /// geometry. For RO we rely solely on the IPC-close path to wake the reader.
+    /// re-triggers zellij's per-tab size recompute (the session-wide
+    /// `min_client_terminal_size` this used to cite was deleted in 0.45.1) and
+    /// could disturb a writer's tab geometry. For RO we rely solely on the
+    /// IPC-close path to wake the reader.
     pub(super) read_only: bool,
     pub(super) session: String,
 }

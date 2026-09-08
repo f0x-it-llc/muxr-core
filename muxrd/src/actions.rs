@@ -5,7 +5,7 @@
 //! sends `ClientToServerMsg::Action { is_cli_client: true, … }` and reads the
 //! server's reply.
 //!
-//! ## Ack semantics (verified against zellij 0.44.3 `zellij-server/src/route.rs`)
+//! ## Ack semantics (verified against zellij 0.45.1 `zellij-server/src/route.rs`)
 //!
 //! `route_thread_main` runs the action with a completion timeout, then — per the
 //! tail of `route_action` (route.rs:2065-2124) — sends to the cli-client, in order:
@@ -26,7 +26,7 @@
 //!
 //! **Caveat — the AttachClient terminator.**  Like the C1 query path, we must do
 //! a minimal `AttachClient` handshake first (the server won't route Log replies
-//! to an un-attached client in 0.44.3).  But `AttachClient` is itself a routed
+//! to an un-attached client in 0.45.1).  But `AttachClient` is itself a routed
 //! client message, so it produces its *own* `UnblockInputThread`.  We therefore
 //! skip exactly one `UnblockInputThread` (the attach's) before arming the
 //! terminator logic for the action.
@@ -64,7 +64,7 @@ pub struct ActionAck {
 /// Send a (mutating) [`Action`] to a named session and await its completion ack.
 ///
 /// Opens a short-lived cli-client IPC connection, performs the minimal
-/// `AttachClient` handshake required by 0.44.3, sends the action with
+/// `AttachClient` handshake required by 0.45.1, sends the action with
 /// `is_cli_client=true`, then drains messages until the action's
 /// `UnblockInputThread` terminator — mapping any `Log`/`LogError` replies into
 /// an [`ActionAck`].
@@ -94,8 +94,11 @@ pub fn send_action(session: &str, action: Action) -> Result<ActionAck> {
     // UnblockInputThread, which we skip below before arming the action ack.
     //
     // FA: attach at a NEUTRAL-LARGE size (not 24×80) so this ephemeral action
-    // client never becomes the session's minimum terminal size and shrinks the
-    // real client's geometry. See `crate::query::NEUTRAL_ATTACH_*`.
+    // client never becomes the smallest client on whichever tab it lands on
+    // and shrinks a real client's geometry. Since 0.45.1 zellij recomputes a
+    // tab's size from only the clients currently focused on that tab (no more
+    // session-wide minimum), so a large neutral attach's blast radius is just
+    // that one tab rather than the whole session. See `crate::query::NEUTRAL_ATTACH_*`.
     use zellij_utils::input::cli_assets::CliAssets;
     let cli_assets = CliAssets {
         terminal_window_size: Size {
@@ -252,6 +255,7 @@ pub fn new_pane(session: &str, floating: bool, pane_name: Option<String>) -> Res
             coordinates: None,
             near_current_pane: false,
             tab_id: None,
+            no_focus: false,
         }
     } else {
         Action::NewPane {

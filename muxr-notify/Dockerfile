@@ -9,7 +9,7 @@
 # for a plain HTTP relay meant to sit behind a TLS-terminating reverse proxy.
 #
 # Multi-stage build:
-#   builder  — rust:1.92-slim (glibc), compiles the whole workspace's Cargo.lock
+#   builder  — rust:1.95-slim (glibc), compiles the whole workspace's Cargo.lock
 #              but only the muxr-notify binary target
 #   runtime  — debian:bookworm-slim + ca-certificates (outbound HTTPS to FCM /
 #              Google OAuth2 token endpoints) + a non-root user
@@ -27,7 +27,7 @@
 # ══════════════════════════════════════════════════════════════════════════════
 # Stage 1 — builder
 # ══════════════════════════════════════════════════════════════════════════════
-FROM rust:1.92-slim AS builder
+FROM rust:1.95-slim AS builder
 
 # build-essential: cc for rusqlite's `bundled` feature (vendored SQLite compiled
 # from source). No protoc/cmake/clang needed — muxr-notify has no tonic/prost or

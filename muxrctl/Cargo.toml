@@ -34,7 +34,7 @@ if-addrs = "0.14"
 
 # Zellij utils — token DB ops (web_authentication_tokens).
 # Same pin/features as muxrd so the shared SQLite DB stays compatible.
-zellij-utils = { version = "0.44.3", default-features = false, features = ["web_server_capability"] }
+zellij-utils = { version = "0.45.1", default-features = false, features = ["web_server_capability"] }
 
 # Base64url encoding for the pairing token in the QR URI.
 base64 = "0.22"

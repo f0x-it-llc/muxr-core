@@ -36,7 +36,7 @@ mod token_ops;
 /// The zellij source version this server was compiled against.
 ///
 /// Asserted at service construction to catch version drift early.
-pub const ZELLIJ_CONTRACT_VERSION: &str = "0.44.3";
+pub const ZELLIJ_CONTRACT_VERSION: &str = "0.45.1";
 
 /// muxrd's own semantic version (tracks the crate version).
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");

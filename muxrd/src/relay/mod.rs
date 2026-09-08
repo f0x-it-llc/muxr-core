@@ -224,12 +224,14 @@ pub async fn attach_relay(
 
     // ── 1b. Major A (round-2): read-only attaches must NOT drive geometry ────
     //
-    // zellij resizes the shared session to the MINIMUM terminal size across all
-    // attached clients on every AttachClient handshake (zellij-server
-    // lib.rs::min_client_terminal_size). A small read-only observer would
-    // otherwise shrink the writer's session. So for a read-only attach we
-    // attach with the session's CURRENT size (queried up-front), never the
-    // client's. Writers (RW) keep driving their own size exactly as before.
+    // zellij recomputes a tab's size from the MINIMUM terminal size across only
+    // the clients currently focused on that tab, on every AttachClient handshake
+    // (zellij-server lib.rs; the old session-wide `min_client_terminal_size` was
+    // deleted in 0.45.1 in favour of this per-tab recompute). A small read-only
+    // observer would otherwise shrink the writer's tab. So for a read-only
+    // attach we attach with the session's CURRENT size (queried up-front),
+    // never the client's. Writers (RW) keep driving their own size exactly as
+    // before.
     let (rows, cols) = if read_only {
         let query_session = session.clone();
         let size_backend = backend.clone();

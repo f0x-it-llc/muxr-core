@@ -181,7 +181,12 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     fn create_session(&self, name: &str, layout: Option<String>) -> anyhow::Result<ActionAck>;
 
     /// Kill a session.
-    fn kill_session(&self, session: &str) -> anyhow::Result<()>;
+    ///
+    /// Returns a **failed** [`ActionAck`] when the backend DECLINES the kill — a
+    /// logical refusal, such as herdr refusing to close a worktree-group primary
+    /// or to remove the last remaining space. `Err` is reserved for IPC and join
+    /// failures. A refusal must never reach the client as a transport error.
+    fn kill_session(&self, session: &str) -> anyhow::Result<ActionAck>;
 
     /// Rename a session.
     fn rename_session(&self, session: &str, new_name: String) -> anyhow::Result<ActionAck>;
@@ -315,9 +320,42 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     }
 
     /// Close the space `space_id`. Default: unsupported (zellij).
-    fn close_space(&self, space_id: &str) -> anyhow::Result<ActionAck> {
-        let _ = space_id;
+    ///
+    /// `close_group` is the caller's **opt-in** group intent, threaded down from
+    /// `CloseSpaceReq.close_group` (default `false`). On a backend whose spaces can
+    /// form groups — herdr's worktree groups — `false` means "close only the named
+    /// space, and refuse if that is impossible", and `true` means "close the named
+    /// space together with the rest of its group". A backend with no group concept
+    /// removes exactly the named space either way and may ignore the flag; the
+    /// default impl discards it the same way it discards `space_id`.
+    fn close_space(&self, space_id: &str, close_group: bool) -> anyhow::Result<ActionAck> {
+        let _ = (space_id, close_group);
         Ok(space_unsupported_ack("close_space"))
+    }
+
+    /// The spaces a [`Self::close_space`] of `space_id` would remove, resolved
+    /// **before** the close from the backend's own listing.
+    ///
+    /// The returned ids include `space_id` itself and are the complete removal set,
+    /// so the gRPC layer can refuse a close that would leave the daemon with zero
+    /// spaces *instead of* discovering it afterwards, and can report exactly what
+    /// went away. It is a read: it must not mutate anything.
+    ///
+    /// The **default answers `[space_id]`** — a backend with no group concept
+    /// removes exactly the space it was handed. A backend without spaces at all
+    /// never reaches this: its [`Self::list_spaces`] is empty, so the last-space
+    /// guard refuses first. herdr overrides it to resolve a worktree group's
+    /// membership from `workspace.list`.
+    ///
+    /// Best-effort by contract: the answer is a snapshot, so a concurrent mutation
+    /// can still invalidate it. Callers verify after the close as well.
+    fn spaces_removed_by_close(
+        &self,
+        space_id: &str,
+        close_group: bool,
+    ) -> anyhow::Result<Vec<String>> {
+        let _ = close_group;
+        Ok(vec![space_id.to_owned()])
     }
 
     // ── Read-only queries ───────────────────────────────────────────────────

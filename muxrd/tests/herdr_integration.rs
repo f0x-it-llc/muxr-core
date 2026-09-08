@@ -23,11 +23,19 @@
 //! | `smoke_open_attach_render_input` | `open_attach` → read `Render` frames → send input → teardown |
 //! | `smoke_space_scoped_layout_is_a_read_only_peek` | `query_layout_for_space` on a NON-focused workspace — right tree, no focus moved |
 //!
-//! ## AGPL note
+//! ## Licence and attribution note
 //!
-//! These tests drive herdr solely through its public Unix-domain sockets
-//! (the JSON-API control socket and the binary wire relay socket).  herdr runs
-//! as a separate, unmodified, user-installed binary; no herdr source is linked.
+//! These tests drive herdr solely through its public Unix-domain sockets (the
+//! JSON-API control socket and the binary wire relay socket).  herdr runs as a
+//! separate, unmodified, user-installed binary and no herdr source is linked.
+//!
+//! The message layouts they exercise live in `muxrd`'s
+//! `multiplexer::herdr::wire`, which is **derived from herdr v0.9.0's
+//! `src/protocol/wire.rs` (Apache-2.0) and modified**; this file is derived from
+//! the same source to the extent that it pins that protocol's version floor.
+//! Attribution is retained per Apache-2.0 §4, with the repository-level notice in
+//! `THIRD-PARTY-NOTICES.md`.  (herdr relicensed from AGPL-3.0-or-later at v0.8.0;
+//! nothing here is AGPL.)
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -100,6 +108,11 @@ fn smoke_list_sessions() {
 /// value, so a live server must yield a real protocol number here, never the
 /// "unknown" fallback and never a constant.
 ///
+/// The floor asserted below is muxrd's `HERDR_MIN_PROTOCOL` — 22, shipped by herdr
+/// v0.9.0 — because the wire mirror carries exactly that one layout with no
+/// compatibility branch: protocol 22 renamed and retyped the handshake and deleted a
+/// server variant, so an older server is not a supported peer.
+///
 /// # Run
 /// ```text
 /// HERDR_SOCKET_PATH=/path/to/herdr.sock \
@@ -122,15 +135,16 @@ fn smoke_discovers_wire_protocol() {
     );
 
     // The reported protocol must be a real number the server told us, and at least
-    // the oldest herdr muxrd vendored layouts for.
+    // the protocol muxrd's wire mirror is written against (`HERDR_MIN_PROTOCOL`).
     let protocol: u32 = version
         .rsplit("-wire-v")
         .next()
         .and_then(|p| p.parse().ok())
         .unwrap_or_else(|| panic!("no parseable wire protocol in {version:?}"));
     assert!(
-        protocol >= 14,
-        "discovered protocol {protocol} is older than any herdr muxrd supports"
+        protocol >= 22,
+        "discovered protocol {protocol} is older than the protocol muxrd mirrors (22, \
+         herdr v0.9.0) — upgrade herdr"
     );
 }
 

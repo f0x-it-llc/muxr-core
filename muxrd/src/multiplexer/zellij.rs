@@ -155,8 +155,17 @@ impl MuxBackend for ZellijBackend {
         actions::create_session(name, layout)
     }
 
-    fn kill_session(&self, session: &str) -> Result<()> {
-        actions::kill_session(session)
+    fn kill_session(&self, session: &str) -> Result<ActionAck> {
+        // zellij has no logical refusal for a kill: the session either accepts the
+        // direct KillSession IPC message or its socket is gone, which is a genuine
+        // transport failure and stays an `Err`. The ack shape exists for herdr,
+        // which can decline (worktree-group primary, last remaining space).
+        actions::kill_session(session)?;
+        Ok(ActionAck {
+            ok: true,
+            error: None,
+            info: None,
+        })
     }
 
     fn rename_session(&self, session: &str, new_name: String) -> Result<ActionAck> {
