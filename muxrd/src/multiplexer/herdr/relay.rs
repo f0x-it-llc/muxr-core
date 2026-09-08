@@ -1,6 +1,14 @@
-//! Independently-authored herdr interop — drives herdr's public v0.7.1 wire relay
-//! socket for interop. Not derived from herdr's AGPL source; herdr runs as a
-//! separate, unmodified, user-installed binary driven over its public sockets.
+//! herdr's wire relay socket, driven as muxrd's terminal data plane —
+//! **derived from herdr, and modified**.
+//!
+//! The message types this module builds live in [`wire`](super::wire), which is
+//! derived from `src/protocol/wire.rs` at tag `v0.9.0` of the upstream herdr
+//! repository (<https://github.com/herdrdev/herdr>), licensed **Apache-2.0**;
+//! this file's handshake and attach sequence are derived from the same source and
+//! **modified** — the relay logic, threading model, reconnect ladder and tests
+//! around them are muxrd's own. Attribution is retained per Apache-2.0 §4, with
+//! the repository-level notice in `THIRD-PARTY-NOTICES.md`. herdr itself remains a
+//! separate, unmodified, user-installed binary driven only over its public sockets.
 //!
 //! # herdr **data plane** — the wire terminal relay (P2.03)
 //!
@@ -90,22 +98,28 @@ use super::api::{PaneInfo, PaneZoomMode};
 use super::control::HerdrControl;
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 use super::wire::{
-    AttachScrollDirection, AttachScrollSource, ClientKeybindings, ClientLaunchMode, ClientMessage,
-    FramingError, HERDR_MAX_TESTED_PROTOCOL, HERDR_MIN_PROTOCOL, RenderEncoding, ServerMessage,
-    WireFrame, read_server_message, write_message,
+    AttachScrollDirection, AttachScrollSource, ClientMessage, FramingError,
+    HERDR_MAX_TESTED_PROTOCOL, HERDR_MIN_PROTOCOL, RenderEncoding, ServerMessage, WireFrame,
+    read_server_message, write_message,
 };
 
-/// Bound on the blocking handshake (`Hello`/`Welcome`/`AttachTerminal`) and on
+/// Bound on the blocking handshake (`TerminalHello`/`Welcome`/`AttachTerminal`) and on
 /// every wire write. herdr is co-located on a local Unix socket, so this is a
 /// safety ceiling rather than an expected latency — it guarantees `open_attach`
 /// and the sender's writes never wedge indefinitely. The reader half deliberately
 /// has **no** read timeout (it blocks on the reader thread, which is correct).
 const WIRE_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Cell pixel dimensions advertised in `Hello`. `0` disables Kitty graphics
+/// Cell pixel dimensions advertised in `TerminalHello`. `0` disables Kitty graphics
 /// negotiation — muxrd relays raw ANSI to kterm, which carries its own renderer,
 /// so we never request herdr-side graphics frames (matching the spike).
 const CELL_PX_DISABLED: u32 = 0;
+
+/// Value muxrd sends for herdr's `pixel_mouse` flag (`TerminalHello` and `Resize`).
+/// It advertises that the client sends coherent exact geometry for SGR pixel mouse
+/// input — muxrd sends zero cell dimensions ([`CELL_PX_DISABLED`]) and forwards
+/// wheel events as `AttachScroll`, so it has no pixel geometry to offer.
+const PIXEL_MOUSE_DISABLED: bool = false;
 
 /// Number of connect+handshake attempts a single [`HerdrMuxSender::reattach`]
 /// makes before giving up and tearing down the AttachTerminal stream. The old
@@ -139,8 +153,9 @@ const SWAP_SLACK: Duration = Duration::from_secs(1);
 /// How long [`HerdrMuxReceiver::recv`] waits for a reconnect's new read half after
 /// it hits EOF **while a swap is in flight** (`swap_pending` set). It must cover the
 /// worst-case [`HerdrMuxSender::reattach`]: [`RECONNECT_ATTEMPTS`] attempts, each of
-/// which may spend up to three [`WIRE_TIMEOUT`]-bounded handshake ops (`Hello`
-/// write, `Welcome` read, `AttachTerminal` write) plus a [`CONNECT_SLACK`] allowance
+/// which may spend up to three [`WIRE_TIMEOUT`]-bounded handshake ops
+/// (`TerminalHello` write, `Welcome` read, `AttachTerminal` write) plus a
+/// [`CONNECT_SLACK`] allowance
 /// for the (unbounded) connect — i.e.
 /// `RECONNECT_ATTEMPTS × (3 × WIRE_TIMEOUT + CONNECT_SLACK)` — plus [`SWAP_SLACK`].
 /// With `WIRE_TIMEOUT = 3 s` that is `2 × (3×3 + 1) + 1 = 21 s`. Note that
@@ -166,8 +181,9 @@ const SWAP_GRACE: Duration = Duration::from_secs(
 // ─── open_attach (P2.04 entry point) ──────────────────────────────────────────
 
 /// Open a herdr wire attach for `workspace_id`, returning the split
-/// [`DualHandle`]. Performs the v14 handshake, asserts protocol compatibility,
-/// and attaches the pane [`resolve_attach_target`] picks — the workspace's
+/// [`DualHandle`]. Performs the direct-terminal handshake at the protocol the
+/// server itself reports (never a compiled-in one), surfaces any handshake error
+/// herdr returns, and attaches the pane [`resolve_attach_target`] picks — the workspace's
 /// **focused pane** by default, or the client's resume target when `resume`
 /// carries a usable hint (the single-pane attach model either way).
 ///
@@ -281,10 +297,11 @@ fn resumed_view_for(resume: &ResumeTarget, target: &AttachTarget) -> Option<Resu
 /// stable across herdr releases and has reported `protocol` since 0.7.1.
 ///
 /// A protocol above [`HERDR_MAX_TESTED_PROTOCOL`] is **not** an error — muxrd proceeds
-/// and logs a warning. herdr's changes so far have been additive (appended message
-/// variants), which the decoder tolerates, so refusing to attach would break users on
-/// a new herdr for no reason. The warning is the tripwire that tells us to re-verify
-/// the layout if herdr ever makes a breaking change.
+/// and logs a warning. Refusing to attach would break every user the day herdr ships a
+/// release, for a layout change that may not affect the direct-attach lane at all. The
+/// warning is the tripwire that says: re-derive the layout from herdr's source. Unlike
+/// the 14 → 17 era, a bump is **not** presumed additive — herdr deleted and retyped
+/// variants between 17 and 22.
 fn discover_protocol(control: &HerdrControl) -> Result<u32> {
     let info = control
         .ping()
@@ -292,9 +309,9 @@ fn discover_protocol(control: &HerdrControl) -> Result<u32> {
 
     if info.protocol < HERDR_MIN_PROTOCOL {
         log::warn!(
-            "herdr {} reports wire protocol v{}, which is older than the oldest version \
-             muxrd vendored message layouts for (v{HERDR_MIN_PROTOCOL}). Proceeding, but \
-             frames may not decode — upgrading herdr is the supported fix.",
+            "herdr {} reports wire protocol v{}, which is older than the protocol muxrd \
+             mirrors (v{HERDR_MIN_PROTOCOL}). Proceeding, but frames may not decode — \
+             upgrading herdr is the supported fix.",
             info.version,
             info.protocol,
         );
@@ -302,8 +319,9 @@ fn discover_protocol(control: &HerdrControl) -> Result<u32> {
         log::warn!(
             "herdr {} speaks wire protocol v{}, which is newer than the highest version \
              muxrd has been tested against (v{HERDR_MAX_TESTED_PROTOCOL}). Proceeding — \
-             herdr's protocol changes have so far been additive — but if terminal output \
-             misbehaves, this mismatch is the first thing to check.",
+             an unrecognised server frame is skipped, not fatal — but herdr has removed \
+             and retyped messages before, so if terminal output misbehaves, this \
+             mismatch is the first thing to check.",
             info.version,
             info.protocol,
         );
@@ -318,8 +336,8 @@ fn discover_protocol(control: &HerdrControl) -> Result<u32> {
 }
 
 /// Connect a fresh herdr wire socket and drive the full attach handshake for
-/// `terminal_id`: set the handshake timeouts, send `Hello` (carrying the client's
-/// current `rows`×`cols`), read + assert `Welcome`, then send
+/// `terminal_id`: set the handshake timeouts, send `TerminalHello` (carrying the
+/// client's current `rows`×`cols`), read + assert `Welcome`, then send
 /// `AttachTerminal { takeover: true }`. Returns the connected stream with both the
 /// read and write timeouts still at [`WIRE_TIMEOUT`] — the caller splits it via
 /// [`split_wire`]. Shared by [`open_attach`] and [`HerdrMuxSender::reattach`] so the
@@ -340,24 +358,26 @@ fn connect_and_attach(
         .set_write_timeout(Some(WIRE_TIMEOUT))
         .context("set herdr wire handshake write timeout")?;
 
-    let hello = ClientMessage::Hello {
+    // herdr 0.9.0 dropped the requested-encoding, keybindings and launch-mode
+    // fields: a direct attach is implied by this handshake plus the AttachTerminal
+    // below, and herdr forces TerminalAnsi for every non-endpoint client — which is
+    // exactly what muxrd wants.
+    let hello = ClientMessage::TerminalHello {
         version: protocol,
         cols,
         rows,
         cell_width_px: CELL_PX_DISABLED,
         cell_height_px: CELL_PX_DISABLED,
-        requested_encoding: RenderEncoding::TerminalAnsi,
-        keybindings: ClientKeybindings::Server,
-        launch_mode: ClientLaunchMode::TerminalAttach,
+        pixel_mouse: PIXEL_MOUSE_DISABLED,
     };
-    write_message(&mut &stream, &hello).context("send herdr Hello")?;
+    write_message(&mut &stream, &hello).context("send herdr TerminalHello")?;
 
     let welcome = match read_server_message(&mut &stream).context("read herdr Welcome")? {
         WireFrame::Message(msg) => msg,
         WireFrame::Unknown { tag, .. } => {
             return Err(anyhow!(
-                "herdr handshake: expected Welcome, got an unknown frame (tag {tag}) — \
-                 the server's wire layout is not one muxrd can interpret"
+                "herdr handshake: expected Welcome, got a frame muxrd does not decode \
+                 (tag {tag}) — the server's wire layout is not one muxrd can interpret"
             ));
         }
     };
@@ -744,8 +764,8 @@ pub struct HerdrMuxSender {
     swap_pending: Arc<AtomicBool>,
     /// Hands the reader its new read half after a reconnect (`None` = swap failed).
     swap_tx: mpsc::Sender<Option<UnixStream>>,
-    /// Latest client dimensions — a reconnect's `Hello` must carry them so the fresh
-    /// attach opens at the client's current size.
+    /// Latest client dimensions — a reconnect's `TerminalHello` must carry them so
+    /// the fresh attach opens at the client's current size.
     rows: u16,
     cols: u16,
     /// Wire socket path for reconnects (the same instance `open_attach` resolved).
@@ -998,10 +1018,9 @@ impl MuxSender for HerdrMuxSender {
         // Wheel events in direct-attach mode go over `AttachScroll` — herdr's
         // dedicated attach-mode scroll message (scrollback scrolling, and the
         // wheel source + position let herdr forward to a mouse-capturing app
-        // in the attached pane). `InputEvents` is NOT interpreted for
-        // attach-mode scrolling (verified live: accepted but ignored). This is
-        // the first use of the variant — it has been tag-stable in [`wire`]
-        // since the protocol was pinned (kept for discriminant alignment).
+        // in the attached pane). Its payload is unchanged in protocol 22, and
+        // herdr 0.9.0's richer `AttachMouse` is deliberately NOT adopted here:
+        // this path works, and a structured-mouse client is a separate decision.
         let direction = match kind {
             MuxMouseKind::WheelUp => AttachScrollDirection::Up,
             MuxMouseKind::WheelDown => AttachScrollDirection::Down,
@@ -1017,15 +1036,19 @@ impl MuxSender for HerdrMuxSender {
     }
 
     fn send_resize(&mut self, rows: u16, cols: u16) -> Result<()> {
-        // Record the latest dimensions so a subsequent reattach's Hello opens the
-        // fresh connection at the client's current size.
+        // Record the latest dimensions so a subsequent reattach's TerminalHello
+        // opens the fresh connection at the client's current size.
         self.rows = rows;
         self.cols = cols;
+        // `pixel_mouse` is protocol 22's fifth field. bincode is positional, so
+        // omitting it would leave herdr's decoder one field short of the declared
+        // frame length — a hard decode failure, not a default.
         self.send(&ClientMessage::Resize {
             cols,
             rows,
             cell_width_px: CELL_PX_DISABLED,
             cell_height_px: CELL_PX_DISABLED,
+            pixel_mouse: PIXEL_MOUSE_DISABLED,
         })
     }
 
@@ -1163,12 +1186,14 @@ impl HerdrMuxReceiver {
 fn recv_from<R: io::Read>(reader: &mut R) -> Option<MuxServerMsg> {
     match read_server_message(reader) {
         Ok(WireFrame::Message(msg)) => Some(map_server_message(*msg)),
-        // A variant appended by a newer herdr. The frame was fully consumed using its
-        // length prefix, so the stream is still aligned — drain it like any other
-        // message we do not act on. This must NOT end the relay: doing so would turn
-        // every future additive herdr change into a silently dying terminal.
+        // A frame muxrd does not decode: a variant a newer herdr appended, or one of
+        // the client-owned shell payloads `wire` deliberately does not mirror. The
+        // frame was fully consumed using its length prefix, so the stream is still
+        // aligned — drain it like any other message we do not act on. This must NOT
+        // end the relay: doing so would turn every future additive herdr change into
+        // a silently dying terminal.
         Ok(WireFrame::Unknown { tag, len }) => {
-            log::debug!("herdr wire: skipping unknown message tag {tag} ({len} bytes)");
+            log::debug!("herdr wire: skipping undecoded message tag {tag} ({len} bytes)");
             Some(MuxServerMsg::Other)
         }
         Err(FramingError::UnexpectedEof) => None,
@@ -1183,9 +1208,17 @@ fn recv_from<R: io::Read>(reader: &mut R) -> Option<MuxServerMsg> {
 ///
 /// | herdr `ServerMessage` | neutral `MuxServerMsg` |
 /// |---|---|
-/// | `Terminal(frame)` | `Render(frame.bytes)` — ANSI forwarded verbatim (full or incremental) |
-/// | `ServerShutdown { reason }` | `Event(Exit { reason })` (`reason` defaulted to `""`) |
-/// | `Welcome` / `Frame` / `Graphics` / `Notify` / `Clipboard` / `WindowTitle` / `ReloadSoundConfig` / `MouseCapture` | `Other` (drained, loop cadence preserved) |
+/// | `Terminal(frame)` (tag 1) | `Render(frame.bytes)` — ANSI forwarded verbatim (full or incremental) |
+/// | `ServerShutdown { reason }` (tag 3) | `Event(Exit { reason })` (`reason` defaulted to `""`) |
+/// | every other decoded variant | `Other` (drained, loop cadence preserved) |
+///
+/// The drain arm is exhaustive **by variant, not by wildcard**: a herdr rebaseline
+/// that adds a variant must come here and decide, and the compiler says so. What it
+/// must never do is end the relay — an unhandled message is drained, because turning
+/// an upstream addition into a dead terminal is precisely the failure this relay has
+/// already suffered once. Frames muxrd does not decode at all (a newer herdr's tag,
+/// or a client-owned shell payload) never reach this function: [`recv_from`] drains
+/// them from the [`WireFrame::Unknown`] arm.
 ///
 /// EOF / framing errors are handled one level up in [`recv_from`] (→ `None`), as
 /// they are transport conditions, not `ServerMessage` values.
@@ -1200,14 +1233,30 @@ fn map_server_message(msg: ServerMessage) -> MuxServerMsg {
         }),
         // No remote-client semantics for the single-pane ANSI relay: drain them,
         // preserving the per-message reader cadence (parallel to zellij's `Other`).
+        //
+        // TerminalBell (9) and DirectTerminalKeyboardProtocol (16) are the two a
+        // direct attach genuinely receives from herdr 0.9.0 — kterm owns its own
+        // bell and keyboard protocol, so both are drained. The rest belong to the
+        // graphics path muxrd never enables or to the client-owned shell lane.
         ServerMessage::Welcome { .. }
-        | ServerMessage::Frame(_)
         | ServerMessage::Graphics { .. }
         | ServerMessage::Notify { .. }
         | ServerMessage::Clipboard { .. }
         | ServerMessage::WindowTitle { .. }
         | ServerMessage::ReloadSoundConfig
-        | ServerMessage::MouseCapture { .. } => MuxServerMsg::Other,
+        | ServerMessage::MouseCapture { .. }
+        | ServerMessage::TerminalBell { .. }
+        | ServerMessage::GraphicsFile { .. }
+        | ServerMessage::GraphicsTransmissionRetired { .. }
+        | ServerMessage::ClientShellSnapshot
+        | ServerMessage::PaneSurface
+        | ServerMessage::SemanticNotification
+        | ServerMessage::ClientShellError { .. }
+        | ServerMessage::DirectTerminalKeyboardProtocol { .. }
+        | ServerMessage::ClientShellKeyboardReportAll { .. }
+        | ServerMessage::ClientShellEndpointResponseChunk { .. }
+        | ServerMessage::PaneSurfacePatch
+        | ServerMessage::EndpointControl { .. } => MuxServerMsg::Other,
     }
 }
 
@@ -1292,18 +1341,18 @@ mod tests {
             .0
     }
 
-    /// Fake herdr server side of one attach handshake: read `Hello`, reply
+    /// Fake herdr server side of one attach handshake: read `TerminalHello`, reply
     /// `Welcome{echoed version, TerminalAnsi, no error}`, read `AttachTerminal`.
     /// Returns both.
     ///
-    /// The version is echoed back from the client's `Hello` exactly as a real herdr
-    /// does — it accepts only a client whose version equals its own, so an echo is
-    /// the faithful stand-in and keeps these fixtures free of any pinned constant.
+    /// The version is echoed back from the client's `TerminalHello` exactly as a real
+    /// herdr does — it accepts only a client whose version equals its own, so an echo
+    /// is the faithful stand-in and keeps these fixtures free of any pinned constant.
     fn serve_handshake(stream: &mut UnixStream) -> (ClientMessage, ClientMessage) {
         let hello = read_client_message(stream);
         let hello_version = match &hello {
-            ClientMessage::Hello { version, .. } => *version,
-            other => panic!("expected Hello first, got {other:?}"),
+            ClientMessage::TerminalHello { version, .. } => *version,
+            other => panic!("expected TerminalHello first, got {other:?}"),
         };
         stream
             .write_all(&frame_server_message(&ServerMessage::Welcome {
@@ -1379,6 +1428,11 @@ mod tests {
         }
     }
 
+    /// Every decoded variant muxrd does not act on must drain to `Other` — never
+    /// end the relay. The list is deliberately exhaustive over protocol 22's
+    /// non-render, non-shutdown variants, including the ones herdr 0.9.0 added
+    /// (`TerminalBell`, `DirectTerminalKeyboardProtocol`, the endpoint lane) and the
+    /// payload-free placeholders `wire` keeps only to hold their tags.
     #[test]
     fn drained_variants_map_to_other() {
         for msg in [
@@ -1398,7 +1452,46 @@ mod tests {
                 title: Some("t".into()),
             },
             ServerMessage::ReloadSoundConfig,
-            ServerMessage::MouseCapture { enabled: true },
+            ServerMessage::MouseCapture {
+                enabled: true,
+                sgr_pixels: true,
+            },
+            ServerMessage::TerminalBell { count: 3 },
+            ServerMessage::GraphicsFile {
+                path: "/tmp/x.rgba".into(),
+                expected_len: 0,
+                image_id: 1,
+                transfer_id: 2,
+                leading: vec![],
+                control: String::new(),
+                surface_asset: None,
+            },
+            ServerMessage::GraphicsTransmissionRetired {
+                transfer_id: 2,
+                image_id: 1,
+            },
+            ServerMessage::ClientShellSnapshot,
+            ServerMessage::PaneSurface,
+            ServerMessage::SemanticNotification,
+            ServerMessage::ClientShellError {
+                message: "nope".into(),
+            },
+            ServerMessage::DirectTerminalKeyboardProtocol {
+                flags: 1,
+                modify_other_keys_level: 2,
+            },
+            ServerMessage::ClientShellKeyboardReportAll { enabled: true },
+            ServerMessage::ClientShellEndpointResponseChunk {
+                boot_id: "b".into(),
+                request_id: "r".into(),
+                final_chunk: true,
+                data: vec![],
+            },
+            ServerMessage::PaneSurfacePatch,
+            ServerMessage::EndpointControl {
+                kind: "k".into(),
+                data: "d".into(),
+            },
         ] {
             assert!(
                 matches!(map_server_message(msg.clone()), MuxServerMsg::Other),
@@ -1441,6 +1534,41 @@ mod tests {
             Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => assert_eq!(reason, "bye"),
             other => panic!("expected Exit event, got {other:?}"),
         }
+    }
+
+    /// A frame `wire` skips — a tag from a newer herdr, or one of the client-owned
+    /// shell payloads muxrd does not mirror — must drain to `Other` and leave the
+    /// stream aligned for the next frame. Returning `None` here would end the
+    /// AttachTerminal stream, which is exactly how an upstream addition becomes a
+    /// dead terminal.
+    #[test]
+    fn recv_from_skipped_frame_drains_without_ending_the_relay() {
+        // Tag 13 is `PaneSurface`, declared by herdr 0.9.0 but not mirrored; 99 is
+        // a variant only a future herdr could send. Neither may end the relay.
+        let mut stream = Vec::new();
+        for tag in [13u8, 99u8] {
+            let payload = [&[tag][..], &[0xFF; 6][..]].concat();
+            stream.extend_from_slice(&(payload.len() as u32).to_le_bytes());
+            stream.extend_from_slice(&payload);
+        }
+        let render = bincode::serde::encode_to_vec(term_frame(7), bincode::config::standard())
+            .expect("encode terminal frame");
+        stream.extend_from_slice(&(render.len() as u32).to_le_bytes());
+        stream.extend_from_slice(&render);
+
+        let mut cursor: &[u8] = &stream;
+        assert!(
+            matches!(recv_from(&mut cursor), Some(MuxServerMsg::Other)),
+            "an unmirrored herdr 0.9.0 tag must drain, not end the relay"
+        );
+        assert!(
+            matches!(recv_from(&mut cursor), Some(MuxServerMsg::Other)),
+            "a future herdr's tag must drain, not end the relay"
+        );
+        assert!(
+            matches!(recv_from(&mut cursor), Some(MuxServerMsg::Render(_))),
+            "the frame after two skipped ones must still decode — the stream stays aligned"
+        );
     }
 
     // ── assert_welcome: error-driven, NOT version-gated ───────────────────────
@@ -2112,7 +2240,7 @@ mod tests {
     // ── reattach: release-then-reconnect (one terminal per connection) ─────────
 
     /// Happy path: `reattach` `Detach`es the old connection, opens a fresh one for
-    /// the new terminal, and the reconnect's `Hello` carries the sender's LATEST
+    /// the new terminal, and the reconnect's `TerminalHello` carries the sender's LATEST
     /// dimensions (changed via `send_resize` before the switch).
     #[test]
     fn reattach_releases_old_then_reconnects_with_latest_dims() {
@@ -2182,20 +2310,29 @@ mod tests {
             "conn1 must receive Detach before the reconnect, got {detach:?}"
         );
         match hello2 {
-            ClientMessage::Hello {
+            ClientMessage::TerminalHello {
                 rows,
                 cols,
-                launch_mode,
+                cell_width_px,
+                cell_height_px,
+                pixel_mouse,
                 ..
             } => {
                 assert_eq!(
                     (rows, cols),
                     (50, 200),
-                    "reconnect Hello must carry the latest client dimensions"
+                    "reconnect TerminalHello must carry the latest client dimensions"
                 );
-                assert!(matches!(launch_mode, ClientLaunchMode::TerminalAttach));
+                // The direct-attach mode herdr 0.9.0 dropped `launch_mode` for is
+                // implied by TerminalHello + AttachTerminal; what remains to pin is
+                // that muxrd still advertises no pixel geometry.
+                assert_eq!((cell_width_px, cell_height_px), (0, 0));
+                assert!(
+                    !pixel_mouse,
+                    "muxrd must not claim SGR pixel-mouse geometry"
+                );
             }
-            other => panic!("expected Hello on conn2, got {other:?}"),
+            other => panic!("expected TerminalHello on conn2, got {other:?}"),
         }
         assert!(
             matches!(attach2, ClientMessage::AttachTerminal { ref terminal_id, takeover: true } if terminal_id == "term-B"),
