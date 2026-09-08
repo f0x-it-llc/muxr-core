@@ -29,7 +29,7 @@ use std::sync::Arc;
 use tonic::{Request, Response, Status};
 
 use crate::actions::ActionAck;
-use crate::multiplexer::MuxBackend;
+use crate::multiplexer::{MuxBackend, SpaceSnapshot};
 use crate::proto::{
     ActionAck as ProtoAck, CloseSpaceReq, CreateSpaceReq, RenameSpaceReq, SessionRef, Space,
     SpaceList, SwitchSpaceReq,
@@ -293,17 +293,41 @@ impl MuxrService {
 
     /// Close (delete) a space. MUTATING. Control-plane (daemon-global).
     ///
-    /// **S-M1 — last/viewed-space safety:**
-    /// - The **last** remaining space is never closed: that would leave the daemon
-    ///   with zero workspaces, making the singular herdr session non-functional
-    ///   (`active_or_first_workspace_id` would error on the next attach/query). We
-    ///   return `ActionAck{ok:false, "cannot close the last space"}`.
-    /// - When the **caller's own** connection was viewing the just-closed space we
-    ///   re-point its relay to the daemon's new active-or-first workspace (via the
-    ///   same `RelayControl::SwitchSpace` mechanism SwitchSpace uses), so its wire
-    ///   stream does not keep pointing at a dead workspace. This aligns with herdr's
-    ///   own `workspace.close` behaviour, which refocuses another workspace when the
-    ///   focused one is closed.
+    /// **Group intent is the caller's** (`CloseSpaceReq.close_group`, default
+    /// `false`). A default close removes exactly the named space; on herdr a named
+    /// space that is a worktree-group primary is *refused* by the backend, and that
+    /// refusal is forwarded as `ActionAck{ok:false}` naming the group. Only an
+    /// explicit `close_group: true` removes a whole group, and the ack's `info`
+    /// then names every space that went.
+    ///
+    /// **Zero-space safety.** A CloseSpace must never leave the daemon with zero
+    /// spaces without the caller being told, because the singular herdr session
+    /// stops working the moment it has no workspaces
+    /// (`active_or_first_workspace_id` errors on the next attach/query). The
+    /// mechanism is a **pre-close refusal**, chosen over after-the-fact reporting
+    /// because herdr's `workspace.list` exposes each workspace's worktree repo key
+    /// and linked-worktree flag — enough to reproduce herdr's own group-removal
+    /// rule (see [`MuxBackend::spaces_removed_by_close`]) — so the exact removal
+    /// set is knowable while nothing has happened yet:
+    /// - default close: one space goes, so the pre-close cardinality alone decides
+    ///   it — [`would_close_last_space`], the original S-M1 guard;
+    /// - group close: the removal set is resolved first and the close is refused
+    ///   when it covers every space present ([`would_close_every_space`]). The old
+    ///   cardinality guard is *not* sufficient here — that is precisely how an
+    ///   unconditional group close could empty a two-space daemon past a guard that
+    ///   counted two.
+    ///
+    /// A snapshot can still be raced by a concurrent close, so the post-close
+    /// listing below double-checks and, when nothing remains, says so in the ack
+    /// rather than only in the daemon log. That listing doubles as the re-point
+    /// target lookup, so it costs one round trip, not two.
+    ///
+    /// **Caller re-point.** When the **caller's own** connection was viewing the
+    /// just-closed space we re-point its relay to the daemon's new active-or-first
+    /// workspace (via the same `RelayControl::SwitchSpace` mechanism SwitchSpace
+    /// uses), so its wire stream does not keep pointing at a dead workspace. This
+    /// aligns with herdr's own `workspace.close` behaviour, which refocuses another
+    /// workspace when the focused one is closed.
     ///
     /// We do NOT touch *other* co-attached connections' relays (re-pointing a
     /// sibling's stream is exactly the S-M2/S-M4 isolation violation). A client that
@@ -320,13 +344,15 @@ impl MuxrService {
         let session = req.session;
         let connection_id = req.connection_id;
         let space_id = req.space_id;
+        let close_group = req.close_group;
         let (backend, bare) = self.resolve_session(&session)?;
         validate_space_id(&space_id)?;
-        log::info!("CloseSpace: session='{session}' space_id='{space_id}'");
+        log::info!(
+            "CloseSpace: session='{session}' space_id='{space_id}' close_group={close_group}"
+        );
 
-        // ── S-M1 guard: refuse to close the LAST space ────────────────────────
-        // Enumerate first (blocking herdr `workspace.list` → spawn_blocking) so we
-        // never leave the daemon with zero workspaces.
+        // ── Zero-space guard, resolved BEFORE anything is closed ──────────────
+        // Enumerate first (blocking herdr `workspace.list` → spawn_blocking).
         let space_count = {
             let backend = backend.clone();
             let bare = bare.clone();
@@ -339,11 +365,38 @@ impl MuxrService {
                 })?
                 .len()
         };
-        if would_close_last_space(space_count) {
-            log::info!("CloseSpace: refusing to close the last space for '{session}'");
+        // What this close would actually remove. Only a group close needs asking:
+        // without the flag the backend removes the named space or refuses, so its
+        // removal set is known without a second round trip.
+        let removals: Vec<String> = if close_group {
+            let backend = backend.clone();
+            let target = space_id.clone();
+            tokio::task::spawn_blocking(move || backend.spaces_removed_by_close(&target, true))
+                .await
+                .map_err(|e| Status::internal(format!("CloseSpace: group task panicked: {e}")))?
+                .map_err(|e| {
+                    // Fail closed: an unknown blast radius is not a licence to close.
+                    log::warn!("CloseSpace: group resolution failed for '{session}': {e:#}");
+                    Status::internal("CloseSpace: failed to resolve the group close set")
+                })?
+        } else {
+            vec![space_id.clone()]
+        };
+        let refusal = if close_group {
+            would_close_every_space(space_count, removals.len()).then(|| {
+                format!(
+                    "cannot close this group: it covers all {space_count} space(s) on \
+                     this daemon, which would leave none"
+                )
+            })
+        } else {
+            would_close_last_space(space_count).then(|| "cannot close the last space".to_owned())
+        };
+        if let Some(error) = refusal {
+            log::info!("CloseSpace: refusing '{space_id}' for '{session}': {error}");
             return Ok(Response::new(ProtoAck {
                 ok: false,
-                error: "cannot close the last space".to_owned(),
+                error,
                 info: String::new(),
             }));
         }
@@ -352,7 +405,7 @@ impl MuxrService {
         let ack = {
             let backend = backend.clone();
             let space_id = space_id.clone();
-            tokio::task::spawn_blocking(move || backend.close_space(&space_id))
+            tokio::task::spawn_blocking(move || backend.close_space(&space_id, close_group))
                 .await
                 .map_err(|e| Status::internal(format!("CloseSpace: close task panicked: {e}")))?
                 .map_err(|e| {
@@ -373,6 +426,28 @@ impl MuxrService {
             }));
         }
 
+        // ── Report the blast radius, and verify the daemon is not empty ───────
+        // `info` was always empty before, which is what made a group close
+        // invisible: the client saw one id go and could not learn that its
+        // siblings went with it.
+        let mut info = describe_removed(&removals);
+        let remaining = self
+            .list_spaces_after_close(&session, &backend, &bare)
+            .await;
+        if remaining.as_deref().is_some_and(<[_]>::is_empty) {
+            // Raced by a concurrent close (the pre-close set said otherwise). The
+            // caller MUST hear about it — a silent warn in the daemon log is what
+            // this whole guard exists to avoid.
+            log::warn!(
+                "CloseSpace: no spaces remain on '{session}' after closing '{space_id}' \
+                 — the daemon is left without a workspace"
+            );
+            info.push_str(
+                "; WARNING: no spaces remain on this daemon — create a space before \
+                 attaching again",
+            );
+        }
+
         // ── S-M1 recovery: re-point the CALLER's own relay if it was viewing the
         //    just-closed space (known iff its per-connection current_space == it).
         if self
@@ -380,14 +455,15 @@ impl MuxrService {
             .as_deref()
             == Some(space_id.as_str())
         {
-            self.repoint_caller_after_close(&session, &connection_id, &backend, &bare)
+            let target = remaining.as_deref().and_then(pick_repoint_target);
+            self.repoint_caller_after_close(&session, &connection_id, target)
                 .await;
         }
 
         Ok(Response::new(ProtoAck {
             ok: true,
             error: String::new(),
-            info: String::new(),
+            info,
         }))
     }
 
@@ -467,13 +543,41 @@ impl MuxrService {
             .map(|entry| entry.sender.clone())
     }
 
+    /// List the spaces that survived a close, or `None` when the listing itself
+    /// failed (logged, never fatal — the close already succeeded).
+    ///
+    /// One post-close `workspace.list` serves two purposes: confirming the daemon
+    /// still has a space (an empty answer is reported to the caller, not just
+    /// logged) and supplying [`pick_repoint_target`] with its candidates.
+    async fn list_spaces_after_close(
+        &self,
+        session: &str,
+        backend: &Arc<dyn MuxBackend>,
+        bare: &str,
+    ) -> Option<Vec<SpaceSnapshot>> {
+        let backend = backend.clone();
+        let bare = bare.to_owned();
+        match tokio::task::spawn_blocking(move || backend.list_spaces(&bare)).await {
+            Ok(Ok(spaces)) => Some(spaces),
+            Ok(Err(e)) => {
+                log::warn!("CloseSpace: post-close list_spaces failed for '{session}': {e:#}");
+                None
+            }
+            Err(e) => {
+                log::warn!("CloseSpace: post-close list task panicked for '{session}': {e}");
+                None
+            }
+        }
+    }
+
     /// Re-point the caller's own relay off a just-closed space (S-M1 recovery).
     ///
     /// Called only when the caller's per-connection `current_space` was the closed
-    /// id (so we KNOW the relay is viewing a now-dead workspace). Computes the
-    /// daemon's new active-or-first workspace and sends the caller's relay a
-    /// [`RelayControl::SwitchSpace`] — the same mechanism `SwitchSpace` uses — which
-    /// re-attaches the wire stream and updates the relay's tracked `current_space`.
+    /// id (so we KNOW the relay is viewing a now-dead workspace). `target` is the
+    /// daemon's new active-or-first workspace, already resolved from the post-close
+    /// listing; sending the caller's relay a [`RelayControl::SwitchSpace`] — the
+    /// same mechanism `SwitchSpace` uses — re-attaches the wire stream and updates
+    /// the relay's tracked `current_space`.
     ///
     /// Best-effort: any failure (no live relay, relay tearing down, herdr error,
     /// timeout) is logged and swallowed — the close already succeeded, and the
@@ -483,8 +587,7 @@ impl MuxrService {
         &self,
         session: &str,
         connection_id: &str,
-        backend: &Arc<dyn MuxBackend>,
-        bare: &str,
+        target: Option<String>,
     ) {
         let Some(sender) = self.resolve_space_relay(session, connection_id) else {
             // No live relay for this connection (e.g. control-plane-only close);
@@ -492,29 +595,15 @@ impl MuxrService {
             return;
         };
 
-        // Pick the daemon's new active-or-first workspace (post-close). Blocking
-        // herdr `workspace.list` → spawn_blocking.
-        let target = {
-            let backend = backend.clone();
-            let bare = bare.to_owned();
-            match tokio::task::spawn_blocking(move || backend.list_spaces(&bare)).await {
-                Ok(Ok(spaces)) => spaces
-                    .iter()
-                    .find(|s| s.active)
-                    .or_else(|| spaces.first())
-                    .map(|s| s.id.clone()),
-                Ok(Err(e)) => {
-                    log::warn!("CloseSpace: re-point list_spaces failed for '{session}': {e:#}");
-                    None
-                }
-                Err(e) => {
-                    log::warn!("CloseSpace: re-point list task panicked for '{session}': {e}");
-                    None
-                }
-            }
-        };
         let Some(target) = target else {
-            log::warn!("CloseSpace: no workspace to re-point '{session}' onto after close");
+            // Nothing to re-point onto. This is no longer a silent warn-and-return:
+            // when the reason is that no spaces remain, the caller has already been
+            // told in the ack's `info` (see `close_space_impl`); this arm only
+            // records the operator-facing half.
+            log::warn!(
+                "CloseSpace: no workspace to re-point '{session}' onto after close \
+                 (reported to the caller)"
+            );
             return;
         };
 
@@ -577,8 +666,51 @@ pub(super) enum ConnectionSpace {
 ///
 /// `count` is the number of spaces present *before* the close. `<= 1` because
 /// closing the only remaining space leaves none (S-M1).
+///
+/// Valid for a **non-group** close only, and only because such a close removes
+/// exactly one space: herdr refuses a group primary rather than closing a group
+/// without the flag. A group close needs [`would_close_every_space`], whose
+/// removal count this is the `removed == 1` special case of.
 fn would_close_last_space(count: usize) -> bool {
     count <= 1
+}
+
+/// True when a close that removes `removed` of the `count` spaces present before
+/// it would leave the daemon with none.
+///
+/// The general form of [`would_close_last_space`], for a close whose removal set
+/// is bigger than the one space the caller named — a herdr worktree-group close.
+/// `>=` rather than `==` because the removal set is a snapshot: if it somehow
+/// names more spaces than were listed, that is still "everything goes".
+fn would_close_every_space(count: usize, removed: usize) -> bool {
+    removed >= count
+}
+
+/// Human-readable statement of what a close removed, for the ack's `info`.
+///
+/// The client reconciles its space list from this: a group close removes spaces
+/// the caller never named, and with an empty `info` it has no way to learn that
+/// happened. Ids, not labels — the id is what the client keys its list on.
+fn describe_removed(removed: &[String]) -> String {
+    match removed {
+        [] => String::new(),
+        [one] => format!("closed 1 space: {one}"),
+        many => format!(
+            "closed {} spaces as a worktree group: {}",
+            many.len(),
+            many.join(", ")
+        ),
+    }
+}
+
+/// The daemon's active-or-first space, the target a caller's relay is re-pointed
+/// onto after its space was closed. `None` when nothing remains.
+fn pick_repoint_target(spaces: &[SpaceSnapshot]) -> Option<String> {
+    spaces
+        .iter()
+        .find(|s| s.active)
+        .or_else(|| spaces.first())
+        .map(|s| s.id.clone())
 }
 
 /// Validate a user-supplied space **label** before it crosses the gRPC trust
@@ -671,7 +803,10 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{validate_space_id, validate_space_label, would_close_last_space};
+    use super::{
+        describe_removed, pick_repoint_target, validate_space_id, validate_space_label,
+        would_close_every_space, would_close_last_space,
+    };
     use crate::multiplexer::SpaceSnapshot;
     use crate::proto::Space;
 
@@ -866,5 +1001,417 @@ mod tests {
                 .is_none(),
             "wrong connection_id must not read a sibling's current_space"
         );
+    }
+
+    // ─── Zero-space safety: the whole CloseSpace walk ────────────────────────
+    //
+    // Drives `close_space_impl` against a scripted spaces backend, because the
+    // defect this change fixes is not in any single predicate: it was the
+    // combination of a pre-close cardinality guard with a close that removed more
+    // than one space.
+
+    use std::collections::VecDeque;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tonic::Request;
+
+    use crate::auth::SessionReadOnly;
+    use crate::cli::BackendKind;
+    use crate::multiplexer::{
+        ActionAck, BackendSet, DualHandle, LayoutSnapshot, MuxBackend, PaneRef, ResizeDir,
+        ResizeKind, ScrollDir,
+    };
+    use crate::proto::CloseSpaceReq;
+
+    /// A spaces backend with scripted listings and a scripted removal set, which
+    /// records every close it is actually asked to perform.
+    #[derive(Debug)]
+    struct ScriptedSpaces {
+        /// Successive `list_spaces` answers: the pre-close listing, then the
+        /// post-close one. The last entry repeats once exhausted.
+        listings: Mutex<VecDeque<Vec<SpaceSnapshot>>>,
+        /// What `spaces_removed_by_close` answers for a group close.
+        group_removals: Vec<String>,
+        /// Error `close_space` answers with, or `None` for a successful close.
+        refuse_with: Option<String>,
+        /// `(space_id, close_group)` of every close that reached the backend.
+        closes: Mutex<Vec<(String, bool)>>,
+    }
+
+    impl ScriptedSpaces {
+        fn new(listings: Vec<Vec<SpaceSnapshot>>) -> Self {
+            Self {
+                listings: Mutex::new(listings.into()),
+                group_removals: Vec::new(),
+                refuse_with: None,
+                closes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn with_group(mut self, ids: &[&str]) -> Self {
+            self.group_removals = ids.iter().map(|s| (*s).to_owned()).collect();
+            self
+        }
+
+        fn refusing(mut self, error: &str) -> Self {
+            self.refuse_with = Some(error.to_owned());
+            self
+        }
+
+        fn performed_closes(&self) -> Vec<(String, bool)> {
+            self.closes.lock().expect("closes mutex").clone()
+        }
+    }
+
+    impl MuxBackend for ScriptedSpaces {
+        fn supports_spaces(&self) -> bool {
+            true
+        }
+        fn list_spaces(&self, _session: &str) -> anyhow::Result<Vec<SpaceSnapshot>> {
+            let mut listings = self.listings.lock().expect("listings mutex");
+            if listings.len() > 1 {
+                Ok(listings.pop_front().unwrap_or_default())
+            } else {
+                Ok(listings.front().cloned().unwrap_or_default())
+            }
+        }
+        fn spaces_removed_by_close(
+            &self,
+            space_id: &str,
+            close_group: bool,
+        ) -> anyhow::Result<Vec<String>> {
+            if close_group && !self.group_removals.is_empty() {
+                Ok(self.group_removals.clone())
+            } else {
+                Ok(vec![space_id.to_owned()])
+            }
+        }
+        fn close_space(&self, space_id: &str, close_group: bool) -> anyhow::Result<ActionAck> {
+            self.closes
+                .lock()
+                .expect("closes mutex")
+                .push((space_id.to_owned(), close_group));
+            Ok(match &self.refuse_with {
+                Some(error) => ActionAck {
+                    ok: false,
+                    error: Some(error.clone()),
+                    info: None,
+                },
+                None => ActionAck {
+                    ok: true,
+                    error: None,
+                    info: None,
+                },
+            })
+        }
+
+        // ── Everything else is out of this test's scope ──────────────────────
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<()> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn resize_pane(
+            &self,
+            _: &str,
+            _: PaneRef,
+            _: ResizeKind,
+            _: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "scripted-spaces-stub".to_owned()
+        }
+    }
+
+    /// `ids` as space snapshots, the first one active.
+    fn snapshots(ids: &[&str]) -> Vec<SpaceSnapshot> {
+        ids.iter()
+            .enumerate()
+            .map(|(i, id)| snap(id, id, i == 0))
+            .collect()
+    }
+
+    fn service_with(backend: &Arc<ScriptedSpaces>) -> MuxrService {
+        let backend: Arc<dyn MuxBackend> = backend.clone();
+        MuxrService::with_backends(BackendSet::new(vec![(BackendKind::Herdr, backend)]))
+    }
+
+    /// A CloseSpace request carrying a writable session token (the auth layer's
+    /// extension; absent it the RPC fails closed before any of this logic runs).
+    fn close_req(space_id: &str, close_group: bool) -> Request<CloseSpaceReq> {
+        let mut req = Request::new(CloseSpaceReq {
+            session: "herdr:herdr".to_owned(),
+            space_id: space_id.to_owned(),
+            connection_id: String::new(),
+            close_group,
+        });
+        req.extensions_mut().insert(SessionReadOnly(false));
+        req
+    }
+
+    /// THE defect this card fixes. Two spaces, both members of one worktree group,
+    /// and the caller closes the primary WITH group intent: the pre-close count is
+    /// 2, so the old cardinality guard would have waved it through and herdr would
+    /// have removed both, leaving the daemon with zero workspaces and an `ok:true`
+    /// ack. The removal set makes it refusable before anything happens.
+    #[tokio::test]
+    async fn group_close_that_would_empty_the_daemon_is_refused_before_it_happens() {
+        let backend = Arc::new(
+            ScriptedSpaces::new(vec![snapshots(&["ws-1", "ws-2"])]).with_group(&["ws-1", "ws-2"]),
+        );
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", true))
+            .await
+            .expect("a logical refusal is an ack, never a Status")
+            .into_inner();
+
+        assert!(!ack.ok, "closing the whole daemon must be refused");
+        assert!(
+            ack.error.contains("all 2 space(s)"),
+            "the refusal must say why: {}",
+            ack.error
+        );
+        assert!(
+            backend.performed_closes().is_empty(),
+            "the refusal must come BEFORE the close, not after it"
+        );
+    }
+
+    /// The same shape without group intent is the ordinary path: one space goes,
+    /// one remains, and the flag reaches the backend as `false`.
+    #[tokio::test]
+    async fn default_close_passes_group_intent_off_and_removes_one_space() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![
+            snapshots(&["ws-1", "ws-2"]),
+            snapshots(&["ws-2"]),
+        ]));
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", false))
+            .await
+            .expect("close must succeed")
+            .into_inner();
+
+        assert!(ack.ok, "error: {}", ack.error);
+        assert_eq!(
+            backend.performed_closes(),
+            vec![("ws-1".to_owned(), false)],
+            "an opt-in flag left unset must reach the backend as false"
+        );
+        assert_eq!(ack.info, "closed 1 space: ws-1");
+    }
+
+    /// A group close that leaves something behind is allowed — and must report the
+    /// spaces the caller never named, so the client can reconcile its list.
+    #[tokio::test]
+    async fn group_close_reports_every_space_it_removed() {
+        let backend = Arc::new(
+            ScriptedSpaces::new(vec![
+                snapshots(&["ws-1", "ws-2", "ws-3"]),
+                snapshots(&["ws-3"]),
+            ])
+            .with_group(&["ws-1", "ws-2"]),
+        );
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", true))
+            .await
+            .expect("close must succeed")
+            .into_inner();
+
+        assert!(ack.ok, "error: {}", ack.error);
+        assert_eq!(backend.performed_closes(), vec![("ws-1".to_owned(), true)]);
+        assert!(ack.info.contains("ws-1"), "info: {}", ack.info);
+        assert!(
+            ack.info.contains("ws-2"),
+            "the unnamed sibling must be reported: {}",
+            ack.info
+        );
+    }
+
+    /// The backstop for the race the pre-close snapshot cannot rule out: if the
+    /// daemon turns out to be empty afterwards, the CALLER hears about it — a warn
+    /// in the daemon log is exactly the silence this guard exists to break.
+    #[tokio::test]
+    async fn an_emptied_daemon_is_reported_to_the_caller_not_just_logged() {
+        // Pre-close listing says two spaces; by the post-close listing a concurrent
+        // close has taken the other one.
+        let backend = Arc::new(ScriptedSpaces::new(vec![
+            snapshots(&["ws-1", "ws-2"]),
+            snapshots(&[]),
+        ]));
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", false))
+            .await
+            .expect("close must succeed")
+            .into_inner();
+
+        assert!(ack.ok, "the close itself did succeed");
+        assert!(
+            ack.info.contains("no spaces remain"),
+            "the emptied daemon must be surfaced in the ack: {}",
+            ack.info
+        );
+    }
+
+    /// The original S-M1 guard is untouched for the default path.
+    #[tokio::test]
+    async fn default_close_still_refuses_the_last_space() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1"])]));
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", false))
+            .await
+            .expect("a logical refusal is an ack, never a Status")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "cannot close the last space");
+        assert!(backend.performed_closes().is_empty());
+    }
+
+    /// herdr's `workspace_group_close_required` reaches the client as an
+    /// unsuccessful acknowledgement carrying the backend's own message — never as a
+    /// gRPC status, and never swallowed.
+    #[tokio::test]
+    async fn backend_group_refusal_is_forwarded_as_a_failed_ack() {
+        let refusal = "this space is a worktree-group primary with linked worktree \
+                       spaces — re-issue CloseSpace with group intent (close_group=true)";
+        let backend =
+            Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1", "ws-2"])]).refusing(refusal));
+        let service = service_with(&backend);
+
+        let ack = service
+            .close_space_impl(close_req("ws-1", false))
+            .await
+            .expect("a logical refusal is an ack, never a Status")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, refusal);
+    }
+
+    // ─── Zero-space predicates and reporting helpers ─────────────────────────
+
+    #[test]
+    fn would_close_every_space_catches_the_group_that_takes_everything() {
+        // The counterexample the old guard missed: 2 present, 2 removed.
+        assert!(would_close_every_space(2, 2));
+        assert!(would_close_every_space(1, 1));
+        // A snapshot that somehow names more than were listed still means "all".
+        assert!(would_close_every_space(2, 3));
+        // Something survives.
+        assert!(!would_close_every_space(3, 2));
+        assert!(!would_close_every_space(2, 1));
+        // It generalises the last-space guard: `removed == 1` is that predicate.
+        for count in 0..4 {
+            assert_eq!(
+                would_close_every_space(count, 1),
+                would_close_last_space(count),
+                "count={count}"
+            );
+        }
+    }
+
+    #[test]
+    fn describe_removed_names_the_group_members() {
+        assert_eq!(describe_removed(&[]), "");
+        assert_eq!(
+            describe_removed(&["ws-1".to_owned()]),
+            "closed 1 space: ws-1"
+        );
+        let group = describe_removed(&["ws-1".to_owned(), "ws-2".to_owned()]);
+        assert!(group.contains("2 spaces"), "{group}");
+        assert!(group.contains("ws-1, ws-2"), "{group}");
+    }
+
+    #[test]
+    fn pick_repoint_target_prefers_the_active_space() {
+        assert_eq!(
+            pick_repoint_target(&[snap("a", "A", false), snap("b", "B", true)]).as_deref(),
+            Some("b")
+        );
+        // No active flag → the first listed.
+        assert_eq!(
+            pick_repoint_target(&[snap("a", "A", false), snap("b", "B", false)]).as_deref(),
+            Some("a")
+        );
+        // Nothing left → nothing to re-point onto.
+        assert_eq!(pick_repoint_target(&[]), None);
     }
 }

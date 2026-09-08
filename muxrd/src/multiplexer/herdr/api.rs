@@ -273,9 +273,14 @@ pub struct WorkspaceCloseParams {
     /// worktree, whose space key at least one other workspace shares). herdr
     /// defaults this to `false` on the wire — close just this workspace, refusing
     /// with `workspace_group_close_required` when that would leave the rest of
-    /// the group open — but [`super::control::HerdrControl::close_workspace`]
-    /// always sends `true`; see its doc comment for why. Harmless on an ordinary
-    /// workspace, or a linked worktree closed on its own.
+    /// the group open.
+    ///
+    /// muxrd carries the **caller's** value here rather than a fixed one:
+    /// `CloseSpaceReq.close_group` is opt-in and defaults to false, so an ordinary
+    /// close sends `false` and gets herdr's refusal, which muxrd surfaces (see
+    /// [`super::control::HerdrControl::close_workspace`]). Always serialised, never
+    /// skipped, so the value muxrd chose is visible on the wire either way. Inert
+    /// on an ordinary workspace, or a linked worktree closed on its own.
     pub close_group: bool,
 }
 
@@ -847,11 +852,14 @@ mod tests {
         assert!(json["params"].is_object());
     }
 
-    /// Change One: `WorkspaceCloseParams` must carry the group-close flag, and
-    /// serializing it must show up in the request. `HerdrControl::close_workspace`
-    /// always constructs it `true` (see `control.rs`'s live-socket test for that).
+    /// `WorkspaceCloseParams` must carry the group-close flag, and serializing it
+    /// must show up in the request — for BOTH values. The field is deliberately
+    /// not `skip_serializing_if`: the caller's opt-in choice is explicit on the
+    /// wire, so `false` is sent as `false` rather than left to herdr's default.
+    /// (`HerdrControl::close_workspace` forwards the caller's value; see
+    /// `control.rs`'s live-socket tests for that.)
     #[test]
-    fn workspace_close_params_serialize_sets_close_group() {
+    fn workspace_close_params_serialize_carry_close_group_both_ways() {
         let params = WorkspaceCloseParams {
             workspace_id: "ws-1".into(),
             close_group: true,
@@ -859,6 +867,16 @@ mod tests {
         let json = serde_json::to_value(&params).unwrap();
         assert_eq!(json["workspace_id"], "ws-1");
         assert_eq!(json["close_group"], true);
+
+        let params = WorkspaceCloseParams {
+            workspace_id: "ws-1".into(),
+            close_group: false,
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(
+            json["close_group"], false,
+            "the default (non-group) close must put an explicit false on the wire"
+        );
     }
 
     /// Change Three: an explicit JSON `null` for `capabilities` — what herdr's own

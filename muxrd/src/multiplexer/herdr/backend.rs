@@ -249,6 +249,53 @@ fn space_from_workspace(w: WorkspaceInfo) -> SpaceSnapshot {
     }
 }
 
+/// The workspaces herdr would remove for `workspace.close(space_id, close_group)`,
+/// resolved from one `workspace.list` snapshot. Pure (no I/O) so the rule is
+/// unit-testable from fixtures.
+///
+/// This mirrors herdr 0.9.0's own `App::workspace_close_indices`: a close removes
+/// the whole **worktree group** when the named workspace has a worktree space, is
+/// not itself a linked worktree, and at least one other workspace shares its
+/// `repo_key`; otherwise it removes exactly the named workspace. muxrd can
+/// reproduce it because `workspace.list` reports `worktree.repo_key` and
+/// `worktree.is_linked_worktree` for every workspace.
+///
+/// `close_group == false` always answers a single id: herdr does not close a group
+/// without the flag — it refuses instead — so nothing beyond the named workspace
+/// can go away on that path.
+///
+/// An id that names no listed workspace answers `[space_id]`: the close itself
+/// will fail with `workspace_not_found`, and claiming a larger removal set for an
+/// id that does not exist would be a worse guess than the honest minimum.
+fn spaces_removed_by_workspace_close(
+    workspaces: &[WorkspaceInfo],
+    space_id: &str,
+    close_group: bool,
+) -> Vec<String> {
+    let single = || vec![space_id.to_owned()];
+    if !close_group {
+        return single();
+    }
+    let Some(target) = workspaces.iter().find(|w| w.workspace_id == space_id) else {
+        return single();
+    };
+    let Some(space) = target.worktree.as_ref().filter(|wt| !wt.is_linked_worktree) else {
+        return single();
+    };
+    let group: Vec<String> = workspaces
+        .iter()
+        .filter(|w| {
+            w.worktree
+                .as_ref()
+                .is_some_and(|member| member.repo_key == space.repo_key)
+        })
+        .map(|w| w.workspace_id.clone())
+        .collect();
+    // A "group" of one is just the workspace itself — herdr only treats >= 2
+    // members as a group, and closes a lone primary like any other workspace.
+    if group.len() >= 2 { group } else { single() }
+}
+
 /// Pick the daemon's **active (focused)** workspace, falling back to the **first
 /// listed**. Pure so the [`HERDR_SESSION`]-binding rule is unit-testable without a
 /// live daemon. `None` only when the daemon has no workspaces.
@@ -376,7 +423,13 @@ impl MuxBackend for HerdrBackend {
             return Err(anyhow!(HERDR_SESSION_IMMUTABLE_MSG));
         }
         let workspace_id = self.workspace_id_for(session)?;
-        let ack = self.control.close_workspace(&workspace_id)?;
+        // NEVER group-close here. A KillSession names one session, which resolves to
+        // exactly one workspace; taking that workspace's sibling worktree workspaces
+        // down with it would destroy sessions the caller never named, and this path
+        // has no cardinality guard of any kind (unlike CloseSpace). If the target is
+        // a worktree-group primary, herdr's `workspace_group_close_required` refusal
+        // is the correct outcome and propagates out of here as an error.
+        let ack = self.control.close_workspace(&workspace_id, false)?;
         if ack.ok {
             Ok(())
         } else {
@@ -437,8 +490,25 @@ impl MuxBackend for HerdrBackend {
         self.control.rename_workspace(space_id, label)
     }
 
-    fn close_space(&self, space_id: &str) -> Result<ActionAck> {
-        self.control.close_workspace(space_id)
+    fn close_space(&self, space_id: &str, close_group: bool) -> Result<ActionAck> {
+        // The caller's group intent goes through verbatim. With `false` herdr
+        // refuses a worktree-group primary (`workspace_group_close_required`),
+        // which `control::worktree_group_refusal` turns into an ack that names the
+        // cause and how to re-issue — the operator learns the group exists instead
+        // of losing it.
+        self.control.close_workspace(space_id, close_group)
+    }
+
+    fn spaces_removed_by_close(&self, space_id: &str, close_group: bool) -> Result<Vec<String>> {
+        // One `workspace.list` read is enough to reproduce herdr's own removal set:
+        // `WorkspaceInfo.worktree` carries the repo key and the linked-worktree flag
+        // that herdr's `workspace_close_indices` groups on.
+        let workspaces = self.control.list_workspaces()?;
+        Ok(spaces_removed_by_workspace_close(
+            &workspaces,
+            space_id,
+            close_group,
+        ))
     }
 
     // ── Ephemeral control actions ───────────────────────────────────────────
@@ -783,6 +853,120 @@ mod tests {
             "agent_status": "idle",
         }))
         .expect("WorkspaceInfo fixture")
+    }
+
+    /// A workspace carrying worktree-space membership: `repo_key` is the key herdr
+    /// groups on, `is_linked_worktree` distinguishes the group's primary from its
+    /// linked worktrees.
+    fn worktree_workspace(
+        workspace_id: &str,
+        label: &str,
+        repo_key: &str,
+        is_linked_worktree: bool,
+    ) -> WorkspaceInfo {
+        serde_json::from_value(serde_json::json!({
+            "workspace_id": workspace_id,
+            "number": 0,
+            "label": label,
+            "focused": false,
+            "pane_count": 1,
+            "tab_count": 1,
+            "active_tab_id": "tab-1",
+            "agent_status": "idle",
+            "worktree": {
+                "repo_key": repo_key,
+                "repo_name": label,
+                "repo_root": "/repo/app",
+                "checkout_path": "/repo/app",
+                "is_linked_worktree": is_linked_worktree,
+            },
+        }))
+        .expect("WorkspaceInfo worktree fixture")
+    }
+
+    // ── Removal set of a close (pre-close, from workspace.list) ───────────────
+
+    /// The defect this whole change exists for: closing a worktree-group PRIMARY
+    /// with group intent removes its linked worktrees too, so the removal set must
+    /// name every member — not just the workspace the caller pointed at.
+    #[test]
+    fn group_close_of_a_primary_removes_the_whole_group() {
+        let workspaces = vec![
+            worktree_workspace("ws-1", "app", "/repo/app/.git", false),
+            worktree_workspace("ws-2", "app", "/repo/app/.git", true),
+        ];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&workspaces, "ws-1", true),
+            vec!["ws-1".to_owned(), "ws-2".to_owned()],
+        );
+    }
+
+    /// Without group intent nothing beyond the named workspace can go: herdr
+    /// refuses the primary rather than closing the group.
+    #[test]
+    fn non_group_close_removes_only_the_named_space() {
+        let workspaces = vec![
+            worktree_workspace("ws-1", "app", "/repo/app/.git", false),
+            worktree_workspace("ws-2", "app", "/repo/app/.git", true),
+        ];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&workspaces, "ws-1", false),
+            vec!["ws-1".to_owned()],
+        );
+    }
+
+    /// A LINKED worktree closed on its own is not a group close, even with the
+    /// flag — herdr groups from the primary only.
+    #[test]
+    fn group_close_of_a_linked_worktree_removes_only_itself() {
+        let workspaces = vec![
+            worktree_workspace("ws-1", "app", "/repo/app/.git", false),
+            worktree_workspace("ws-2", "app", "/repo/app/.git", true),
+        ];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&workspaces, "ws-2", true),
+            vec!["ws-2".to_owned()],
+        );
+    }
+
+    /// Members are matched on the repo key, so an unrelated repo's workspaces —
+    /// and plain workspaces with no worktree space at all — stay out of the set.
+    #[test]
+    fn group_close_matches_on_repo_key_only() {
+        let workspaces = vec![
+            worktree_workspace("ws-1", "app", "/repo/app/.git", false),
+            worktree_workspace("ws-2", "app", "/repo/app/.git", true),
+            worktree_workspace("ws-3", "other", "/repo/other/.git", true),
+            workspace("ws-4", "plain", false),
+        ];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&workspaces, "ws-1", true),
+            vec!["ws-1".to_owned(), "ws-2".to_owned()],
+        );
+    }
+
+    /// A lone primary is not a group (herdr needs >= 2 members), and a workspace
+    /// with no worktree space, or an id that is not listed at all, answers the
+    /// honest minimum: itself.
+    #[test]
+    fn group_close_degrades_to_a_single_space() {
+        let lone = vec![worktree_workspace("ws-1", "app", "/repo/app/.git", false)];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&lone, "ws-1", true),
+            vec!["ws-1".to_owned()],
+        );
+
+        let plain = vec![workspace("ws-1", "plain", true)];
+        assert_eq!(
+            spaces_removed_by_workspace_close(&plain, "ws-1", true),
+            vec!["ws-1".to_owned()],
+        );
+
+        assert_eq!(
+            spaces_removed_by_workspace_close(&plain, "ws-missing", true),
+            vec!["ws-missing".to_owned()],
+            "an unlisted id must not claim a larger blast radius"
+        );
     }
 
     #[test]
