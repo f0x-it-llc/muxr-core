@@ -1,6 +1,12 @@
-//! Independently-authored types matching herdr's public v0.7.1 wire/JSON protocol for interop.
-//! Not derived from herdr's AGPL source; herdr runs as a separate, unmodified, user-installed
-//! binary driven over its public sockets.
+//! Types matching herdr's public line-delimited JSON-API control protocol for
+//! interop. Derived from herdr's own request/response schema — verified against
+//! `herdrdev/herdr` v0.9.0 (Apache-2.0; relicensed from AGPL-3.0-or-later at
+//! v0.8.0) — and modified for muxrd's connection-per-request client: only the
+//! methods muxrd calls are modelled, and every envelope keeps exactly the
+//! request/response shape documented below rather than herdr's own
+//! persistent-connection framing. herdr itself still runs as a separate,
+//! unmodified, user-installed binary driven only over its public sockets; see
+//! [`super`]'s module docs for the licence-discipline note governing this file.
 //!
 //! # JSON-API — control socket
 //!
@@ -140,7 +146,7 @@ pub enum ApiResult {
     /// capabilities.  This is muxrd's protocol-discovery mechanism: the JSON-API
     /// socket is stable across herdr releases, so it can be queried to learn which
     /// wire version the binary relay handshake must speak.  Verified present on
-    /// herdr 0.7.1 (protocol 14), 0.7.4 (16) and 0.7.5 (17).
+    /// herdr 0.7.1 (protocol 14), 0.7.4 (16), 0.7.5 (17) and 0.9.0 (22).
     Pong {
         /// herdr's own release version (e.g. `"0.7.4"`) — diagnostics only.
         #[serde(default)]
@@ -148,10 +154,22 @@ pub enum ApiResult {
         /// Wire protocol version the server speaks.  Echoed back in the relay
         /// `Hello`; herdr enforces strict equality on it.
         protocol: u32,
-        /// Server capability flags.  Deliberately an open map: herdr adds keys
-        /// between releases (`detached_server_daemon` appeared after 0.7.1), and a
-        /// fixed struct here would turn any future addition into a parse failure.
-        #[serde(default)]
+        /// Server capability flags.  Deliberately an open map: herdr 0.9.0 models
+        /// this as a typed five-key struct (`live_handoff`, `detached_server_daemon`,
+        /// `endpoint_protocol_generation`, `surface_interest`, `health_check`), but a
+        /// typed object still deserializes into a map, and staying open here avoids
+        /// turning any future upstream key addition into a parse failure.
+        ///
+        /// herdr's own field carries `#[serde(default)]` but **no**
+        /// `skip_serializing_if`, so a `None` capability set serializes as an
+        /// explicit JSON `null`, not an absent field. `#[serde(default)]` alone
+        /// only substitutes for an absent key — an explicit `null` still fails to
+        /// parse without help — and a failed `ping` is how muxrd discovers herdr's
+        /// wire protocol number, so the blast radius of that failure is every
+        /// attach. Unreachable on herdr's current production path (it always
+        /// fills `capabilities` today), but [`deserialize_capabilities`] closes
+        /// the gap for one type change.
+        #[serde(default, deserialize_with = "deserialize_capabilities")]
         capabilities: HashMap<String, serde_json::Value>,
     },
     WorkspaceList {
@@ -197,6 +215,22 @@ pub enum ApiResult {
     Ok {},
 }
 
+/// Deserialize an explicit JSON `null` the same as an absent field. `#[serde(default)]`
+/// alone only substitutes for a *missing* key, not a `null` value present on the
+/// wire — and herdr's `capabilities` field can serialize a `None` as exactly that
+/// explicit `null` (see [`ApiResult::Pong`]).
+fn deserialize_capabilities<'de, D>(
+    deserializer: D,
+) -> std::result::Result<HashMap<String, serde_json::Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(
+        Option::<HashMap<String, serde_json::Value>>::deserialize(deserializer)?
+            .unwrap_or_default(),
+    )
+}
+
 // ─── Request param structs ────────────────────────────────────────────────────
 //
 // One struct per method we call. Serialize with `serde_json::to_value` to
@@ -234,6 +268,15 @@ pub struct WorkspaceRenameParams {
 #[derive(Debug, Serialize)]
 pub struct WorkspaceCloseParams {
     pub workspace_id: String,
+    /// Close the whole worktree group when `workspace_id` names a worktree-group
+    /// **primary** (a workspace with a worktree space, itself not a linked
+    /// worktree, whose space key at least one other workspace shares). herdr
+    /// defaults this to `false` on the wire — close just this workspace, refusing
+    /// with `workspace_group_close_required` when that would leave the rest of
+    /// the group open — but [`super::control::HerdrControl::close_workspace`]
+    /// always sends `true`; see its doc comment for why. Harmless on an ordinary
+    /// workspace, or a linked worktree closed on its own.
+    pub close_group: bool,
 }
 
 /// `tab.create`
@@ -802,5 +845,75 @@ mod tests {
         assert_eq!(json["id"], "req-1");
         assert_eq!(json["method"], "pane.layout");
         assert!(json["params"].is_object());
+    }
+
+    /// Change One: `WorkspaceCloseParams` must carry the group-close flag, and
+    /// serializing it must show up in the request. `HerdrControl::close_workspace`
+    /// always constructs it `true` (see `control.rs`'s live-socket test for that).
+    #[test]
+    fn workspace_close_params_serialize_sets_close_group() {
+        let params = WorkspaceCloseParams {
+            workspace_id: "ws-1".into(),
+            close_group: true,
+        };
+        let json = serde_json::to_value(&params).unwrap();
+        assert_eq!(json["workspace_id"], "ws-1");
+        assert_eq!(json["close_group"], true);
+    }
+
+    /// Change Three: an explicit JSON `null` for `capabilities` — what herdr's own
+    /// `#[serde(default)]`-without-`skip_serializing_if` field produces for `None`
+    /// — must still parse rather than failing the whole `ping` call.
+    #[test]
+    fn api_result_pong_capabilities_null_parses_as_empty() {
+        let json = r#"{"type":"pong","version":"0.9.0","protocol":22,"capabilities":null}"#;
+        let result: ApiResult = serde_json::from_str(json).expect("null capabilities must parse");
+        match result {
+            ApiResult::Pong { capabilities, .. } => assert!(capabilities.is_empty()),
+            other => panic!("expected ApiResult::Pong, got {other:?}"),
+        }
+    }
+
+    /// An absent `capabilities` key (older herdr releases, or any peer that omits
+    /// it) must still parse via `#[serde(default)]`.
+    #[test]
+    fn api_result_pong_capabilities_absent_parses_as_empty() {
+        let json = r#"{"type":"pong","version":"0.7.1","protocol":14}"#;
+        let result: ApiResult = serde_json::from_str(json).expect("absent capabilities must parse");
+        match result {
+            ApiResult::Pong { capabilities, .. } => assert!(capabilities.is_empty()),
+            other => panic!("expected ApiResult::Pong, got {other:?}"),
+        }
+    }
+
+    /// A populated `capabilities` object — herdr 0.9.0's typed five-key struct,
+    /// which still deserializes into the open map — must round-trip its values.
+    #[test]
+    fn api_result_pong_capabilities_populated_parses_values() {
+        let json = r#"{
+            "type": "pong",
+            "version": "0.9.0",
+            "protocol": 22,
+            "capabilities": {
+                "live_handoff": true,
+                "detached_server_daemon": true,
+                "endpoint_protocol_generation": 3,
+                "surface_interest": false,
+                "health_check": true
+            }
+        }"#;
+        let result: ApiResult =
+            serde_json::from_str(json).expect("populated capabilities must parse");
+        match result {
+            ApiResult::Pong { capabilities, .. } => {
+                assert_eq!(capabilities.len(), 5);
+                assert_eq!(capabilities["live_handoff"], serde_json::json!(true));
+                assert_eq!(
+                    capabilities["endpoint_protocol_generation"],
+                    serde_json::json!(3)
+                );
+            }
+            other => panic!("expected ApiResult::Pong, got {other:?}"),
+        }
     }
 }
