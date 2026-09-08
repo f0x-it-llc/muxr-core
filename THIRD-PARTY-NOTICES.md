@@ -12,7 +12,7 @@ muxr-core is licensed under the MIT License. This project includes derived code 
 
 **License:** Apache-2.0 (as of v0.8.0 release; herdr was previously AGPL-3.0-or-later before that release)
 
-**Derived Portions:** The herdr interop module within the `muxrd` crate (located at `muxrd/src/herdr_interop/`) contains the binary wire protocol mirror and JSON control-protocol types derived from herdr's source code. These files have been **modified** from their upstream form to integrate with muxr-core's architecture. Each modified file carries its own per-file notice.
+**Derived Portions:** The herdr interop module within the `muxrd` crate (located at `muxrd/src/multiplexer/herdr/`) contains the binary wire protocol mirror and JSON control-protocol types derived from herdr's source code. These files have been **modified** from their upstream form to integrate with muxr-core's architecture. Each modified file carries its own per-file notice.
 
 **Distribution:** herdr is a separate, user-installed binary that muxr-core neither bundles nor redistributes. The docker development rig may download a herdr binary for local development use only. muxr-core ships no herdr binary in any production artifact; only derived source code (the wire protocol mirror and JSON types) is incorporated into muxr-core's binaries.
 
