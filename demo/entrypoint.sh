@@ -32,6 +32,22 @@
 #     (which `create-token` would refuse — token names are unique).
 set -euo pipefail
 
+# ── Two TLS modes ────────────────────────────────────────────────────────────
+# PIN (default, DEMO_PROXIED=0): muxrd terminates TLS itself with a self-signed
+#   cert and the QR carries tm=pin&fp=<sha256 of that cert>. The app will ONLY
+#   talk to a server presenting exactly that cert — so nothing may sit between
+#   the app and this container (no reverse proxy, no edge/CDN proxy). The gRPC
+#   port is published directly and DNS must point straight at this host.
+# PROXIED (DEMO_PROXIED=1): a TLS-terminating reverse proxy with a
+#   publicly-trusted certificate owns TLS. muxrd speaks PLAINTEXT
+#   HTTP/2 (h2c) on the container network and the QR carries tm=ca with no
+#   fingerprint — the app trusts the proxy's publicly-issued cert via the
+#   system CA store. The port must NOT be published to the internet in this
+#   mode; only the proxy may reach it. Cert durability stops mattering here
+#   (there is no pinned cert); token durability still does.
+# The two are not mixable: a pinned QR cannot survive a proxy, and a tm=ca QR
+# against a self-signed direct server fails CA validation.
+
 # ── Env vars ──────────────────────────────────────────────────────────────
 SESSION="${DEMO_SESSION:-demo}"
 # DEMO_HOST — the public IP/DNS the reviewer's app will dial. Injected into the
@@ -52,6 +68,24 @@ READ_ONLY="${DEMO_READ_ONLY:-1}"
 # for store reviewers who need to type. Off by default — the published
 # `demo-public` token is the only one most checkouts ever see.
 REVIEWER_ENABLED="${DEMO_REVIEWER_TOKEN:-0}"
+# DEMO_PROXIED=1 selects PROXIED mode (see the TLS-modes block above): h2c to
+# a TLS-terminating proxy, tm=ca QR. Default 0 = PIN mode, unchanged.
+PROXIED="${DEMO_PROXIED:-0}"
+# The port the APP dials in proxied mode — the proxy's public port, normally
+# 443 — which is what goes into the QR's p=. Unrelated to BIND/PORT, which are
+# the container-side h2c listener the proxy forwards to. Ignored in pin mode.
+PUBLIC_PORT="${DEMO_PUBLIC_PORT:-443}"
+case "${PROXIED}" in
+  0|1) ;;
+  *) echo "[demo] FATAL: DEMO_PROXIED must be 0 or 1 (got '${PROXIED}')" >&2; exit 1 ;;
+esac
+if [ "${PROXIED}" = "1" ] && [ -z "${DEMO_HOST}" ]; then
+  # Behind a proxy the QR's h= must be the public hostname the proxy serves;
+  # there is no sane default, and 127.0.0.1 would produce a QR that pairs
+  # nothing. Refuse rather than publish a broken URI.
+  echo "[demo] FATAL: DEMO_PROXIED=1 requires DEMO_HOST (the public hostname the proxy serves, e.g. demo.muxr.app)" >&2
+  exit 1
+fi
 # Optional expiry applied to any token minted THIS boot (existing/reused
 # tokens are unaffected). Same syntax as `muxrd create-token --expires-in`:
 # `<n>s`/`m`/`h`/`d`, bare seconds, or unset (never expires).
@@ -117,20 +151,30 @@ if [ -n "${DEMO_HOST}" ]; then
     [ -n "$s" ] && san_args+=(--san "$s")
   done
 fi
-echo "[demo] provisioning TLS cert (SAN: ${DEMO_HOST:-<loopback only>})…"
-# `muxrd init` is idempotent (muxrd/src/tls.rs: load_or_generate_identity
-# reuses the on-disk cert+key whenever the SAN sidecar still covers the
-# request); we never delete the cert first. Capture its own log line so we can
-# re-state the reused/regenerated decision unmistakably — an operator who
-# changes DEMO_HOST invalidates every previously published QR and must see it.
-CERT_INIT_LOG="${XDG_RUNTIME_DIR}/muxrd-init.log"
-muxrd init "${san_args[@]}" 2>&1 | tee "${CERT_INIT_LOG}"
-if grep -q "loading existing cert" "${CERT_INIT_LOG}"; then
-  echo "[demo] cert: REUSED — on-disk cert already covers this SAN set; the pairing fingerprint is UNCHANGED from the last boot."
-elif grep -q "generating self-signed cert" "${CERT_INIT_LOG}"; then
-  echo "[demo] cert: REGENERATED (first boot, or DEMO_HOST changed) — every previously published pairing QR is now INVALID."
+if [ "${PROXIED}" = "1" ]; then
+  # PROXIED: no cert at all. `muxrd init --insecure-h2c` still creates the data
+  # dir and config file but resolves CertSource::H2c and skips cert generation
+  # (muxrd/src/bin/muxrd.rs cmd_init: "TLS is handled by the reverse proxy").
+  # A leftover server.crt from an earlier PIN-mode boot on the same volume is
+  # simply unused.
+  echo "[demo] TLS mode: PROXIED (h2c) — no cert provisioned; the reverse proxy in front of this container owns TLS."
+  muxrd init --insecure-h2c
 else
-  echo "[demo] cert: could not determine reuse/regenerate status from 'muxrd init' output above — treat the fingerprint below as authoritative."
+  echo "[demo] TLS mode: PIN — provisioning self-signed TLS cert (SAN: ${DEMO_HOST:-<loopback only>})…"
+  # `muxrd init` is idempotent (muxrd/src/tls.rs: load_or_generate_identity
+  # reuses the on-disk cert+key whenever the SAN sidecar still covers the
+  # request); we never delete the cert first. Capture its own log line so we can
+  # re-state the reused/regenerated decision unmistakably — an operator who
+  # changes DEMO_HOST invalidates every previously published QR and must see it.
+  CERT_INIT_LOG="${XDG_RUNTIME_DIR}/muxrd-init.log"
+  muxrd init "${san_args[@]}" 2>&1 | tee "${CERT_INIT_LOG}"
+  if grep -q "loading existing cert" "${CERT_INIT_LOG}"; then
+    echo "[demo] cert: REUSED — on-disk cert already covers this SAN set; the pairing fingerprint is UNCHANGED from the last boot."
+  elif grep -q "generating self-signed cert" "${CERT_INIT_LOG}"; then
+    echo "[demo] cert: REGENERATED (first boot, or DEMO_HOST changed) — every previously published pairing QR is now INVALID."
+  else
+    echo "[demo] cert: could not determine reuse/regenerate status from 'muxrd init' output above — treat the fingerprint below as authoritative."
+  fi
 fi
 
 # ── 3. API tokens — MINT ONCE; secrets persist so restarts reuse them ───────
@@ -191,24 +235,43 @@ if [ "${REVIEWER_ENABLED}" = "1" ]; then
   REVIEWER_TOKEN="$(mint_or_reuse_token "demo-reviewer" "0")"
 fi
 
-# ── 4. Cert fingerprint + pairing URI(s) (v2) — byte-identical across restarts ──
-CERT="${XDG_DATA_HOME}/zellij/muxrd/server.crt"
-FP="$(openssl x509 -in "${CERT}" -outform DER 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.*= //')"
-
+# ── 4. Trust anchor + pairing URI(s) (v2) — byte-identical across restarts ──
 # base64url(no pad) of the token bytes, matching muxrctl's payload encoding.
 b64url() { openssl base64 -A | tr '+/' '-_' | tr -d '='; }
 
-HOST_PARAM="${DEMO_HOST%%,*}"   # first SAN is the advertised host
+HOST_PARAM="${DEMO_HOST%%,*}"   # first entry is the advertised host
 [ -z "${HOST_PARAM}" ] && HOST_PARAM="127.0.0.1"
 
-# $1=token $2=ro("1"/"0") $3=URL-encoded display name → prints the v2 URI.
-# tm=pin (self-signed + fingerprint pin) — the app pins exactly this cert.
-build_pair_uri() {
-  local token="$1" ro="$2" name="$3" token_b64
-  token_b64="$(printf '%s' "${token}" | b64url)"
-  printf 'muxr://pair?v=2&h=%s&p=%s&t=%s&ro=%s&n=%s&tm=pin&fp=%s' \
-    "${HOST_PARAM}" "${PORT}" "${token_b64}" "${ro}" "${name}" "${FP}"
-}
+if [ "${PROXIED}" = "1" ]; then
+  # tm=ca: the app validates the PROXY's publicly-issued cert against the
+  # system CA store. No fingerprint — there is no pinned cert. The port the app
+  # dials is the proxy's public one, not this container's h2c listener.
+  FP=""
+  URI_PORT="${PUBLIC_PORT}"
+  TRUST_LINE="ca (TLS terminates at the reverse proxy; nothing pinned)"
+  # $1=token $2=ro("1"/"0") $3=URL-encoded display name → prints the v2 URI.
+  build_pair_uri() {
+    local token="$1" ro="$2" name="$3" token_b64
+    token_b64="$(printf '%s' "${token}" | b64url)"
+    printf 'muxr://pair?v=2&h=%s&p=%s&t=%s&ro=%s&n=%s&tm=ca' \
+      "${HOST_PARAM}" "${URI_PORT}" "${token_b64}" "${ro}" "${name}"
+  }
+else
+  # tm=pin: the app pins exactly this container's self-signed cert. The
+  # fingerprint is lowercase hex SHA-256 of the leaf DER, matching
+  # muxrd/src/tls.rs cert_sha256_fingerprint and the app's 64-hex validator.
+  CERT="${XDG_DATA_HOME}/zellij/muxrd/server.crt"
+  FP="$(openssl x509 -in "${CERT}" -outform DER 2>/dev/null | openssl dgst -sha256 -hex | sed 's/^.*= //')"
+  URI_PORT="${PORT}"
+  TRUST_LINE="pin (self-signed, fingerprint ${FP})"
+  # $1=token $2=ro("1"/"0") $3=URL-encoded display name → prints the v2 URI.
+  build_pair_uri() {
+    local token="$1" ro="$2" name="$3" token_b64
+    token_b64="$(printf '%s' "${token}" | b64url)"
+    printf 'muxr://pair?v=2&h=%s&p=%s&t=%s&ro=%s&n=%s&tm=pin&fp=%s' \
+      "${HOST_PARAM}" "${URI_PORT}" "${token_b64}" "${ro}" "${name}" "${FP}"
+  }
+fi
 
 PUBLIC_URI=""
 [ -n "${PUBLIC_TOKEN}" ] && PUBLIC_URI="$(build_pair_uri "${PUBLIC_TOKEN}" "${READ_ONLY}" "Muxr%20Demo")"
@@ -221,8 +284,9 @@ fi
 # Persist for `docker exec cat /run/demo/pairing.txt` retrieval.
 {
   echo "Muxr demo pairing"
-  echo "host        : ${HOST_PARAM}:${PORT}"
-  echo "fingerprint : ${FP}"
+  echo "host        : ${HOST_PARAM}:${URI_PORT}"
+  echo "tls mode    : $([ "${PROXIED}" = 1 ] && echo proxied || echo pin)"
+  echo "trust       : ${TRUST_LINE}"
   echo
   if [ -n "${PUBLIC_TOKEN}" ]; then
     echo "[demo-public] read-only=${READ_ONLY}"
@@ -300,14 +364,22 @@ cat <<BANNER
 ╔══════════════════════════════════════════════════════════════════╗
 ║  Muxr DEMO server — scan to pair the app                          ║
 ╠══════════════════════════════════════════════════════════════════╣
-  host        : ${HOST_PARAM}:${PORT}
+  host        : ${HOST_PARAM}:${URI_PORT}
+  tls mode    : $([ "${PROXIED}" = 1 ] && echo "PROXIED (h2c behind a TLS-terminating proxy)" || echo "PIN (self-signed, served by muxrd)")
+  trust       : ${TRUST_LINE}
   posture     : ${POSTURE_LINE}
-  fingerprint : ${FP}
   backends    : ${BACKENDS_LINE}
   pairing URI(s) also saved to ${HOME}/pairing.txt
                 (docker exec <ctr> cat ${HOME}/pairing.txt)
 ╚══════════════════════════════════════════════════════════════════╝
 BANNER
+if [ "${PROXIED}" = "1" ]; then
+  cat <<WARN
+  !! PROXIED MODE: muxrd is serving PLAINTEXT HTTP/2 on ${BIND}. A TLS-terminating
+  !! reverse proxy MUST be the only thing that can reach that port. Do NOT publish
+  !! it to the internet. The QR below points at the PROXY's public hostname/port.
+WARN
+fi
 
 if [ -n "${PUBLIC_URI}" ]; then
   qrencode -t ANSIUTF8 "${PUBLIC_URI}" 2>/dev/null || echo "(install qrencode to render the QR; URI saved to pairing.txt)"
@@ -319,5 +391,14 @@ echo
 # ── 7. Serve muxrd in the foreground (keeps the container alive) ─────────────
 # No --backend restriction: muxrd auto-detects and serves every backend it
 # finds usable (zellij and/or herdr), matching whatever step 5 brought up.
-echo "[demo] starting muxrd on ${BIND}…"
-exec muxrd start --bind "${BIND}"
+if [ "${PROXIED}" = "1" ]; then
+  # h2c on a non-loopback bind is refused by muxrd unless explicitly
+  # acknowledged (muxrd/src/config.rs check_h2c_bind_safety). Inside a
+  # container the proxy reaches us over the container network, so the bind
+  # is necessarily non-loopback; the ack is the whole point of this mode.
+  echo "[demo] starting muxrd on ${BIND} (h2c, plaintext — TLS at the proxy)…"
+  exec muxrd start --bind "${BIND}" --insecure-h2c --i-know-this-is-behind-a-proxy
+else
+  echo "[demo] starting muxrd on ${BIND} (TLS, self-signed)…"
+  exec muxrd start --bind "${BIND}"
+fi

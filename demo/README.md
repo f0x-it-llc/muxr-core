@@ -72,9 +72,11 @@ Exactly one named volume (`demo-data` at `/var/lib/demo`) survives a restart:
 - **Resets** — all session state, `$HOME` (`/run/demo`), `/tmp`, and every edit
   anyone made.
 
-Persisting the cert is what makes a published QR *reusable*: the pairing URI
+Persisting the cert is what makes a PIN-mode QR *reusable*: the pairing URI
 pins the certificate (`tm=pin&fp=<sha256>`), so a regenerated cert would
-invalidate every QR already in circulation regardless of the token.
+invalidate every QR already in circulation regardless of the token. In PROXIED
+mode nothing is pinned and only the token DB matters — the volume layout is the
+same, so switching modes keeps the token.
 
 > **Changing `DEMO_HOST` regenerates the cert** (it changes the SANs) and
 > therefore invalidates every published QR. Republish after any `DEMO_HOST`
@@ -113,6 +115,22 @@ this reason.
 and makes no egress exception, so its onboarding screen is deliberate
 sandboxing, not a broken product.
 
+## Two TLS modes
+
+| | PIN (default) | PROXIED |
+|---|---|---|
+| Who owns TLS | `muxrd`, self-signed | a reverse proxy with a publicly-trusted certificate |
+| QR trust | `tm=pin&fp=<sha256>` — the app pins **this** cert | `tm=ca` — the app trusts the proxy's public cert |
+| Network path | app → container directly; port published; DNS unproxied | app → proxy → container over plaintext h2c; port **not** published |
+| Select with | nothing (`DEMO_PROXIED=0`) | `DEMO_PROXIED=1` + `DEMO_HOST` |
+| Compose file | `compose.yaml` | `compose.proxied.yaml` |
+
+They don't mix. A pinned QR fails behind any TLS-terminating proxy (the app sees
+the proxy's cert, not the pinned one), and a `tm=ca` QR fails against a direct
+self-signed server. This section and the firewall section below describe PIN
+mode; see [Behind a reverse proxy](#behind-a-reverse-proxy)
+for the other.
+
 ## Run it
 
 Local smoke test (loopback only):
@@ -147,9 +165,11 @@ QR of it) wherever people will scan it.
 
 | Var | Default | Meaning |
 |---|---|---|
-| `DEMO_HOST` | *(empty)* | Public IP/DNS people connect to; added to the cert SAN. Comma-separate for several. **Changing it invalidates published QRs.** |
-| `BIND_ADDR` | `127.0.0.1` | Host interface the gRPC port publishes on. Set `0.0.0.0` on a public VM. |
-| `GRPC_PORT` | `50051` | Published host port. |
+| `DEMO_HOST` | *(empty)* | Public IP/DNS people connect to — the QR's `h=`. PIN mode adds it to the cert SAN (comma-separate for several; **changing it invalidates published QRs**). **Required** in PROXIED mode. |
+| `DEMO_PROXIED` | `0` | `1` = PROXIED mode: plaintext h2c to a TLS-terminating proxy, `tm=ca` QR. |
+| `DEMO_PUBLIC_PORT` | `443` | PROXIED only: the proxy's public port — what the app dials and what goes in the QR. |
+| `BIND_ADDR` | `127.0.0.1` | PIN only: host interface the gRPC port publishes on. Set `0.0.0.0` on a public VM. |
+| `GRPC_PORT` | `50051` | PIN only: published host port. |
 | `DEMO_READ_ONLY` | `1` | `1` = read-only public posture. `0` = interactive (store reviewers). |
 | `DEMO_REVIEWER_TOKEN` | `0` | `1` also mints the read-write `demo-reviewer` token. |
 | `DEMO_SESSION` | `demo` | zellij session name. |
@@ -176,11 +196,12 @@ htop, ripgrep, fd, fzf, bat, tree, jq, ncdu, git, and a few toys.
 > because the container has no runtime egress — a missing parser would surface
 > as an error in front of a visitor.
 
-## VM firewall (required)
+## VM firewall (required) — PIN mode
 
 The container hardens the workload; it does **not** firewall the VM. On the
 host, allow only the gRPC port inbound and block the container's outbound egress
-so nobody can use the box as a pivot or spam relay.
+so nobody can use the box as a pivot or spam relay. (PROXIED mode has its own
+firewall shape — see the next section.)
 
 ```bash
 # Inbound: only the gRPC port.
@@ -193,6 +214,89 @@ sudo ufw allow OpenSSH            # your admin access only
 DEMO_NET=$(docker network inspect demo_demo -f '{{(index .IPAM.Config 0).Subnet}}')
 sudo iptables -I DOCKER-USER -s "$DEMO_NET" -m conntrack --ctstate NEW -j DROP
 ```
+
+## Behind a reverse proxy
+
+Use this when the VM already fronts everything with a TLS-terminating proxy,
+you don't want a bare port on the internet, or an edge/CDN proxy hides the
+origin IP. PIN mode cannot do any of that — the app would see the proxy's
+certificate and reject it — so the demo switches to **PROXIED** mode:
+
+```
+app ──TLS (edge proxy's public cert)──▶ edge proxy (gRPC enabled)
+    ──TLS (your origin cert, HTTP/2)──▶ Traefik :443
+    ──plaintext h2c, container net────▶ muxrd :50051  (NOT published)
+```
+
+`muxrd` runs with `--insecure-h2c --i-know-this-is-behind-a-proxy` and the QR
+carries `tm=ca` for `DEMO_HOST:443` with no fingerprint. Nothing is pinned, so
+cert durability stops mattering; the token still persists exactly as before.
+
+**Edge proxy requirements** — if one sits in front of Traefik it must: proxy
+gRPC over HTTPS (usually an explicit toggle); use end-to-end TLS to the origin,
+not an HTTP-to-origin "flexible" mode (gRPC needs HTTP/2 over TLS to origin);
+and speak HTTP/2 to the origin. 443 is the right public port.
+
+**Deploy** — [`compose.proxied.yaml`](compose.proxied.yaml) is the deployment
+file: no `build:`, no `ports:`, identical hardening, plus the Traefik route. Run
+it with plain `docker compose` rather than swarm (`docker stack deploy` ignores
+`read_only`, `cap_drop`, `pids_limit` and the rest of the hardening block), and
+set `DEMO_HOST` in its environment.
+
+```bash
+DEMO_HOST=demo.example.com docker compose -f demo/compose.proxied.yaml up -d
+```
+
+**Why the route is in the file, not a domain form.** A platform that generates
+Traefik routes from a domain form — host, entrypoint, TLS, cert resolver, port —
+has no gRPC/h2c option, and names the generated router and service with an
+unpredictable slug, so `loadbalancer.server.scheme=h2c` cannot be attached to
+it. Without h2c Traefik speaks HTTP/1.1 to muxrd and every gRPC call fails.
+That single label is why this service declares its own route. Do **not** also
+create a domain for it through such a form: that adds a second, non-h2c route
+for the same host.
+
+**Keep the demo on its own network, with the proxy attached to it.** A shell
+inside the demo must not reach your other containers, nor reach the proxy and
+route to them by `Host` header. If your platform can place a service on a
+dedicated network and attach its proxy to it, enable that; otherwise declare a
+network in the compose file and `docker network connect` the proxy to it (and
+re-attach if the proxy container is ever recreated). The compose file declares
+no network by default: the container ends up on exactly one network, which the
+proxy shares, and Traefik resolves it without a `traefik.docker.network` label.
+If Traefik ever answers `504` for this host, add that label with the network
+shown by `docker inspect muxr-demo`.
+
+**Firewall** — 22, 80 and 443 only; **no 50051**. If an edge proxy is meant to
+hide the VM, restrict 80/443 to that proxy's published IP ranges, or anyone who
+learns the IP walks around it. The egress drop still applies and now covers
+internet, siblings and the proxy in one rule, because nothing else lives on the
+demo's subnet:
+
+```bash
+NET=$(docker inspect muxr-demo -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
+SUBNET=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Subnet}}')
+sudo iptables -I DOCKER-USER -s "$SUBNET" -m conntrack --ctstate NEW -j DROP
+```
+
+**Verify from outside** — this exercises the whole chain, edge proxy included:
+
+```bash
+grpcurl -import-path muxrd/proto -proto muxr.proto demo.example.com:443 muxr.v1.Muxr/GetVersion
+docker exec muxr-demo cat /run/demo/pairing.txt      # tls mode: proxied, tm=ca, no fp=
+```
+
+**Trade-offs, decide them on purpose:**
+
+- Whatever terminates TLS in front sees the terminal traffic and the bearer
+  tokens in plaintext. Fine for a public read-only demo of a public repo; it is
+  a different trust model from end-to-end pinning.
+- Edge proxies commonly drop idle connections after a minute or two.
+  `AttachTerminal` is a long-lived stream, so a viewer parked on a *silent* pane
+  may be cut off; panes with continuous output (btop, htop, the git-log loop)
+  should hold. **Test this on a device before publishing the QR.**
+- The proxy → `muxrd` hop is plaintext h2c inside the container network. That
+  is why the port must never be published and why the network is private.
 
 ## Publishing
 
