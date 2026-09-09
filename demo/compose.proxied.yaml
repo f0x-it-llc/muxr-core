@@ -54,7 +54,9 @@ services:
 
     labels:
       - traefik.enable=true
-      - traefik.http.routers.muxr-demo.rule=Host(`${DEMO_HOST}`)
+      # Host AND a gRPC content-type: gRPC reaches muxrd, anything else falls
+      # through to Traefik's own 404 instead of confusing an h2c-only backend.
+      - "traefik.http.routers.muxr-demo.rule=Host(`${DEMO_HOST}`) && HeaderRegexp(`Content-Type`, `^application/grpc`)"
       - traefik.http.routers.muxr-demo.entrypoints=websecure
       # Name of your Traefik ACME resolver; `letsencrypt` is a common default.
       - traefik.http.routers.muxr-demo.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
