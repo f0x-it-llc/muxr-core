@@ -87,6 +87,26 @@ find "${XDG_DATA_HOME}/zellij" -mindepth 1 -maxdepth 1 \
   ! -name muxrd ! -name tokens.db ! -name tokens_for_dev.db ! -name demo-secrets \
   -exec rm -rf {} +
 
+# `muxrd/` itself is deliberately protected wholesale above (it holds
+# server.crt/server.key/server.san.json — deleting those would regenerate the
+# cert and invalidate every published pairing QR, exactly what this design
+# exists to prevent). But that SAME directory is also where muxrd keeps its
+# own RUNTIME state — muxrd.pid (muxrd/src/bin/muxrd.rs: PIDFILE_NAME,
+# pidfile_path()) and control.sock (muxrd/src/control.rs: SOCKET_NAME,
+# socket_path()) — and a container boot is BY DEFINITION a fresh process, so
+# any pidfile/control socket found here is stale by construction. Left in
+# place, this crash-loops the container: container PID namespaces restart
+# numbering at 1, `exec muxrd start` below makes muxrd PID 1, so a leftover
+# muxrd.pid containing "1" names a PID that IS alive on every next boot —
+# muxrd's own (correct) staleness guard then refuses to start next to what it
+# reads as an already-running daemon (start_staleness_decision(...) ->
+# RefuseLiveDaemon(1), muxrd/src/bin/muxrd.rs:1037-1048) and exits 1, forever.
+#
+# Remove ONLY these two known runtime files, BY NAME. Do not wildcard this
+# directory and do not `rm -rf` it — that would take the cert with it.
+MUXRD_DATA_DIR="${XDG_DATA_HOME}/zellij/muxrd"
+rm -f "${MUXRD_DATA_DIR}/muxrd.pid" "${MUXRD_DATA_DIR}/control.sock"
+
 # ── 2. TLS cert — REUSED across restarts unless the SAN set changes ─────────
 san_args=()
 if [ -n "${DEMO_HOST}" ]; then
