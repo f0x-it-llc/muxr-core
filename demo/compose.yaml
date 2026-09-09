@@ -46,7 +46,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        MUXR_VERSION: "${MUXR_VERSION:-0.4.1}"
+        MUXR_VERSION: "${MUXR_VERSION:-0.4.2}"
         HERDR_VERSION: "${HERDR_VERSION:-0.9.0}"
     image: ghcr.io/f0x-it-llc/muxr-demo:latest
     container_name: muxr-demo
