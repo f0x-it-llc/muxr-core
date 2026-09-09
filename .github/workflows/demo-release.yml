@@ -1,0 +1,251 @@
+name: Demo Release
+
+# Publishes the public demo container (demo/) to GHCR.
+#
+# Deliberately mirrors website-release.yml guard for guard — the two publish
+# the only two images this repo ships, and the security properties below are
+# load-bearing, not ceremony. If you change one workflow, check the other.
+#
+# NOT `on: push`. The retired demo's README claimed "CI publishes this image on
+# each push"; that was never true, and it should not become true by accident —
+# this image can be reachable from the internet, so publishing is a deliberate
+# human act.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Extra image tag to publish alongside `latest` and `sha-<short-commit>` (e.g. 0.4.2). Leave empty to skip."
+        required: false
+        type: string
+      allow_non_main:
+        description: "Allow building from a non-main ref. The build then publishes sha-<short-commit> (+ the extra tag) ONLY — never `latest`."
+        required: false
+        default: false
+        type: boolean
+
+# Least privilege: read by default; only the job that pushes to GHCR gets
+# packages: write (set per-job below).
+permissions:
+  contents: read
+
+# Serialize dispatches: `latest` is a mutable tag, so two concurrent runs would
+# race to decide which commit a demo VM pulls. Never cancel a run mid-push —
+# that could leave the tag set published only in part.
+concurrency:
+  group: demo-release
+  cancel-in-progress: false
+
+jobs:
+  # ── Build the demo container image and publish it to GHCR ─────────────
+  publish:
+    name: Build & Publish Demo Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Guard release ref
+        id: guard
+        shell: bash
+        env:
+          # Context values are read through env, never interpolated into the
+          # script body (see "Validate dispatch inputs" for the rationale).
+          BUILD_REF: ${{ github.ref }}
+          ALLOW_NON_MAIN: ${{ inputs.allow_non_main }}
+        run: |
+          # INVARIANT: `:latest` is what a deployed demo VM pulls, so it may only
+          # ever be moved by a build of refs/heads/main — mirroring release.yml
+          # and website-release.yml, which pin main for the same reason. A
+          # non-main build must be opted into explicitly and then publishes
+          # immutable sha-<short-commit> (+ optional extra tag) tags only;
+          # `:latest` stays where it is.
+          if [ "$BUILD_REF" = "refs/heads/main" ]; then
+            echo "Building from main — will publish latest + sha-<short-commit>."
+            echo "publish_latest=true" >> "$GITHUB_OUTPUT"
+          elif [ "$ALLOW_NON_MAIN" = "true" ]; then
+            echo "::warning::Building from '$BUILD_REF' with allow_non_main=true — publishing sha-<short-commit> (+ extra tag) only, NOT latest."
+            echo "publish_latest=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Refusing to build the demo image from '$BUILD_REF'. This workflow releases from refs/heads/main; re-dispatch with allow_non_main=true to build another ref (sha-tagged only, latest untouched)."
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          # The demo build clones muxr-core from the public remote at image
+          # build time and installs a published muxrd release — it never reads
+          # git history from this checkout — so don't leave the job's
+          # GITHUB_TOKEN sitting in .git/config while that runs.
+          persist-credentials: false
+
+      - name: Validate dispatch inputs
+        id: dispatch
+        # `shell: bash` is the ubuntu-latest default, but state it explicitly:
+        # the validation below relies on bash's [[ =~ ]].
+        shell: bash
+        env:
+          # Dispatch inputs reach the script through env, never as raw ${{ }}:
+          # this job holds packages: write plus GITHUB_TOKEN, and workflow_dispatch
+          # inputs are attacker-influenceable (the REST API accepts arbitrary
+          # strings), so a raw interpolation would be a command-injection sink.
+          TAG_INPUT: ${{ inputs.tag }}
+        run: |
+          # Anchored bash regexes, NOT `grep -E`: grep matches line by line, so a
+          # multi-line input passes as long as ANY single line matches, and the
+          # embedded newline then smuggles a second `key=value` pair into
+          # $GITHUB_OUTPUT (last assignment wins) — escaping the character class
+          # entirely. [[ =~ ]] matches the whole string, and the explicit
+          # newline/CR rejection below runs first so nothing multi-line is ever
+          # pattern-checked in the first place.
+          if [[ "$TAG_INPUT" == *[$'\n\r']* ]]; then
+            echo "::error::Invalid tag — input must be a single line (no newline or carriage return)."
+            exit 1
+          fi
+
+          if [ -n "$TAG_INPUT" ]; then
+            tag_re='^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$'
+            if [[ ! "$TAG_INPUT" =~ $tag_re ]]; then
+              echo "::error::Invalid tag '$TAG_INPUT' — expected [A-Za-z0-9][A-Za-z0-9._-]*, up to 128 chars."
+              exit 1
+            fi
+            # Reserved names: the ref-guard invariant above only holds if the
+            # extra tag cannot NAME the tags the guard protects. `latest` may
+            # only ever be created by the guarded alias path (main builds), and
+            # sha-<hex> is the immutable per-commit namespace — an extra tag
+            # matching either would move/shadow them from any ref, which is
+            # exactly the side channel the guard exists to close.
+            TAG_LOWER=$(printf '%s' "$TAG_INPUT" | tr '[:upper:]' '[:lower:]')
+            sha_re='^sha-[0-9a-f]{7,}$'
+            if [ "$TAG_LOWER" = "latest" ] || [[ "$TAG_LOWER" =~ $sha_re ]]; then
+              echo "::error::Invalid tag '$TAG_INPUT' — 'latest' and 'sha-<hex>' are reserved (latest moves only via a main build; sha tags are immutable build identities)."
+              exit 1
+            fi
+            echo "Using extra tag: $TAG_INPUT"
+            echo "tag=$TAG_INPUT" >> "$GITHUB_OUTPUT"
+          else
+            echo "No extra tag supplied — publishing latest + sha-<short-commit> only."
+            echo "tag=" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compute image name and tags
+        id: image
+        shell: bash
+        env:
+          REPO_OWNER: ${{ github.repository_owner }}
+        run: |
+          # GHCR requires an all-lowercase repository path; github.repository_owner
+          # reflects the owner's display casing and is not guaranteed lowercase,
+          # so normalize it here rather than assume.
+          OWNER=$(printf '%s' "$REPO_OWNER" | tr '[:upper:]' '[:lower:]')
+          IMAGE="ghcr.io/${OWNER}/muxr-demo"
+          SHORT_SHA_TAG="sha-${GITHUB_SHA:0:7}"
+          echo "image=$IMAGE" >> "$GITHUB_OUTPUT"
+          echo "short_sha_tag=$SHORT_SHA_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Build and tag image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SHORT_SHA_TAG: ${{ steps.image.outputs.short_sha_tag }}
+          EXTRA_TAG: ${{ steps.dispatch.outputs.tag }}
+          PUBLISH_LATEST: ${{ steps.guard.outputs.publish_latest }}
+        run: |
+          # Build context is demo/ itself (like website/, unlike docker/ whose
+          # compose sets context: ..). The image installs a published muxrd
+          # release and clones muxr-core from the public remote, so it needs
+          # nothing else from this checkout.
+          #
+          # MUXR_VERSION/HERDR_VERSION are intentionally NOT overridden here:
+          # demo/Dockerfile's ARG defaults are the single source of truth and
+          # are pinned for a reason (muxrd must be >= 0.4.2 or it silently
+          # serves herdr only — see the comment on that ARG). Passing them from
+          # CI would create a second place to forget.
+          #
+          # Build under the immutable sha tag and only ever *alias* latest onto
+          # it, so the non-main path simply never creates a latest tag.
+          docker build demo/ -f demo/Dockerfile -t "${IMAGE}:${SHORT_SHA_TAG}"
+          if [ -n "$EXTRA_TAG" ]; then
+            # Defense-in-depth re-check of the validation step's reserved-name
+            # rule: no code path may create a latest (or sha-*) ref except the
+            # guarded alias below, even if the validation step regresses.
+            EXTRA_LOWER=$(printf '%s' "$EXTRA_TAG" | tr '[:upper:]' '[:lower:]')
+            sha_re='^sha-[0-9a-f]{7,}$'
+            if [ "$EXTRA_LOWER" = "latest" ] || [[ "$EXTRA_LOWER" =~ $sha_re ]]; then
+              echo "::error::Refusing reserved extra tag '$EXTRA_TAG' — validation should have rejected this."
+              exit 1
+            fi
+            docker tag "${IMAGE}:${SHORT_SHA_TAG}" "${IMAGE}:${EXTRA_TAG}"
+          fi
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            docker tag "${IMAGE}:${SHORT_SHA_TAG}" "${IMAGE}:latest"
+          fi
+
+      - name: Smoke-test the built image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SHORT_SHA_TAG: ${{ steps.image.outputs.short_sha_tag }}
+        run: |
+          # Cheap guards against publishing an image whose editor is broken or
+          # whose persisted-volume path is polluted — both are defects this
+          # demo has actually shipped once and had to fix. A tagged image that
+          # fails these should never reach GHCR.
+          REF="${IMAGE}:${SHORT_SHA_TAG}"
+          docker run --rm --tmpfs /run/demo:rw,mode=1777 --entrypoint nvim "$REF" --version | head -1
+          docker run --rm --tmpfs /run/demo:rw,mode=1777 --entrypoint opencode "$REF" --version
+          # /var/lib/demo is the persisted volume mountpoint: it must ship EMPTY,
+          # or a later image upgrade inherits stale data it can never replace
+          # (Docker never repopulates a non-empty named volume).
+          if [ -n "$(docker run --rm --entrypoint sh "$REF" -c 'ls -A /var/lib/demo 2>/dev/null')" ]; then
+            echo "::error::/var/lib/demo is not empty in the image — it is the persisted volume mountpoint and must ship empty."
+            exit 1
+          fi
+          echo "Smoke tests passed."
+
+      - name: Log in to GHCR
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        run: echo "$GITHUB_TOKEN" | docker login ghcr.io -u "$ACTOR" --password-stdin
+
+      - name: Push image
+        shell: bash
+        env:
+          IMAGE: ${{ steps.image.outputs.image }}
+          SHORT_SHA_TAG: ${{ steps.image.outputs.short_sha_tag }}
+          EXTRA_TAG: ${{ steps.dispatch.outputs.tag }}
+          PUBLISH_LATEST: ${{ steps.guard.outputs.publish_latest }}
+        run: |
+          docker push "${IMAGE}:${SHORT_SHA_TAG}"
+          REFS="${IMAGE}:${SHORT_SHA_TAG}"
+
+          if [ -n "$EXTRA_TAG" ]; then
+            docker push "${IMAGE}:${EXTRA_TAG}"
+            REFS="$REFS ${IMAGE}:${EXTRA_TAG}"
+          fi
+
+          # Pushed last: latest only moves once the immutable tags are safely up,
+          # and only for a main build (see the ref guard).
+          if [ "$PUBLISH_LATEST" = "true" ]; then
+            docker push "${IMAGE}:latest"
+            REFS="$REFS ${IMAGE}:latest"
+          fi
+
+          echo "Pushed: $REFS"
+          {
+            echo "### Published image refs"
+            for ref in $REFS; do
+              echo "- \`$ref\`"
+            done
+            if [ "$PUBLISH_LATEST" != "true" ]; then
+              echo ""
+              echo "_Non-main build: \`latest\` was left untouched._"
+            fi
+            echo ""
+            echo "Deploy notes: \`demo/README.md\`. A demo VM pulling \`:latest\` keeps its"
+            echo "existing named volume, so the published pairing QR stays valid across the"
+            echo "upgrade — that is deliberate. See the persistence section of the README."
+          } >> "$GITHUB_STEP_SUMMARY"
