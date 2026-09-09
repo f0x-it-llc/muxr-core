@@ -258,14 +258,30 @@ for the same host.
 
 **Keep the demo on its own network, with the proxy attached to it.** A shell
 inside the demo must not reach your other containers, nor reach the proxy and
-route to them by `Host` header. If your platform can place a service on a
-dedicated network and attach its proxy to it, enable that; otherwise declare a
-network in the compose file and `docker network connect` the proxy to it (and
-re-attach if the proxy container is ever recreated). The compose file declares
-no network by default: the container ends up on exactly one network, which the
-proxy shares, and Traefik resolves it without a `traefik.docker.network` label.
-If Traefik ever answers `504` for this host, add that label with the network
-shown by `docker inspect muxr-demo`.
+route to them by `Host` header. The compose file declares no network, so the
+demo lands on its compose project's default network. **Verify the proxy is on
+that network before expecting any traffic to flow** — platforms that promise to
+attach their proxy to a service's dedicated network do not always do so, and the
+symptom is every request answering `504`:
+
+```bash
+docker inspect muxr-demo         -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}'
+docker inspect <proxy-container> -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}={{$v.IPAddress}} {{end}}'
+```
+
+If the proxy does not list the demo's network, attach it, and pin that network
+for Traefik so it does not pick one of its others:
+
+```bash
+docker network connect <demo-network> <proxy-container>
+```
+
+```yaml
+      - traefik.docker.network=<demo-network>
+```
+
+The network survives redeploys; the attach does not survive the proxy container
+being recreated — re-run it afterwards.
 
 **Firewall** — 22, 80 and 443 only; **no 50051**. If an edge proxy is meant to
 hide the VM, restrict 80/443 to that proxy's published IP ranges, or anyone who

@@ -23,14 +23,16 @@
 #
 # NETWORK: the demo must sit on its OWN network, with the proxy attached to it,
 # so a shell inside the demo cannot reach your other containers (or reach the
-# proxy and route to them by Host header). If your platform can put a service on
-# a dedicated network and attach its proxy to it, enable that. Otherwise declare
-# a network here and attach the proxy to it yourself. No `networks:` block is
-# declared by default on purpose: the container ends up on exactly one network,
-# which the proxy shares, and Traefik resolves it without a
-# `traefik.docker.network` label. If Traefik ever answers 504 for this host,
-# that assumption broke — add
-#   traefik.docker.network=<the network shown by `docker inspect muxr-demo`>
+# proxy and route to them by Host header). No `networks:` block is declared, so
+# the demo lands on its compose project's default network. VERIFY the proxy is
+# actually on that network (`docker inspect` both containers) — platforms that
+# promise to attach their proxy to a dedicated network do not always do so, and
+# the symptom is every request answering 504. If it is not:
+#   docker network connect <demo-network> <proxy-container>
+# and add, so Traefik uses that network rather than one of its others:
+#   traefik.docker.network=<demo-network>
+# The network survives redeploys; the attach does not survive the proxy
+# container being recreated.
 #
 # The hardening block is IDENTICAL to compose.yaml. Do not weaken it.
 #
