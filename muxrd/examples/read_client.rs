@@ -11,9 +11,15 @@
 //!         --cert <path/to/server.crt>    \
 //!         --auth-token <plaintext_token> \
 //!         [--addr <host:port>]           \
-//!         [--session <name>]
+//!         [--session <backend-qualified-id>]
 //!
-//! Default addr: https://[::1]:50051 ; default session: c1demo.
+//! Default addr: https://[::1]:50051.
+//!
+//! `--session` takes the BACKEND-QUALIFIED id that `ListSessions` returns in
+//! `SessionInfo.id` — e.g. `zellij:demo`, `herdr:herdr` — not a bare session
+//! name. A server driving more than one backend rejects an unqualified name.
+//! Omit the flag and this client picks the first id `ListSessions` reports,
+//! which is the discovery pattern a real client should follow.
 
 use anyhow::{Context, Result};
 use muxrd::proto::muxr_client::MuxrClient;
@@ -29,7 +35,9 @@ struct Args {
     addr: String,
     cert_pem: String,
     auth_token: String,
-    session: String,
+    /// Backend-qualified session id (`SessionInfo.id`). `None` = discover it
+    /// from `ListSessions` rather than guessing a name.
+    session: Option<String>,
 }
 
 fn parse_args() -> Result<Args> {
@@ -59,7 +67,7 @@ fn parse_args() -> Result<Args> {
         addr,
         cert_pem,
         auth_token,
-        session: get("--session").unwrap_or_else(|| "c1demo".to_owned()),
+        session: get("--session"),
     })
 }
 
@@ -135,21 +143,43 @@ async fn main() -> Result<()> {
             } else {
                 ""
             };
-            println!("  - '{}' age={}m{}s{}", s.name, age_m, age_s, marker);
+            // Print the qualified `id` alongside the display name: `id` is what
+            // every other RPC wants, and showing both makes the difference
+            // obvious the first time someone reads this output.
+            println!(
+                "  - id='{}' name='{}' age={}m{}s{}",
+                s.id, s.name, age_m, age_s, marker
+            );
         }
     }
 
-    // Check c1demo is present.
-    let target = &args.session;
-    let found = sessions.iter().any(|s| &s.name == target);
-    if found {
-        println!("  PASS: session '{target}' found in ListSessions");
-    } else {
-        println!(
-            "  WARN: session '{target}' not found in ListSessions (sessions seen: {:?})",
-            sessions.iter().map(|s| s.name.as_str()).collect::<Vec<_>>()
-        );
-    }
+    // Resolve the session to address. RPCs take the BACKEND-QUALIFIED id from
+    // `SessionInfo.id` ("zellij:demo"), not the bare `name`: a server driving
+    // more than one backend rejects an unqualified name outright. An explicit
+    // --session is passed through untouched; otherwise discover it here rather
+    // than defaulting to a name that only ever worked on a single-backend
+    // server.
+    let target: String = match &args.session {
+        Some(explicit) => {
+            println!("  using --session '{explicit}' (passed through verbatim)");
+            explicit.clone()
+        }
+        None => {
+            let first = sessions.first().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no sessions reported by ListSessions, and no --session given — \
+                     the server has no session to attach to (is one seeded?). \
+                     Pass --session <backend-qualified-id> to address one explicitly."
+                )
+            })?;
+            println!(
+                "  no --session given; discovered '{}' from ListSessions",
+                first.id
+            );
+            first.id.clone()
+        }
+    };
+    let target = &target;
 
     // ── GetLayout ────────────────────────────────────────────────────────────
     println!("\n--- GetLayout(session='{target}') ---");

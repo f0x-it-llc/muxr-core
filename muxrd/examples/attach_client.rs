@@ -17,12 +17,18 @@
 //!         --cert <path/to/server.crt>      \
 //!         --auth-token <plaintext_auth_tok> \
 //!         [--addr <host:port>]             \
-//!         [--session <name>]               \
+//!         [--session <backend-qualified-id>] \
 //!         [--type <TEXT>]                  \
 //!         [--rows N] [--cols N]            \
 //!         [--negative-test]
 //!
-//! Default addr: https://[::1]:50051 ; default session: b3demo.
+//! Default addr: https://[::1]:50051.
+//!
+//! `--session` takes the BACKEND-QUALIFIED id that `ListSessions` returns in
+//! `SessionInfo.id` — e.g. `zellij:demo`, `herdr:herdr` — not a bare session
+//! name. A server driving more than one backend rejects an unqualified name.
+//! Omit the flag and this client picks the first id `ListSessions` reports,
+//! which is the discovery pattern a real client should follow.
 
 use std::time::Duration;
 
@@ -30,7 +36,7 @@ use anyhow::{Context, Result, bail};
 use muxrd::proto::client_frame::Kind as ClientKind;
 use muxrd::proto::muxr_client::MuxrClient;
 use muxrd::proto::server_frame::Kind as ServerKind;
-use muxrd::proto::{AttachReq, ClientFrame, LoginRequest};
+use muxrd::proto::{AttachReq, ClientFrame, Empty, LoginRequest};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{
@@ -44,7 +50,9 @@ struct Args {
     addr: String,
     cert_pem: String,
     auth_token: String,
-    session: String,
+    /// Backend-qualified session id (`SessionInfo.id`). `None` = discover it
+    /// from `ListSessions` rather than guessing a name.
+    session: Option<String>,
     type_text: String,
     rows: u32,
     cols: u32,
@@ -81,7 +89,7 @@ fn parse_args() -> Result<Args> {
         addr,
         cert_pem,
         auth_token,
-        session: get("--session").unwrap_or_else(|| "b3demo".to_owned()),
+        session: get("--session"),
         type_text: get("--type")
             .unwrap_or_else(|| "echo muxrd_b3_ok > /tmp/b3_proof.txt\n".to_owned())
             .replace("\\n", "\n"),
@@ -130,8 +138,13 @@ async fn main() -> Result<()> {
         println!("--- NEGATIVE TEST: AttachTerminal with no bearer ---");
         // Send AttachReq without any authorization header.
         let (tx, rx) = mpsc::channel::<ClientFrame>(1);
+        // The session value is irrelevant here: this asserts the call is
+        // rejected for lack of a bearer token, before any session lookup.
         tx.send(client_frame(ClientKind::Attach(AttachReq {
-            session: args.session.clone(),
+            session: args
+                .session
+                .clone()
+                .unwrap_or_else(|| "unauthenticated-probe".to_owned()),
             rows: args.rows,
             cols: args.cols,
             // No resume hint: this harness always attaches to the session's
@@ -187,12 +200,45 @@ async fn main() -> Result<()> {
             Ok(req)
         });
 
+    // Resolve the session to attach to. AttachTerminal takes the
+    // BACKEND-QUALIFIED id from `SessionInfo.id` ("zellij:demo"), not a bare
+    // name: a server driving more than one backend rejects an unqualified name
+    // outright. An explicit --session is passed through untouched; otherwise
+    // discover it here rather than defaulting to a name that only ever worked
+    // on a single-backend server.
+    let target: String = match &args.session {
+        Some(explicit) => {
+            println!("using --session '{explicit}' (passed through verbatim)");
+            explicit.clone()
+        }
+        None => {
+            let sessions = authed_client
+                .list_sessions(Empty {})
+                .await
+                .context("ListSessions RPC failed (needed to discover a session id)")?
+                .into_inner()
+                .sessions;
+            let first = sessions.first().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no sessions reported by ListSessions, and no --session given — \
+                     the server has no session to attach to (is one seeded?). \
+                     Pass --session <backend-qualified-id> to address one explicitly."
+                )
+            })?;
+            println!(
+                "no --session given; discovered '{}' from ListSessions",
+                first.id
+            );
+            first.id.clone()
+        }
+    };
+
     let (tx, rx) = mpsc::channel::<ClientFrame>(32);
     let outbound = ReceiverStream::new(rx);
 
     // 1. First frame: AttachReq.
     tx.send(client_frame(ClientKind::Attach(AttachReq {
-        session: args.session.clone(),
+        session: target.clone(),
         rows: args.rows,
         cols: args.cols,
         // No resume hint (see the negative-test attach above).
@@ -202,7 +248,7 @@ async fn main() -> Result<()> {
     .context("send AttachReq")?;
     println!(
         "sent AttachReq{{session={}, {}x{}}}",
-        args.session, args.rows, args.cols
+        target, args.rows, args.cols
     );
 
     let response = authed_client
