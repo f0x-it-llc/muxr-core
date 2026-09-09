@@ -1,0 +1,93 @@
+# Muxr PUBLIC DEMO — PROXIED mode, for a host with a TLS-terminating reverse
+# proxy (Traefik) in front, optionally behind an edge/CDN proxy.
+#
+#   app ──TLS──▶ edge proxy (gRPC enabled) ──TLS──▶ Traefik :443 ──h2c──▶ muxrd
+#
+# Differences from compose.yaml (PIN mode):
+#   - NO `ports:`. muxrd speaks plaintext HTTP/2 (h2c) and must be reachable
+#     ONLY by the proxy, over the container network. Publishing this port would
+#     expose unencrypted terminal traffic and bearer tokens to the internet.
+#   - DEMO_PROXIED=1 and a REQUIRED DEMO_HOST (the public hostname the proxy
+#     serves). The QR then carries tm=ca for <DEMO_HOST>:<DEMO_PUBLIC_PORT>.
+#   - No `build:` — this is a deployment file; the image comes from GHCR.
+#
+# WHY THE TRAEFIK LABELS ARE DECLARED HERE
+# A platform that auto-generates Traefik routes from a domain form (host, port,
+# TLS, cert resolver) has no gRPC/h2c/scheme option, and names the generated
+# router/service with a slug you cannot predict, so
+# `loadbalancer.server.scheme=h2c` cannot be attached to it. Without h2c,
+# Traefik talks HTTP/1.1 to muxrd and every gRPC call fails. So for THIS
+# service the route is declared here, and you must NOT also create a domain for
+# it through such a form (that would add a second, non-h2c route for the same
+# host).
+#
+# NETWORK: the demo must sit on its OWN network, with the proxy attached to it,
+# so a shell inside the demo cannot reach your other containers (or reach the
+# proxy and route to them by Host header). If your platform can put a service on
+# a dedicated network and attach its proxy to it, enable that. Otherwise declare
+# a network here and attach the proxy to it yourself. No `networks:` block is
+# declared by default on purpose: the container ends up on exactly one network,
+# which the proxy shares, and Traefik resolves it without a
+# `traefik.docker.network` label. If Traefik ever answers 504 for this host,
+# that assumption broke — add
+#   traefik.docker.network=<the network shown by `docker inspect muxr-demo`>
+#
+# The hardening block is IDENTICAL to compose.yaml. Do not weaken it.
+#
+# Usage (set DEMO_HOST in the environment), or locally from the repo root:
+#   DEMO_HOST=demo.example.com docker compose -f demo/compose.proxied.yaml up -d
+services:
+  demo:
+    image: ghcr.io/f0x-it-llc/muxr-demo:${DEMO_IMAGE_TAG:-latest}
+    container_name: muxr-demo
+    restart: unless-stopped
+
+    environment:
+      DEMO_PROXIED: "1"
+      # REQUIRED: the public hostname the proxy serves. Goes into the QR as h=.
+      DEMO_HOST: "${DEMO_HOST:?DEMO_HOST is required in proxied mode (the public hostname the proxy serves)}"
+      # The proxy's public port — what the app dials. 443 behind a TLS proxy.
+      DEMO_PUBLIC_PORT: "${DEMO_PUBLIC_PORT:-443}"
+      DEMO_SESSION: "${DEMO_SESSION:-demo}"
+      DEMO_READ_ONLY: "${DEMO_READ_ONLY:-1}"
+      DEMO_REVIEWER_TOKEN: "${DEMO_REVIEWER_TOKEN:-0}"
+
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.muxr-demo.rule=Host(`${DEMO_HOST}`)
+      - traefik.http.routers.muxr-demo.entrypoints=websecure
+      # Name of your Traefik ACME resolver; `letsencrypt` is a common default.
+      - traefik.http.routers.muxr-demo.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
+      - traefik.http.services.muxr-demo.loadbalancer.server.port=50051
+      # THE reason these labels exist: gRPC needs HTTP/2 end to end, and muxrd
+      # is plaintext h2c in this mode. Not settable from a domain form.
+      - traefik.http.services.muxr-demo.loadbalancer.server.scheme=h2c
+
+    # Persisted identity. In proxied mode only the token DB matters (there is
+    # no pinned cert), but the volume layout is the same as PIN mode so an
+    # operator can switch modes without losing the token.
+    volumes:
+      - demo-data:/var/lib/demo
+
+    # ── Workload hardening — identical to compose.yaml ───────────────────────
+    user: "10001:10001"
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    pids_limit: 256
+    mem_limit: 512m
+    memswap_limit: 512m
+    cpus: "1.0"
+    tmpfs:
+      - /run/demo:rw,mode=1777,size=96m,nosuid,nodev
+      - /tmp:rw,mode=1777,size=64m,noexec,nosuid,nodev
+    ulimits:
+      nproc: 256
+      nofile:
+        soft: 1024
+        hard: 2048
+
+volumes:
+  demo-data:
