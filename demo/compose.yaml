@@ -1,0 +1,112 @@
+# Muxr PUBLIC DEMO server — hardened, single-tenant, App Store review sandbox.
+#
+#   # Local smoke test (loopback):
+#   docker compose -f demo/compose.yaml up --build
+#
+#   # Public VM (reviewers dial this address — put it in the cert SAN):
+#   DEMO_HOST=demo.muxr.app BIND_ADDR=0.0.0.0 \
+#     docker compose -f demo/compose.yaml up --build -d
+#
+# DEMO_HOST is baked into the TLS cert SAN at first boot. CHANGING IT
+# REGENERATES THE CERT and invalidates every already-published pairing QR —
+# treat it as fixed for a given deployment once reviewers have scanned one.
+#
+# The image installs the official prebuilt muxrd via install.sh (no source
+# build). Pin the release with build args MUXR_VERSION / HERDR_VERSION, or
+# leave the defaults below.
+#
+# Retrieve the pairing URI / QR for the review notes:
+#   docker logs muxr-demo                       # banner + ANSI QR
+#   docker exec muxr-demo cat /run/demo/pairing.txt
+#
+# PUBLIC POSTURE IS READ-ONLY (DEMO_READ_ONLY=1 by default): muxrd has no
+# per-login session isolation (session_ops.rs:256-306) — every client sharing
+# one token attaches to the SAME session. A read-only client attaches at the
+# session's existing size and never shrinks it (relay/mod.rs:225-270), and
+# cannot type at whoever else is attached. Set DEMO_READ_ONLY=0 for the
+# interactive store-reviewer posture; set DEMO_REVIEWER_TOKEN=1 alongside it
+# to also mint a separate read-write reviewer token.
+#
+# Persisted state: exactly ONE named volume, mounted at /var/lib/demo
+# (XDG_DATA_HOME). It holds muxrd's TLS cert/key/SAN sidecar
+# ($XDG_DATA_HOME/zellij/muxrd/) and zellij's auth token DB
+# ($XDG_DATA_HOME/zellij/tokens.db), so a published pairing QR keeps working
+# across container restarts. This DELIBERATELY narrows the old
+# "everything resets on restart" property: only this volume survives.
+# Everything else (session buffers, /run/demo, /tmp) is tmpfs and still wipes
+# on every restart. `docker compose -f demo/compose.yaml down -v` resets the
+# persisted identity too — new cert, new tokens, reviewers must re-pair.
+#
+# IMPORTANT: this container hardens the *workload*. You MUST still firewall
+# the VM so the ONLY inbound port is the gRPC port and there is NO outbound
+# egress from the container network (see README.md "VM firewall").
+services:
+  demo:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        MUXR_VERSION: "${MUXR_VERSION:-0.4.2}"
+        HERDR_VERSION: "${HERDR_VERSION:-0.9.0}"
+    image: ghcr.io/f0x-it-llc/muxr-demo:latest
+    container_name: muxr-demo
+    restart: unless-stopped
+
+    # Only the gRPC port is published. BIND_ADDR selects the host interface
+    # (default loopback; set 0.0.0.0 on the public VM).
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-50051}:50051"
+
+    environment:
+      DEMO_SESSION: "${DEMO_SESSION:-demo}"
+      # The public IP/DNS reviewers connect to — injected into the TLS cert
+      # SAN. CHANGING THIS REGENERATES THE CERT and invalidates every
+      # published pairing QR.
+      DEMO_HOST: "${DEMO_HOST:-}"
+      # Public posture default: 1 = read-only (view only), 0 = interactive
+      # (store-reviewer posture). See the read-only rationale above.
+      DEMO_READ_ONLY: "${DEMO_READ_ONLY:-1}"
+      # 1 = also mint a read-write reviewer token alongside the read-only one.
+      DEMO_REVIEWER_TOKEN: "${DEMO_REVIEWER_TOKEN:-0}"
+
+    # Persisted identity only: TLS cert/key/SAN sidecar + zellij auth token
+    # DB. This is the ONE thing that survives a restart — everything else
+    # below is tmpfs. `down -v` wipes this too.
+    volumes:
+      - demo-data:/var/lib/demo
+
+    # ── Workload hardening ───────────────────────────────────────────────────
+    user: "10001:10001"                 # unprivileged demo user (redundant w/ image)
+    read_only: true                      # immutable rootfs — all writes go to tmpfs/volume
+    security_opt:
+      - no-new-privileges:true           # a child can never gain privileges
+    cap_drop:
+      - ALL                              # no Linux capabilities at all
+    pids_limit: 256                      # fork-bomb ceiling
+    mem_limit: 512m
+    memswap_limit: 512m                  # no swap headroom beyond mem_limit
+    cpus: "1.0"
+
+    # Writable scratch — RAM only, wiped on restart. noexec/nosuid/nodev stop
+    # a reviewer from dropping and running a binary out of these dirs.
+    tmpfs:
+      - /run/demo:rw,mode=1777,size=96m,nosuid,nodev
+      - /tmp:rw,mode=1777,size=64m,noexec,nosuid,nodev
+
+    ulimits:
+      nproc: 256
+      nofile:
+        soft: 1024
+        hard: 2048
+
+    # Single-tenant, no inter-container reachability. Egress is blocked at the
+    # VM firewall (this container needs no outbound traffic once built).
+    networks:
+      - demo
+
+networks:
+  demo:
+    driver: bridge
+
+volumes:
+  demo-data:

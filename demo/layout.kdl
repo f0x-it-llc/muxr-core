@@ -1,0 +1,29 @@
+// Muxr DEMO session layout — a realistic multi-tab / multi-pane setup so the
+// mobile client's session list and pane picker have interesting content to show
+// an App Store reviewer. All cwd/args point at the READ-ONLY muxr-core clone
+// (/opt/demo/muxr-core, cloned from the public repo by the demo Dockerfile), so
+// nvim opens a real source file but cannot save it.
+layout {
+    tab name="editor" focus=true {
+        pane split_direction="vertical" {
+            pane command="nvim" size="70%" {
+                args "-R" "muxrd/src/grpc/mod.rs"
+                cwd "/opt/demo/muxr-core"
+            }
+            pane split_direction="horizontal" {
+                pane cwd="/opt/demo/muxr-core"
+                pane command="btop"
+            }
+        }
+    }
+    tab name="shell" {
+        pane cwd="/opt/demo/muxr-core"
+        pane command="htop"
+    }
+    tab name="logs" {
+        // Real commit history reads better than a fake access log.
+        pane command="bash" {
+            args "-c" "while true; do clear; echo \"[$(date +%T)] /opt/demo/muxr-core git log\"; git -C /opt/demo/muxr-core --no-pager log --oneline --graph --all -30; sleep 5; done"
+        }
+    }
+}

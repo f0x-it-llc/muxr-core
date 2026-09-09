@@ -1,0 +1,219 @@
+# Muxr demo server
+
+A locked-down, internet-exposable `muxrd` instance whose only purpose is to let
+someone — a store reviewer, or anyone you hand the QR to — pair the Muxr mobile
+app and drive a **real but heavily sandboxed** terminal.
+
+This is **not** the [dev rig](../docker/README.md), which has passwordless root
+SSH and is for local development only. Use *this* for anything reachable from
+the internet.
+
+The image installs the official prebuilt `muxrd` release via
+[`install.sh`](../install.sh) — it does **not** build from source, so the build
+context is just this directory and no Rust toolchain is needed.
+
+## What someone can do
+
+- Pair the app by scanning the QR (or entering the pairing URI).
+- Attach to a live, bar-less zellij session with an editor / monitors / logs,
+  **or** a herdr space — the demo serves **both backends**, so both session
+  types appear in the app's session list.
+- Read a real, read-only clone of this repository at `/opt/demo/muxr-core`:
+  `git log`, `git show`, `rg`, `bat` and `nvim` all work against actual source.
+
+## What they cannot do
+
+| Control | Mechanism |
+|---|---|
+| Become root | Runs as uid `10001`; no `sudo`, no `su` (removed); every setuid/setgid bit stripped at build |
+| Gain privileges via a child | `no-new-privileges:true` |
+| Use Linux capabilities | `cap_drop: ALL` |
+| Write system files | `read_only` rootfs |
+| Edit the repo clone | Root-owned and `chmod a-w`; `nvim` opens it, `:w` fails |
+| Run a dropped binary | `/tmp` is `tmpfs` mounted `noexec,nosuid,nodev` |
+| Fork-bomb / exhaust the host | `pids_limit: 256`, `mem_limit`/`memswap_limit: 512m`, `cpus: 1.0`, `nproc: 256`, `nofile: 1024/2048` |
+| See host processes | Container PID namespace |
+| Reach an admin surface | No `sshd`, no `muxrctl` in the image; provisioning is headless |
+| Pivot / exfiltrate over the network | No outbound egress — **you must enforce this at the VM firewall** |
+
+## One token, many people
+
+`muxrd` mints an independent session token on every `Login`, with no cap, so a
+**single auth token serves many concurrent people by design**. Two tokens exist:
+
+| Token | Posture | Default |
+|---|---|---|
+| `demo-public` | read-only — the token in the published QR | always minted |
+| `demo-reviewer` | read-write — for store reviewers | only when `DEMO_REVIEWER_TOKEN=1` |
+
+**The public token is read-only for a reason.** `muxrd` has no per-login session
+isolation: everyone presenting the same token attaches to the *same* session and
+sees the same activity. This is a shared window onto a live terminal, **not a
+private sandbox** — do not describe it as one. Read-only clients cannot type at
+each other, and (unlike read-write clients) attach at the session's existing
+size rather than shrinking the shared view to the smallest phone.
+
+### Abuse kill switch
+
+```bash
+docker exec muxr-demo muxrd revoke-token demo-public
+```
+
+This invalidates the token **and every live session minted from it** in one
+transaction. Restart afterwards to mint a fresh token, then republish the QR.
+
+## What persists, what resets
+
+Exactly one named volume (`demo-data` at `/var/lib/demo`) survives a restart:
+
+- **Persists** — the TLS cert, key and SAN sidecar
+  (`/var/lib/demo/zellij/muxrd/`), and the auth token DB
+  (`/var/lib/demo/zellij/tokens.db`).
+- **Resets** — all session state, `$HOME` (`/run/demo`), `/tmp`, and every edit
+  anyone made.
+
+Persisting the cert is what makes a published QR *reusable*: the pairing URI
+pins the certificate (`tm=pin&fp=<sha256>`), so a regenerated cert would
+invalidate every QR already in circulation regardless of the token.
+
+> **Changing `DEMO_HOST` regenerates the cert** (it changes the SANs) and
+> therefore invalidates every published QR. Republish after any `DEMO_HOST`
+> change.
+
+`docker compose down -v` wipes the volume too — that is a full reset, and it
+also invalidates published QRs.
+
+## Operator notes
+
+**The read-only flag is fixed when a token is minted.** There is no
+`update-token` command, so flipping `DEMO_READ_ONLY` after first boot has *no
+effect* on an existing token. To change posture, revoke the token and let the
+next boot mint a fresh one — then republish the QR.
+
+**Persisted token secrets are readable by anyone with an interactive shell.**
+`muxrd create-token` prints a secret once and it cannot be recovered afterwards,
+so the entrypoint stores it under `/var/lib/demo` at mode `0600`, owned by uid
+`10001` — which is the same uid the visitor's shell runs as. With the shipped
+defaults there is no exposure: `DEMO_READ_ONLY=1` means a public visitor cannot
+send input at all, and `DEMO_REVIEWER_TOKEN=0` means the read-write secret is
+never written. **But if you set both `DEMO_READ_ONLY=0` and
+`DEMO_REVIEWER_TOKEN=1` on a publicly reachable host, a visitor can read
+`demo-reviewer.token` — and revoking `demo-public` does not invalidate it.**
+Avoid that combination in public.
+
+**If you copy this persistence pattern for your own deployment, clear muxrd's
+pidfile on boot.** `muxrd`'s pidfile and control socket live in the *same*
+directory as its TLS cert, so persisting the cert also persists them. Since the
+entrypoint `exec`s muxrd as PID 1 and container PID namespaces restart at 1, a
+stale pidfile makes muxrd refuse to start — a permanent crash loop.
+`entrypoint.sh` removes `muxrd.pid` and `control.sock` on every boot for exactly
+this reason.
+
+**`opencode` is installed but cannot reach a model.** The demo ships no API key
+and makes no egress exception, so its onboarding screen is deliberate
+sandboxing, not a broken product.
+
+## Run it
+
+Local smoke test (loopback only):
+
+```bash
+docker compose -f demo/compose.yaml up --build
+```
+
+Public VM (people dial `DEMO_HOST` — it goes into the TLS cert SAN):
+
+```bash
+DEMO_HOST=demo.muxr.app BIND_ADDR=0.0.0.0 \
+  docker compose -f demo/compose.yaml up --build -d
+```
+
+Get the pairing details:
+
+```bash
+docker logs muxr-demo                          # banner + ANSI QR
+docker exec muxr-demo cat /run/demo/pairing.txt
+```
+
+`pairing.txt` holds the host, fingerprint, token and the full
+`muxr://pair?v=2…` URI for each minted token. Paste the `demo-public` URI (or a
+QR of it) wherever people will scan it.
+
+> If your Docker host has no container internet, build with
+> `docker build --network=host` — some networks drop forwarded packets with a
+> TTL below 64, which fails every download in the image build.
+
+### Environment
+
+| Var | Default | Meaning |
+|---|---|---|
+| `DEMO_HOST` | *(empty)* | Public IP/DNS people connect to; added to the cert SAN. Comma-separate for several. **Changing it invalidates published QRs.** |
+| `BIND_ADDR` | `127.0.0.1` | Host interface the gRPC port publishes on. Set `0.0.0.0` on a public VM. |
+| `GRPC_PORT` | `50051` | Published host port. |
+| `DEMO_READ_ONLY` | `1` | `1` = read-only public posture. `0` = interactive (store reviewers). |
+| `DEMO_REVIEWER_TOKEN` | `0` | `1` also mints the read-write `demo-reviewer` token. |
+| `DEMO_SESSION` | `demo` | zellij session name. |
+| `MUXR_VERSION` | `0.4.2` | muxr-core release installed. **Minimum 0.4.2** — see below. |
+| `HERDR_VERSION` | `0.9.0` | herdr release; muxrd is tested against its wire protocol. |
+
+> **`MUXR_VERSION` must be ≥ 0.4.2.** `muxrd` refuses to drive a zellij whose
+> version differs from the `zellij-utils` it was linked against, and **silently
+> drops the backend rather than failing** — the symptom is
+> `backend: zellij not in served set` and a demo that serves herdr only. v0.4.1
+> predates the zellij 0.45.1 rebaseline, so it links `zellij-utils` 0.44.3 and
+> cannot drive this image's zellij. If you bump the zellij pin, pair it with a
+> muxr-core release built against the same zellij.
+
+### What's inside
+
+zellij **0.45.1** and herdr **0.9.0** (both backends served), Neovim **0.12.5**
+with NvChad and pre-built treesitter parsers, `opencode` **1.18.29**, plus btop,
+htop, ripgrep, fd, fzf, bat, tree, jq, ncdu, git, and a few toys.
+
+> Neovim is installed from the official release tarball, **not apt**: NvChad
+> needs ≥ 0.12 (its pinned branch pulls nvim-treesitter's rewritten `main`),
+> while Debian trixie ships 0.10.4. Treesitter parsers are built into the image
+> because the container has no runtime egress — a missing parser would surface
+> as an error in front of a visitor.
+
+## VM firewall (required)
+
+The container hardens the workload; it does **not** firewall the VM. On the
+host, allow only the gRPC port inbound and block the container's outbound egress
+so nobody can use the box as a pivot or spam relay.
+
+```bash
+# Inbound: only the gRPC port.
+sudo ufw default deny incoming
+sudo ufw allow 50051/tcp
+sudo ufw allow OpenSSH            # your admin access only
+
+# Outbound egress from the demo bridge: drop everything (the container needs no
+# outbound traffic once the image is built). Adjust to your network.
+DEMO_NET=$(docker network inspect demo_demo -f '{{(index .IPAM.Config 0).Subnet}}')
+sudo iptables -I DOCKER-USER -s "$DEMO_NET" -m conntrack --ctstate NEW -j DROP
+```
+
+## Publishing
+
+[`demo-release.yml`](../.github/workflows/demo-release.yml) publishes
+`ghcr.io/f0x-it-llc/muxr-demo` to GHCR. It is a **manual `workflow_dispatch`**,
+not an on-push build — this image can be internet-reachable, so publishing is a
+deliberate act. `latest` moves only from `main`; other refs publish
+`sha-<commit>` only. A VM can then `docker compose pull && docker compose up -d`
+instead of building.
+
+Upgrading this way keeps the existing volume, so the published QR stays valid
+across the upgrade — that is deliberate.
+
+## Connecting a test client
+
+Session ids on a multi-backend server are **backend-qualified** — `zellij:demo`,
+`herdr:herdr` — as returned by `ListSessions`. The example clients discover this
+themselves when `--session` is omitted:
+
+```bash
+docker exec muxr-demo cat /var/lib/demo/zellij/muxrd/server.crt > /tmp/demo.crt
+cargo run --example read_client -- \
+  --addr https://127.0.0.1:50051 --cert /tmp/demo.crt --auth-token <token>
+```

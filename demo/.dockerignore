@@ -1,0 +1,17 @@
+# .dockerignore — keep the Docker build context small and out of any future
+# bulk `COPY . .` (info disclosure if the Dockerfile ever switches away from
+# its current named COPYs). The build only COPYs four named files
+# (entrypoint.sh, config.kdl, layout.kdl, demo.bashrc); everything else here
+# is for other consumers (docker compose, humans), never the image.
+Dockerfile
+.dockerignore
+README.md
+compose.yaml
+
+# VCS / OS / editor cruft
+.git
+.gitignore
+.DS_Store
+*.swp
+*.swo
+*~
