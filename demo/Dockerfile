@@ -176,6 +176,9 @@ RUN set -eux; \
 # decision) — opencode shows its login/onboarding screen when launched with no
 # network and no key configured; that is expected sandboxing, not a bug.
 # opencode spells its ARM asset `arm64` and its x86_64 asset `x64`.
+#
+# Extracted to /opt/opencode (not /usr/local/bin directly) because the real
+# binary needs a wrapper — see the wrapper comment further down for why.
 ARG TARGETARCH
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
@@ -183,11 +186,12 @@ RUN set -eux; \
       arm64) oc_arch=arm64 ;; \
       *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
     esac; \
+    mkdir -p /opt/opencode; \
     curl -fsSL \
       "https://github.com/sst/opencode/releases/download/v${OPENCODE_VERSION}/opencode-linux-${oc_arch}.tar.gz" \
-      | tar -xz -C /usr/local/bin; \
-    chmod +x /usr/local/bin/opencode; \
-    opencode --version
+      | tar -xz -C /opt/opencode; \
+    chmod +x /opt/opencode/opencode; \
+    /opt/opencode/opencode --version
 
 # ── muxrd + muxrctl (via the official, checksum-verified install.sh) ────────
 # Unchanged mechanism from the retired demo: install.sh supports --version and
@@ -240,6 +244,33 @@ RUN printf '%s\n' \
       'exec /opt/nvim/bin/nvim "$@"' \
       > /usr/local/bin/nvim \
     && chmod 0755 /usr/local/bin/nvim
+
+# ── opencode wrapper: redirect its data dir off $XDG_DATA_HOME too ───────────
+# Same root cause as the nvim wrapper above, different shape of fix. opencode
+# honours the container-wide $XDG_DATA_HOME (/var/lib/demo) and writes to it
+# immediately, verified empirically: even a bare `opencode --version` creates
+# /var/lib/demo/opencode/{log,repos}. /var/lib/demo is the persisted volume
+# documented to hold ONLY muxrd's cert and zellij's token DB — anything else
+# there accumulates across restarts and reintroduces the same
+# stale-across-upgrade class of problem the nvim fix above closes.
+#
+# UNLIKE nvim's plugin/parser data, opencode's data is not pre-baked — it
+# writes on first run and needs a genuinely WRITABLE directory at that point,
+# so it cannot go on the read-only /opt/demo tree the nvim fix uses. It
+# belongs on the tmpfs HOME instead (ephemeral is correct here: nothing under
+# it needs to survive a restart). Verified empirically: with $XDG_DATA_HOME
+# unset, opencode already falls back to $HOME/.local/share on its own — the
+# container's own $HOME (/run/demo, tmpfs) is otherwise untouched by this
+# image's XDG overrides, so pointing $XDG_DATA_HOME at "$HOME/.local/share"
+# reproduces that default explicitly rather than leaving it to chance, and
+# confirmed empirically to leave /var/lib/demo completely untouched.
+RUN printf '%s\n' \
+      '#!/bin/sh' \
+      '# Muxr demo opencode wrapper — see demo/Dockerfile for why this exists.' \
+      'export XDG_DATA_HOME="${HOME}/.local/share"' \
+      'exec /opt/opencode/opencode "$@"' \
+      > /usr/local/bin/opencode \
+    && chmod 0755 /usr/local/bin/opencode
 
 # ── Unprivileged demo user (HOME on tmpfs at runtime — see compose.yaml) ─────
 RUN groupadd -g 10001 demo \
@@ -319,11 +350,24 @@ RUN apt-get purge -y curl xz-utils build-essential \
 RUN mkdir -p /var/lib/demo \
     && chown 10001:10001 /var/lib/demo
 
-# ── HARDENING: lock down every staged/cloned path, then neutralise every
-# setuid/setgid binary in the image (run last, after every install above) ───
+# ── HARDENING: lock down every staged/cloned path, remove su, then neutralise
+# every setuid/setgid binary in the image (run last, after every install
+# above) ──────────────────────────────────────────────────────────────────
 # This covers /opt/demo/nvim-data too (NvChad's baked plugins/parsers), which
 # only ever needs to be read by nvim at runtime, never written.
+#
+# /usr/bin/su ships as part of util-linux, an Essential:yes package — the
+# PACKAGE can't be removed (dpkg itself and half the base system depend on
+# it: apt-get remove util-linux warns "essential packages will be removed";
+# same class of constraint as `tar` above), but the single binary file is not
+# essential to anything else. Verified: deleting just the file (not going
+# through dpkg) leaves `apt-get install/purge/autoremove` fully functional
+# for every other package, and nothing under /etc references
+# /usr/bin/su by path. Preferred over leaving it and relying solely on
+# setuid-stripping (below) to make it inert, per this file's own threat-model
+# comment ("NO su") — removed, not just neutered.
 RUN chmod -R a-w /opt/demo \
+    && rm -f /usr/bin/su \
     && find / -xdev \( -perm -4000 -o -perm -2000 \) -type f -exec chmod ug-s {} +
 
 # XDG_DATA_HOME is the persisted named volume mountpoint (compose.yaml) —
