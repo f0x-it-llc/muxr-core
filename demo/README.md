@@ -269,15 +269,21 @@ shown by `docker inspect muxr-demo`.
 
 **Firewall** — 22, 80 and 443 only; **no 50051**. If an edge proxy is meant to
 hide the VM, restrict 80/443 to that proxy's published IP ranges, or anyone who
-learns the IP walks around it. The egress drop still applies and now covers
-internet, siblings and the proxy in one rule, because nothing else lives on the
-demo's subnet:
+learns the IP walks around it. The egress drop still applies, but it must be
+scoped to the **demo container's IP, not its subnet**: the proxy is attached to
+that same network, so a subnet-wide rule also drops the proxy's own connections
+*to* muxrd and every request answers `504`. Scoped to the container it blocks
+what the demo initiates — internet, siblings, and the proxy — while inbound from
+the proxy still works:
 
 ```bash
-NET=$(docker inspect muxr-demo -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-SUBNET=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Subnet}}')
-sudo iptables -I DOCKER-USER -s "$SUBNET" -m conntrack --ctstate NEW -j DROP
+DEMO_IP=$(docker inspect muxr-demo -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+sudo iptables -I DOCKER-USER -s "$DEMO_IP" -m conntrack --ctstate NEW -j DROP
 ```
+
+The IP can change when the container is recreated, so re-run this after each
+redeploy (`iptables -L DOCKER-USER -n --line-numbers` shows the stale rule to
+delete first).
 
 **Verify from outside** — this exercises the whole chain, edge proxy included:
 
