@@ -21,21 +21,20 @@
 # it through such a form (that would add a second, non-h2c route for the same
 # host).
 #
-# NETWORK: the demo must sit on its OWN network, with the proxy attached to it,
-# so a shell inside the demo cannot reach your other containers (or reach the
-# proxy and route to them by Host header). If your platform can put a service on
-# a dedicated network and attach its proxy to it, enable that. Otherwise declare
-# a network here and attach the proxy to it yourself. No `networks:` block is
-# declared by default on purpose: the container ends up on exactly one network,
-# which the proxy shares, and Traefik resolves it without a
-# `traefik.docker.network` label. If Traefik ever answers 504 for this host,
-# that assumption broke — add
-#   traefik.docker.network=<the network shown by `docker inspect muxr-demo`>
+# NETWORK: the demo JOINS THE PROXY'S NETWORK (PROXY_NETWORK, external) so
+# Traefik reaches muxrd with nothing to attach and nothing to redo after the
+# proxy container is recreated — the same layout as any other service behind
+# the proxy. Isolation then comes from the firewall, not the topology: the
+# README's egress rule, scoped to this container's IP, drops every connection
+# the demo INITIATES — internet, its neighbours on that network, and the proxy
+# itself — while inbound from the proxy still works. Verify that guard after
+# deploying (the README shows how). PROXY_NETWORK has no default on purpose: a
+# wrong guess fails silently as a 504, so the deploy refuses without it.
 #
 # The hardening block is IDENTICAL to compose.yaml. Do not weaken it.
 #
-# Usage (set DEMO_HOST in the environment), or locally from the repo root:
-#   DEMO_HOST=demo.example.com docker compose -f demo/compose.proxied.yaml up -d
+# Usage (set DEMO_HOST and PROXY_NETWORK in the environment), or locally:
+#   DEMO_HOST=demo.example.com PROXY_NETWORK=proxy docker compose -f demo/compose.proxied.yaml up -d
 services:
   demo:
     image: ghcr.io/f0x-it-llc/muxr-demo:${DEMO_IMAGE_TAG:-latest}
@@ -53,15 +52,19 @@ services:
       DEMO_REVIEWER_TOKEN: "${DEMO_REVIEWER_TOKEN:-0}"
 
     labels:
-      - traefik.enable=true
-      - traefik.http.routers.muxr-demo.rule=Host(`${DEMO_HOST}`)
-      - traefik.http.routers.muxr-demo.entrypoints=websecure
+      traefik.enable: "true"
+      traefik.docker.network: "${PROXY_NETWORK:?PROXY_NETWORK is required: the Docker network the reverse proxy is on}"
+      # Host AND a gRPC content-type: gRPC reaches muxrd, anything else falls
+      # through to Traefik's own 404 instead of confusing an h2c-only backend.
+      traefik.http.routers.muxr-demo.rule: "Host(`${DEMO_HOST}`) && HeaderRegexp(`Content-Type`, `^application/grpc`)"
+      traefik.http.routers.muxr-demo.entrypoints: "websecure"
       # Name of your Traefik ACME resolver; `letsencrypt` is a common default.
-      - traefik.http.routers.muxr-demo.tls.certresolver=${TRAEFIK_CERT_RESOLVER:-letsencrypt}
-      - traefik.http.services.muxr-demo.loadbalancer.server.port=50051
+      traefik.http.routers.muxr-demo.tls.certresolver: "${TRAEFIK_CERT_RESOLVER:-letsencrypt}"
+      traefik.http.routers.muxr-demo.service: "muxr-demo"
+      traefik.http.services.muxr-demo.loadbalancer.server.port: "50051"
       # THE reason these labels exist: gRPC needs HTTP/2 end to end, and muxrd
       # is plaintext h2c in this mode. Not settable from a domain form.
-      - traefik.http.services.muxr-demo.loadbalancer.server.scheme=h2c
+      traefik.http.services.muxr-demo.loadbalancer.server.scheme: "h2c"
 
     # Persisted identity. In proxied mode only the token DB matters (there is
     # no pinned cert), but the volume layout is the same as PIN mode so an
@@ -88,6 +91,14 @@ services:
       nofile:
         soft: 1024
         hard: 2048
+
+    networks:
+      - proxy
+
+networks:
+  proxy:
+    external: true
+    name: "${PROXY_NETWORK:?PROXY_NETWORK is required: the Docker network the reverse proxy is on}"
 
 volumes:
   demo-data:

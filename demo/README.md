@@ -34,7 +34,7 @@ context is just this directory and no Rust toolchain is needed.
 | Fork-bomb / exhaust the host | `pids_limit: 256`, `mem_limit`/`memswap_limit: 512m`, `cpus: 1.0`, `nproc: 256`, `nofile: 1024/2048` |
 | See host processes | Container PID namespace |
 | Reach an admin surface | No `sshd`, no `muxrctl` in the image; provisioning is headless |
-| Pivot / exfiltrate over the network | No outbound egress — **you must enforce this at the VM firewall** |
+| Pivot / exfiltrate over the network | Read-only visitors cannot run a command at all; an optional VM firewall rule (below) blocks egress for read-write tokens too |
 
 ## One token, many people
 
@@ -168,6 +168,7 @@ QR of it) wherever people will scan it.
 | `DEMO_HOST` | *(empty)* | Public IP/DNS people connect to — the QR's `h=`. PIN mode adds it to the cert SAN (comma-separate for several; **changing it invalidates published QRs**). **Required** in PROXIED mode. |
 | `DEMO_PROXIED` | `0` | `1` = PROXIED mode: plaintext h2c to a TLS-terminating proxy, `tm=ca` QR. |
 | `DEMO_PUBLIC_PORT` | `443` | PROXIED only: the proxy's public port — what the app dials and what goes in the QR. |
+| `PROXY_NETWORK` | *(none)* | PROXIED only, **required**: the Docker network the reverse proxy is on; the demo joins it. |
 | `BIND_ADDR` | `127.0.0.1` | PIN only: host interface the gRPC port publishes on. Set `0.0.0.0` on a public VM. |
 | `GRPC_PORT` | `50051` | PIN only: published host port. |
 | `DEMO_READ_ONLY` | `1` | `1` = read-only public posture. `0` = interactive (store reviewers). |
@@ -199,8 +200,9 @@ htop, ripgrep, fd, fzf, bat, tree, jq, ncdu, git, and a few toys.
 ## VM firewall (required) — PIN mode
 
 The container hardens the workload; it does **not** firewall the VM. On the
-host, allow only the gRPC port inbound and block the container's outbound egress
-so nobody can use the box as a pivot or spam relay. (PROXIED mode has its own
+host, allow only the gRPC port inbound and — if anyone untrusted holds a
+read-write token — block the container's outbound egress so nobody can use the
+box as a pivot or spam relay. (PROXIED mode has its own
 firewall shape — see the next section.)
 
 ```bash
@@ -241,10 +243,10 @@ and speak HTTP/2 to the origin. 443 is the right public port.
 file: no `build:`, no `ports:`, identical hardening, plus the Traefik route. Run
 it with plain `docker compose` rather than swarm (`docker stack deploy` ignores
 `read_only`, `cap_drop`, `pids_limit` and the rest of the hardening block), and
-set `DEMO_HOST` in its environment.
+set `DEMO_HOST` and `PROXY_NETWORK` in its environment.
 
 ```bash
-DEMO_HOST=demo.example.com docker compose -f demo/compose.proxied.yaml up -d
+DEMO_HOST=demo.example.com PROXY_NETWORK=proxy docker compose -f demo/compose.proxied.yaml up -d
 ```
 
 **Why the route is in the file, not a domain form.** A platform that generates
@@ -256,28 +258,33 @@ That single label is why this service declares its own route. Do **not** also
 create a domain for it through such a form: that adds a second, non-h2c route
 for the same host.
 
-**Keep the demo on its own network, with the proxy attached to it.** A shell
-inside the demo must not reach your other containers, nor reach the proxy and
-route to them by `Host` header. If your platform can place a service on a
-dedicated network and attach its proxy to it, enable that; otherwise declare a
-network in the compose file and `docker network connect` the proxy to it (and
-re-attach if the proxy container is ever recreated). The compose file declares
-no network by default: the container ends up on exactly one network, which the
-proxy shares, and Traefik resolves it without a `traefik.docker.network` label.
-If Traefik ever answers `504` for this host, add that label with the network
-shown by `docker inspect muxr-demo`.
+**Network.** The demo joins the proxy's network — `PROXY_NETWORK` names it and
+the compose file declares it as external — exactly like any other service
+behind the proxy. Traefik reaches muxrd with nothing to attach and nothing to
+redo when the proxy container is recreated; `traefik.docker.network` pins that
+network so Traefik does not pick one of its others.
 
 **Firewall** — 22, 80 and 443 only; **no 50051**. If an edge proxy is meant to
 hide the VM, restrict 80/443 to that proxy's published IP ranges, or anyone who
-learns the IP walks around it. The egress drop still applies and now covers
-internet, siblings and the proxy in one rule, because nothing else lives on the
-demo's subnet:
+learns the IP walks around it.
+
+**Egress block — optional, and only worth it when someone untrusted can type.**
+With the shipped defaults nobody can: the public token is read-only, so no
+visitor can run a command, and nothing in the image initiates outbound
+connections on its own. The rule only buys something once a read-write token is
+held by someone you would not want probing the proxy's network. When that
+applies, drop every connection the demo *initiates* — internet, its neighbours
+on that network, the proxy itself — while inbound from the proxy still works,
+then prove it:
 
 ```bash
-NET=$(docker inspect muxr-demo -f '{{range $k,$v := .NetworkSettings.Networks}}{{$k}}{{end}}')
-SUBNET=$(docker network inspect "$NET" -f '{{(index .IPAM.Config 0).Subnet}}')
-sudo iptables -I DOCKER-USER -s "$SUBNET" -m conntrack --ctstate NEW -j DROP
+DEMO_IP=$(docker inspect muxr-demo -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+sudo iptables -I DOCKER-USER -s "$DEMO_IP" -m conntrack --ctstate NEW -j DROP
+# from inside the demo, the proxy must now be unreachable
+docker exec muxr-demo bash -c 'timeout 3 bash -c "</dev/tcp/<proxy-ip>/80" && echo LATERAL OPEN || echo blocked'
 ```
+
+The IP can change when the container is recreated, so re-apply after a redeploy.
 
 **Verify from outside** — this exercises the whole chain, edge proxy included:
 
