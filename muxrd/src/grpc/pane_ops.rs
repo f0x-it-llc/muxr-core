@@ -11,7 +11,8 @@ use crate::proto::{
 
 use super::MuxrService;
 use super::helpers::{
-    pane_ref, reject_if_read_only, run_action, short_conn, try_route_control, validate_display_name,
+    pane_ref, reject_if_read_only, run_action, session_is_read_only, short_conn, try_route_control,
+    validate_display_name,
 };
 
 /// Upper bound on a single `WriteToPane` payload (1 MiB).  Guards against a
@@ -58,7 +59,12 @@ impl MuxrService {
         &self,
         request: Request<PaneTarget>,
     ) -> Result<Response<ProtoAck>, Status> {
-        // Focus is a read — no read-only gate.
+        // Focus is a read — no read-only gate. Still thread the caller's
+        // read-only status into `try_route_control` (the extension must be
+        // read BEFORE `into_inner()` drops it) so a read-only caller with no
+        // exact connection_id match is never steered to a co-attached
+        // WRITABLE relay via the session fallback.
+        let read_only = session_is_read_only(&request);
         let target = request.into_inner();
         let connection_id = target.connection_id.clone();
         let pane = pane_ref(&target);
@@ -79,6 +85,7 @@ impl MuxrService {
             &self.control,
             &target.session,
             &connection_id,
+            read_only,
             crate::relay::RelayControl::FocusPane(pane),
         ) {
             log::info!("FocusPane: routed via relay client (session='{session}')");
@@ -245,10 +252,14 @@ impl MuxrService {
         // RelayControl::ToggleFullscreen carries the neutral PaneRef directly (P1.03).
         // Option C: route with the opaque id the client echoed (target.session) —
         // what the control registry stores — not the stripped bare name.
+        // `reject_if_read_only` above already guarantees this caller is
+        // read-write (it errors out for a read-only or absent-extension
+        // token), so the fallback path below is always permitted here.
         if let Some(resp) = try_route_control(
             &self.control,
             &target.session,
             &connection_id,
+            false,
             crate::relay::RelayControl::ToggleFullscreen { pane, hint },
         ) {
             log::info!("TogglePaneFullscreen: routed via relay client (session='{session}')");
@@ -303,14 +314,25 @@ mod tests {
     //! session token. `resize_pane_impl` has no relay/connection-scoped routing:
     //! it calls straight through to the session-scoped backend, so it mutates
     //! the shared tab layout every attached client renders, not just the
-    //! caller's own view. `FocusPane`/`ScrollPane` are unaffected by this card
-    //! (already ungated) and are not re-tested here. A weakened trust boundary
+    //! caller's own view. `ScrollPane` is unaffected by this card (no relay
+    //! routing at all) and is not re-tested here. A weakened trust boundary
     //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
     //!
-    //! None of these requests need to resolve a real session or backend: the
-    //! read-only gate is the very first thing each handler checks, so a default
-    //! [`MuxrService`] (zellij backend, never reached) is enough.
+    //! `FocusPane` has no read-only *gate* (unaffected there), but a later
+    //! round (the caller-isolation fix) changed its relay *routing*: a
+    //! read-only caller must route ONLY to that caller's own relay (exact
+    //! `connection_id` match) and must never fall back to a co-attached
+    //! WRITABLE relay, nor fall through to the ephemeral backend path — see the
+    //! `focus_pane_read_only_caller_*` tests below.
+    //!
+    //! None of the gate-only tests below need to resolve a real session or
+    //! backend: the read-only gate is the very first thing each handler
+    //! checks, so a default [`MuxrService`] (zellij backend, never reached) is
+    //! enough. The `FocusPane` routing tests never reach the real backend
+    //! either — every scenario they cover resolves inside `try_route_control`
+    //! before `run_action` would be called.
 
+    use tokio::sync::mpsc;
     use tonic::{Code, Request};
 
     use crate::auth::SessionReadOnly;
@@ -319,6 +341,7 @@ mod tests {
         NewPaneReq, PaneTarget, RenamePaneReq, ResizeKind, ResizePaneReq, ToggleFullscreenReq,
         WriteToPaneReq,
     };
+    use crate::relay::{ControlEntry, RelayControl};
 
     fn service() -> MuxrService {
         MuxrService::new()
@@ -391,6 +414,139 @@ mod tests {
 
     const READ_ONLY_MESSAGE: &str =
         "session token is read-only — mutating operations are not allowed";
+
+    // ─── POSITIVE: FocusPane routing for a read-only caller ──────────────────
+
+    /// A read-only caller whose OWN relay is live (exact `connection_id`
+    /// match) is routed to it and succeeds — FocusPane is genuinely usable
+    /// for read-only navigation, not merely un-gated.
+    #[tokio::test]
+    async fn focus_pane_read_only_caller_with_exact_connection_id_routes_to_own_relay() {
+        let service = service();
+        let (tx, mut rx) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-self".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx,
+                read_only: true,
+            },
+        );
+
+        let mut req = Request::new(PaneTarget {
+            session: "zellij:test".to_owned(),
+            pane_id: 5,
+            is_plugin: false,
+            connection_id: "conn-self".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(true));
+
+        let ack = service
+            .focus_pane_impl(req)
+            .await
+            .expect("FocusPane must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(ack.ok, "exact own-relay match must succeed: {}", ack.error);
+        match rx.try_recv() {
+            Ok(RelayControl::FocusPane(pane)) => assert_eq!(pane.id, 5),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// The single most important property this card establishes: a read-only
+    /// caller that omits `connection_id` must never be routed to a co-attached
+    /// WRITABLE relay on the same session (that would move a DIFFERENT
+    /// client's view — the exact isolation violation relay routing exists to
+    /// prevent), and must not silently succeed via the ephemeral backend path
+    /// either.
+    #[tokio::test]
+    async fn focus_pane_read_only_caller_without_connection_id_never_reaches_a_co_attached_writable_relay()
+     {
+        let service = service();
+        let (tx_rw, mut rx_rw) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-other-writer".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx_rw,
+                read_only: false,
+            },
+        );
+
+        let mut req = Request::new(PaneTarget {
+            session: "zellij:test".to_owned(),
+            pane_id: 5,
+            is_plugin: false,
+            connection_id: String::new(), // absent — read-only caller
+        });
+        req.extensions_mut().insert(SessionReadOnly(true));
+
+        let ack = service
+            .focus_pane_impl(req)
+            .await
+            .expect("FocusPane must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(
+            !ack.ok,
+            "must fail closed rather than route to a sibling relay"
+        );
+        assert!(
+            ack.error.contains("reattach required"),
+            "error: {}",
+            ack.error
+        );
+        assert!(
+            rx_rw.try_recv().is_err(),
+            "the co-attached writable relay must NOT receive FocusPane routed from a \
+             read-only caller with no connection_id"
+        );
+    }
+
+    /// Read-write behaviour is untouched: with a co-attached read-only relay
+    /// present but no writable relay, a read-write caller's session fallback
+    /// still finds nothing and returns `None` from `try_route_control` (the
+    /// pre-existing Issue B contract, unit-tested directly in
+    /// `helpers.rs::fallback_returns_none_when_only_read_only_relay_exists`);
+    /// at the RPC layer that surfaces as routing being skipped, i.e. FocusPane
+    /// still reaches the same route as `read_only=false` did before this
+    /// card — proven directly on `try_route_control` rather than re-exercised
+    /// here against the real backend (see `helpers.rs` for the full
+    /// read-write no-regression coverage this card names).
+    #[tokio::test]
+    async fn focus_pane_read_write_caller_with_exact_connection_id_routes_to_own_relay() {
+        let service = service();
+        let (tx, mut rx) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-rw-self".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx,
+                read_only: false,
+            },
+        );
+
+        let mut req = Request::new(PaneTarget {
+            session: "zellij:test".to_owned(),
+            pane_id: 9,
+            is_plugin: false,
+            connection_id: "conn-rw-self".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(false));
+
+        let ack = service
+            .focus_pane_impl(req)
+            .await
+            .expect("FocusPane must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(ack.ok, "exact own-relay match must succeed: {}", ack.error);
+        match rx.try_recv() {
+            Ok(RelayControl::FocusPane(pane)) => assert_eq!(pane.id, 9),
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
 
     // ─── NEGATIVE: every mutating pane RPC stays refused ─────────────────────
 
