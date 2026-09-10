@@ -30,69 +30,77 @@ service Muxr {
   rpc GetLayout(SessionRef) returns (Layout);
 
   // ─── Phase D1: pane ops (id-targeted) ──────────────────────────────────────
-  // All require bearer auth.  MUTATING ops (everything except FocusPane) reject
-  // read-only session tokens with permission_denied.
+  // All require bearer auth.  MUTATING ops reject read-only session tokens
+  // with permission_denied, except FocusPane and ResizePane (view-only;
+  // permitted for read-only sessions).
 
-  // Write raw bytes to a specific pane. MUTATING.
+  // Write raw bytes to a specific pane. MUTATING — refused for read-only sessions.
   rpc WriteToPane(WriteToPaneReq) returns (ActionAck);
-  // Focus a specific pane. Allowed for read-only tokens.
+  // Focus a specific pane. Permitted for read-only sessions.
   rpc FocusPane(PaneTarget) returns (ActionAck);
-  // Close a specific pane. MUTATING.
+  // Close a specific pane. MUTATING — refused for read-only sessions.
   rpc ClosePane(PaneTarget) returns (ActionAck);
-  // Open a new pane; the new pane id is returned in ActionAck.info. MUTATING.
+  // Open a new pane; the new pane id is returned in ActionAck.info. MUTATING —
+  // refused for read-only sessions.
   rpc NewPane(NewPaneReq) returns (ActionAck);
-  // Rename a specific pane. MUTATING.
+  // Rename a specific pane. MUTATING — refused for read-only sessions.
   rpc RenamePane(RenamePaneReq) returns (ActionAck);
-  // Resize a specific pane. MUTATING.
+  // Resize a specific pane. Permitted for read-only sessions.
   rpc ResizePane(ResizePaneReq) returns (ActionAck);
-  // Toggle a pane between floating and embedded. MUTATING.
+  // Toggle a pane between floating and embedded. MUTATING — refused for
+  // read-only sessions.
   rpc TogglePaneFloating(PaneTarget) returns (ActionAck);
-  // Toggle fullscreen for a pane. MUTATING.
+  // Toggle fullscreen for a pane. MUTATING — refused for read-only sessions.
   // Carries an optional floating-pane hint so the relay can skip a live IPC
   // query on the hot path (Bug 2c — interaction latency).
   rpc TogglePaneFullscreen(ToggleFullscreenReq) returns (ActionAck);
 
   // ─── Phase D2: tab ops ─────────────────────────────────────────────────────
-  // All require bearer auth.  MUTATING (gated on read-only).
+  // All require bearer auth.  MUTATING (gated on read-only), except GoToTab
+  // (view-only; permitted for read-only sessions).
 
-  // Open a new tab; the new tab id/name surface in ActionAck.info. MUTATING.
+  // Open a new tab; the new tab id/name surface in ActionAck.info. MUTATING —
+  // refused for read-only sessions.
   rpc NewTab(NewTabReq) returns (ActionAck);
-  // Close a tab by id. MUTATING.
+  // Close a tab by id. MUTATING — refused for read-only sessions.
   rpc CloseTab(TabTarget) returns (ActionAck);
-  // Switch focus to a tab by id. MUTATING.
+  // Switch focus to a tab by id. Permitted for read-only sessions.
   rpc GoToTab(TabTarget) returns (ActionAck);
-  // Rename a tab by id. MUTATING.
+  // Rename a tab by id. MUTATING — refused for read-only sessions.
   rpc RenameTab(RenameTabReq) returns (ActionAck);
 
   // ─── Phase D2: scroll ──────────────────────────────────────────────────────
-  // Allowed for read-only tokens.
+  // Permitted for read-only sessions.
 
-  // Scroll a pane. Allowed for read-only tokens.
+  // Scroll a pane. Permitted for read-only sessions.
   rpc ScrollPane(ScrollReq) returns (ActionAck);
 
   // ─── Phase D2: session lifecycle ───────────────────────────────────────────
   // All require bearer auth.  MUTATING (gated on read-only).
 
-  // Rename the current session. MUTATING.
+  // Rename the current session. MUTATING — refused for read-only sessions.
   rpc RenameSession(RenameSessionReq) returns (ActionAck);
-  // Kill a named session (removes it). MUTATING.
+  // Kill a named session (removes it). MUTATING — refused for read-only sessions.
   rpc KillSession(SessionRef) returns (ActionAck);
-  // Create a new detached session by name. MUTATING.
+  // Create a new detached session by name. MUTATING — refused for read-only
+  // sessions.
   rpc CreateSession(CreateSessionReq) returns (ActionAck);
 
   // ─── Spaces (herdr workspaces) ────────────────────────────────────────────
   // Herdr maps workspaces to spaces; zellij returns an empty SpaceList.
-  // All require bearer auth.  MUTATING ops reject read-only tokens.
+  // All require bearer auth.  MUTATING ops reject read-only tokens, except
+  // SwitchSpace (view-only; permitted for read-only sessions).
 
   // List all spaces (herdr workspaces) for a session. Zellij returns empty.
   rpc GetSpaces(SessionRef)       returns (SpaceList);
-  // Switch the active space. MUTATING.
+  // Switch the active space. Permitted for read-only sessions.
   rpc SwitchSpace(SwitchSpaceReq) returns (ActionAck);
-  // Create a new space with an optional label. MUTATING.
+  // Create a new space with an optional label. MUTATING — refused for
+  // read-only sessions.
   rpc CreateSpace(CreateSpaceReq) returns (ActionAck);
-  // Rename an existing space. MUTATING.
+  // Rename an existing space. MUTATING — refused for read-only sessions.
   rpc RenameSpace(RenameSpaceReq) returns (ActionAck);
-  // Close (delete) a space. MUTATING.
+  // Close (delete) a space. MUTATING — refused for read-only sessions.
   rpc CloseSpace(CloseSpaceReq)   returns (ActionAck);
 
   // ─── Phase F: token management ─────────────────────────────────────────────
@@ -101,10 +109,12 @@ service Muxr {
   // rejected with permission_denied.
 
   // Create a new auth token; the secret is returned ONCE in TokenInfo.token.
+  // Refused for read-only sessions.
   rpc CreateToken(CreateTokenReq) returns (TokenInfo);
-  // List existing auth tokens (metadata only — never the secret).
+  // List existing auth tokens (metadata only — never the secret). Refused for
+  // read-only sessions.
   rpc ListTokens(Empty) returns (TokenList);
-  // Revoke an auth token by name.
+  // Revoke an auth token by name. Refused for read-only sessions.
   rpc RevokeToken(RevokeTokenReq) returns (ActionAck);
 
   // ─── Push-notification device registry ────────────────────────────────────
@@ -115,11 +125,13 @@ service Muxr {
   // never echoed back in full by any RPC.
 
   // Register (or refresh) a device's push handle. Fails failed_precondition
-  // when the server has no push-notification relay configured.
+  // when the server has no push-notification relay configured. Refused for
+  // read-only sessions.
   rpc RegisterPushTarget(RegisterPushTargetReq) returns (ActionAck);
-  // List registered devices (metadata + handle prefix only — never the full handle).
+  // List registered devices (metadata + handle prefix only — never the full
+  // handle). Refused for read-only sessions.
   rpc ListPushTargets(ListPushTargetsReq) returns (ListPushTargetsResp);
-  // Remove a registered device by name.
+  // Remove a registered device by name. Refused for read-only sessions.
   rpc RemovePushTarget(RemovePushTargetReq) returns (ActionAck);
 }
 
@@ -168,8 +180,10 @@ message LoginRequest {
 
 message LoginResponse {
   string session_token = 1;
-  // True if the authenticating token is read-only (mutating RPCs are gated
-  // server-side; surfaced so the client can disable mutating controls). (F)
+  // True if the authenticating token is read-only: view/navigation ops (GoToTab,
+  // FocusPane, ResizePane, ScrollPane, SwitchSpace) stay permitted, but anything
+  // that mutates session content or shared layout is rejected server-side;
+  // surfaced so the client can disable those controls. (F)
   bool   is_read_only  = 2;
 }
 

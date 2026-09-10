@@ -147,12 +147,12 @@ impl MuxrService {
         .await
     }
 
-    /// Resize a specific pane. MUTATING (read-only rejected).
+    /// Resize a specific pane. Permitted for read-only sessions (view-only —
+    /// changes only the size of THIS viewer's pane, not session content).
     pub(super) async fn resize_pane_impl(
         &self,
         request: Request<ResizePaneReq>,
     ) -> Result<Response<ProtoAck>, Status> {
-        reject_if_read_only(&request, "ResizePane")?;
         let req = request.into_inner();
         let target = req
             .target
@@ -290,5 +290,278 @@ impl MuxrService {
             backend.scroll_pane(&session, pane, dir)
         })
         .await
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Paired read-only-gate tests for the RPC un-gate (read-only→explorer, Phase
+    //! 1): `ResizePane` is now permitted for a read-only session token, while
+    //! every other mutating pane RPC stays refused. `FocusPane`/`ScrollPane` were
+    //! already ungated and are unchanged by this card. A weakened trust boundary
+    //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::{Code, Request};
+
+    use crate::auth::SessionReadOnly;
+    use crate::cli::BackendKind;
+    use crate::grpc::MuxrService;
+    use crate::multiplexer::{
+        ActionAck, BackendSet, DualHandle, LayoutSnapshot, MuxBackend, PaneRef, ResizeDir,
+        ResizeKind as NeutralResizeKind, ScrollDir,
+    };
+    use crate::proto::{
+        NewPaneReq, PaneTarget, RenamePaneReq, ResizeKind, ResizePaneReq, ToggleFullscreenReq,
+        WriteToPaneReq,
+    };
+
+    /// A pane backend that always acknowledges `resize_pane` successfully — used
+    /// to prove a request reached the backend (i.e. passed the read-only gate)
+    /// rather than being rejected by it. Every other method is out of scope for
+    /// these tests and panics if reached.
+    #[derive(Debug, Default)]
+    struct StubPanes;
+
+    impl MuxBackend for StubPanes {
+        fn resize_pane(
+            &self,
+            _session: &str,
+            _pane: PaneRef,
+            _kind: NeutralResizeKind,
+            _dir: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            Ok(ActionAck {
+                ok: true,
+                error: None,
+                info: None,
+            })
+        }
+
+        // ── Everything else is out of scope for these tests ──────────────────
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "stub-panes".to_owned()
+        }
+    }
+
+    fn service() -> MuxrService {
+        let backend: Arc<dyn MuxBackend> = Arc::new(StubPanes);
+        MuxrService::with_backends(BackendSet::single(BackendKind::Zellij, backend))
+    }
+
+    fn pane_target() -> PaneTarget {
+        PaneTarget {
+            session: "zellij:test".to_owned(),
+            pane_id: 1,
+            is_plugin: false,
+            connection_id: String::new(),
+        }
+    }
+
+    fn resize_req(read_only: bool) -> Request<ResizePaneReq> {
+        let mut req = Request::new(ResizePaneReq {
+            target: Some(pane_target()),
+            resize: ResizeKind::Increase as i32,
+            direction: 0,
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn write_req(read_only: bool) -> Request<WriteToPaneReq> {
+        let mut req = Request::new(WriteToPaneReq {
+            target: Some(pane_target()),
+            data: b"x".to_vec(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn pane_target_req(read_only: bool) -> Request<PaneTarget> {
+        let mut req = Request::new(pane_target());
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn new_pane_req(read_only: bool) -> Request<NewPaneReq> {
+        let mut req = Request::new(NewPaneReq {
+            session: "zellij:test".to_owned(),
+            floating: false,
+            pane_name: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn rename_pane_req(read_only: bool) -> Request<RenamePaneReq> {
+        let mut req = Request::new(RenamePaneReq {
+            target: Some(pane_target()),
+            name: "renamed".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn toggle_fullscreen_req(read_only: bool) -> Request<ToggleFullscreenReq> {
+        let mut req = Request::new(ToggleFullscreenReq {
+            target: Some(pane_target()),
+            target_is_floating: false,
+            floating_visible: false,
+            target_is_focused_floating: false,
+            has_floating_hint: false,
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    const READ_ONLY_MESSAGE: &str =
+        "session token is read-only — mutating operations are not allowed";
+
+    // ─── POSITIVE: ResizePane is permitted for a read-only session ───────────
+
+    #[tokio::test]
+    async fn resize_pane_is_permitted_for_a_read_only_session() {
+        let ack = service()
+            .resize_pane_impl(resize_req(true))
+            .await
+            .expect("ResizePane must not be rejected by the read-only gate")
+            .into_inner();
+        assert!(ack.ok, "error: {}", ack.error);
+    }
+
+    // ─── NEGATIVE: every other mutating pane RPC stays refused ───────────────
+
+    #[tokio::test]
+    async fn write_to_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .write_to_pane_impl(write_req(true))
+            .await
+            .expect_err("WriteToPane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn close_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .close_pane_impl(pane_target_req(true))
+            .await
+            .expect_err("ClosePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn new_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .new_pane_impl(new_pane_req(true))
+            .await
+            .expect_err("NewPane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn rename_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .rename_pane_impl(rename_pane_req(true))
+            .await
+            .expect_err("RenamePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_floating_still_rejects_a_read_only_session() {
+        let err = service()
+            .toggle_pane_floating_impl(pane_target_req(true))
+            .await
+            .expect_err("TogglePaneFloating must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_still_rejects_a_read_only_session() {
+        let err = service()
+            .toggle_pane_fullscreen_impl(toggle_fullscreen_req(true))
+            .await
+            .expect_err("TogglePaneFullscreen must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
     }
 }

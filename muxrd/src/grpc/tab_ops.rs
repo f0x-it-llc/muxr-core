@@ -43,12 +43,12 @@ impl MuxrService {
         run_action("CloseTab", move || backend.close_tab(&session, tab_id)).await
     }
 
-    /// Switch focus to a tab by id. MUTATING (read-only rejected).
+    /// Switch focus to a tab by id. Permitted for read-only sessions (view-only —
+    /// changes only which tab THIS viewer looks at, not session content).
     pub(super) async fn go_to_tab_impl(
         &self,
         request: Request<TabTarget>,
     ) -> Result<Response<ProtoAck>, Status> {
-        reject_if_read_only(&request, "GoToTab")?;
         let req = request.into_inner();
         let connection_id = req.connection_id.clone();
         let tab_id = req.tab_id;
@@ -95,5 +95,208 @@ impl MuxrService {
             backend.rename_tab(&session, tab_id, name)
         })
         .await
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Paired read-only-gate tests for the RPC un-gate (read-only→explorer, Phase
+    //! 1): `GoToTab` is now permitted for a read-only session token, while
+    //! `NewTab`/`CloseTab`/`RenameTab` stay refused. A weakened trust boundary
+    //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
+
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use tonic::{Code, Request};
+
+    use crate::auth::SessionReadOnly;
+    use crate::cli::BackendKind;
+    use crate::grpc::MuxrService;
+    use crate::multiplexer::{
+        ActionAck, BackendSet, DualHandle, LayoutSnapshot, MuxBackend, PaneRef, ResizeDir,
+        ResizeKind, ScrollDir,
+    };
+    use crate::proto::{NewTabReq, RenameTabReq, TabTarget};
+
+    /// A tab backend that always acknowledges `go_to_tab` successfully — used to
+    /// prove a request reached the backend (i.e. passed the read-only gate)
+    /// rather than being rejected by it. Every other method is out of scope for
+    /// these tests and panics if reached.
+    #[derive(Debug, Default)]
+    struct StubTabs;
+
+    impl MuxBackend for StubTabs {
+        fn go_to_tab(&self, _session: &str, _tab_id: u64) -> anyhow::Result<ActionAck> {
+            Ok(ActionAck {
+                ok: true,
+                error: None,
+                info: None,
+            })
+        }
+
+        // ── Everything else is out of scope for these tests ──────────────────
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn resize_pane(
+            &self,
+            _: &str,
+            _: PaneRef,
+            _: ResizeKind,
+            _: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "stub-tabs".to_owned()
+        }
+    }
+
+    fn service() -> MuxrService {
+        let backend: Arc<dyn MuxBackend> = Arc::new(StubTabs);
+        MuxrService::with_backends(BackendSet::single(BackendKind::Zellij, backend))
+    }
+
+    fn tab_target(tab_id: u64, read_only: bool) -> Request<TabTarget> {
+        let mut req = Request::new(TabTarget {
+            session: "zellij:test".to_owned(),
+            tab_id,
+            connection_id: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn new_tab_req(read_only: bool) -> Request<NewTabReq> {
+        let mut req = Request::new(NewTabReq {
+            session: "zellij:test".to_owned(),
+            tab_name: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn rename_tab_req(read_only: bool) -> Request<RenameTabReq> {
+        let mut req = Request::new(RenameTabReq {
+            session: "zellij:test".to_owned(),
+            tab_id: 1,
+            name: "renamed".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    const READ_ONLY_MESSAGE: &str =
+        "session token is read-only — mutating operations are not allowed";
+
+    // ─── POSITIVE: GoToTab is permitted for a read-only session ──────────────
+
+    #[tokio::test]
+    async fn go_to_tab_is_permitted_for_a_read_only_session() {
+        let ack = service()
+            .go_to_tab_impl(tab_target(1, true))
+            .await
+            .expect("GoToTab must not be rejected by the read-only gate")
+            .into_inner();
+        assert!(ack.ok, "error: {}", ack.error);
+    }
+
+    // ─── NEGATIVE: every other tab RPC stays refused ─────────────────────────
+
+    #[tokio::test]
+    async fn new_tab_still_rejects_a_read_only_session() {
+        let err = service()
+            .new_tab_impl(new_tab_req(true))
+            .await
+            .expect_err("NewTab must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn close_tab_still_rejects_a_read_only_session() {
+        let err = service()
+            .close_tab_impl(tab_target(1, true))
+            .await
+            .expect_err("CloseTab must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn rename_tab_still_rejects_a_read_only_session() {
+        let err = service()
+            .rename_tab_impl(rename_tab_req(true))
+            .await
+            .expect_err("RenameTab must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
     }
 }
