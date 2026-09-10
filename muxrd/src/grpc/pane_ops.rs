@@ -212,6 +212,9 @@ impl MuxrService {
         request: Request<ToggleFullscreenReq>,
     ) -> Result<Response<ProtoAck>, Status> {
         reject_if_read_only(&request, "TogglePaneFullscreen")?;
+        // Read BEFORE `into_inner()` drops the extension. See the routing note
+        // below for why this is the real value and not a literal `false`.
+        let read_only = session_is_read_only(&request);
         let req = request.into_inner();
         let target = req
             .target
@@ -252,14 +255,17 @@ impl MuxrService {
         // RelayControl::ToggleFullscreen carries the neutral PaneRef directly (P1.03).
         // Option C: route with the opaque id the client echoed (target.session) —
         // what the control registry stores — not the stripped bare name.
-        // `reject_if_read_only` above already guarantees this caller is
-        // read-write (it errors out for a read-only or absent-extension
-        // token), so the fallback path below is always permitted here.
+        // `reject_if_read_only` above already denies a read-only or
+        // absent-extension caller, so in practice `read_only` is false here.
+        // Pass the real value rather than a literal anyway: hardcoding `false`
+        // asserts "writable caller" with no link to that gate, so removing or
+        // relaxing the gate would silently restore the writable-session
+        // fallback for a read-only caller, with nothing to catch it.
         if let Some(resp) = try_route_control(
             &self.control,
             &target.session,
             &connection_id,
-            false,
+            read_only,
             crate::relay::RelayControl::ToggleFullscreen { pane, hint },
         ) {
             log::info!("TogglePaneFullscreen: routed via relay client (session='{session}')");
