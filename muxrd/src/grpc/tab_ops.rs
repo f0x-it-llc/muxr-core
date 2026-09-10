@@ -6,7 +6,8 @@ use crate::proto::{ActionAck as ProtoAck, NewTabReq, RenameTabReq, TabTarget};
 
 use super::MuxrService;
 use super::helpers::{
-    reject_if_read_only, run_action, short_conn, try_route_control, validate_display_name,
+    reject_if_read_only, run_action, session_is_read_only, short_conn, try_route_control,
+    validate_display_name,
 };
 
 impl MuxrService {
@@ -49,6 +50,13 @@ impl MuxrService {
         &self,
         request: Request<TabTarget>,
     ) -> Result<Response<ProtoAck>, Status> {
+        // GoToTab is permitted for read-only tokens (no `reject_if_read_only`
+        // call), so thread the caller's read-only status into
+        // `try_route_control` ourselves — read BEFORE `into_inner()` drops the
+        // extension — so a read-only caller with no exact connection_id match
+        // is never steered to a co-attached WRITABLE relay via the session
+        // fallback.
+        let read_only = session_is_read_only(&request);
         let req = request.into_inner();
         let connection_id = req.connection_id.clone();
         let tab_id = req.tab_id;
@@ -71,6 +79,7 @@ impl MuxrService {
             &self.control,
             &req.session,
             &connection_id,
+            read_only,
             crate::relay::RelayControl::SwitchTab(tab_id),
         ) {
             log::info!("GoToTab: routed via relay client (session='{session}', tab_id={tab_id})");
@@ -106,10 +115,17 @@ mod tests {
     //! 1): `GoToTab` is now permitted for a read-only session token, while
     //! `NewTab`/`CloseTab`/`RenameTab` stay refused. A weakened trust boundary
     //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
+    //!
+    //! A second round (the caller-isolation fix) adds routing-level coverage:
+    //! `GoToTab` for a read-only caller must route ONLY to that caller's own
+    //! relay (exact `connection_id` match) and must never fall back to a
+    //! co-attached WRITABLE relay, nor fall through to the ephemeral backend
+    //! path — see the `go_to_tab_read_only_caller_*` tests below.
 
     use std::sync::Arc;
     use std::time::Duration;
 
+    use tokio::sync::mpsc;
     use tonic::{Code, Request};
 
     use crate::auth::SessionReadOnly;
@@ -120,6 +136,7 @@ mod tests {
         ResizeKind, ScrollDir,
     };
     use crate::proto::{NewTabReq, RenameTabReq, TabTarget};
+    use crate::relay::{ControlEntry, RelayControl};
 
     /// A tab backend that always acknowledges `go_to_tab` successfully — used to
     /// prove a request reached the backend (i.e. passed the read-only gate)
@@ -258,6 +275,15 @@ mod tests {
 
     // ─── POSITIVE: GoToTab is permitted for a read-only session ──────────────
 
+    /// GoToTab is view-only (re-points only the caller's own relay/view), so a
+    /// read-only token must reach relay routing instead of being rejected by
+    /// the gate — never `Status::PermissionDenied`. No relay is attached in
+    /// this test, so the ack legitimately fails "reattach required": a
+    /// read-only caller's navigation must never fall through to the
+    /// ephemeral/session-level backend path (this card's fix) just because no
+    /// relay happens to be live. See
+    /// `go_to_tab_read_only_caller_with_exact_connection_id_routes_to_own_relay`
+    /// for the case where it does succeed.
     #[tokio::test]
     async fn go_to_tab_is_permitted_for_a_read_only_session() {
         let ack = service()
@@ -265,7 +291,100 @@ mod tests {
             .await
             .expect("GoToTab must not be rejected by the read-only gate")
             .into_inner();
-        assert!(ack.ok, "error: {}", ack.error);
+        assert!(
+            !ack.ok,
+            "no relay attached — must fail closed, not silently reach the backend"
+        );
+        assert!(
+            ack.error.contains("reattach required"),
+            "error: {}",
+            ack.error
+        );
+    }
+
+    /// A read-only caller whose OWN relay is live (exact `connection_id`
+    /// match) is routed to it and succeeds — proving GoToTab is genuinely
+    /// usable for read-only navigation, not merely "not rejected".
+    #[tokio::test]
+    async fn go_to_tab_read_only_caller_with_exact_connection_id_routes_to_own_relay() {
+        let service = service();
+        let (tx, mut rx) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-self".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx,
+                read_only: true,
+            },
+        );
+
+        let mut req = Request::new(TabTarget {
+            session: "zellij:test".to_owned(),
+            tab_id: 3,
+            connection_id: "conn-self".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(true));
+
+        let ack = service
+            .go_to_tab_impl(req)
+            .await
+            .expect("GoToTab must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(ack.ok, "exact own-relay match must succeed: {}", ack.error);
+        match rx.try_recv() {
+            Ok(RelayControl::SwitchTab(3)) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    /// The single most important property this card establishes: a read-only
+    /// caller that omits `connection_id` must never be routed to a co-attached
+    /// WRITABLE relay on the same session (that would move a DIFFERENT
+    /// client's view — the exact isolation violation relay routing exists to
+    /// prevent), and must not silently succeed via the ephemeral backend path
+    /// either.
+    #[tokio::test]
+    async fn go_to_tab_read_only_caller_without_connection_id_never_reaches_a_co_attached_writable_relay()
+     {
+        let service = service();
+        let (tx_rw, mut rx_rw) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-other-writer".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx_rw,
+                read_only: false,
+            },
+        );
+
+        let mut req = Request::new(TabTarget {
+            session: "zellij:test".to_owned(),
+            tab_id: 1,
+            connection_id: String::new(), // absent — read-only caller
+        });
+        req.extensions_mut().insert(SessionReadOnly(true));
+
+        let ack = service
+            .go_to_tab_impl(req)
+            .await
+            .expect("GoToTab must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(
+            !ack.ok,
+            "must fail closed rather than route to a sibling relay"
+        );
+        assert!(
+            ack.error.contains("reattach required"),
+            "error: {}",
+            ack.error
+        );
+        assert!(
+            rx_rw.try_recv().is_err(),
+            "the co-attached writable relay must NOT receive GoToTab routed from a \
+             read-only caller with no connection_id"
+        );
     }
 
     // ─── NEGATIVE: every other tab RPC stays refused ─────────────────────────
