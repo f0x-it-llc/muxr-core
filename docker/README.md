@@ -200,11 +200,11 @@ zellij --session backend-dev action list-panes
 ```
 
 > ⚠️ **Heads-up for single-pane on-device testing:** attaching your own Zellij client
-> adds a second client to the session. Zellij sizes the session to the **smallest**
-> attached client, so your terminal's size will resize what the phone sees; and the
-> server's single-pane **fullscreen is gated to the sole-client case**, so it is
-> disabled while you're attached. **Detach (`Ctrl-o d`) when done** to restore the
-> phone's view.
+> adds a second client to the session. Zellij sizes a **tab** to the **smallest**
+> client currently focused on it (a per-tab minimum, not session-wide), so your
+> terminal's size will resize what the phone sees — this applies to a read-only
+> client too, since it drives tab geometry the same as a read-write one.
+> **Detach (`Ctrl-o d`) when done** to restore the phone's view.
 
 ## Running the Dart / gRPC test client
 
