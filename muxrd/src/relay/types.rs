@@ -44,8 +44,10 @@ pub enum RelayControl {
     /// Switch this relay client's view to the space (herdr workspace) `workspace_id`
     /// **in place** (herdr Spaces, Option A — per-connection view).
     ///
-    /// Mutating like [`SwitchTab`](Self::SwitchTab) (dropped for read-only relays)
-    /// AND replied like [`QueryLayout`](Self::QueryLayout): the inbound arm calls
+    /// Applied on both tiers like [`SwitchTab`](Self::SwitchTab) — it re-points
+    /// only THIS connection's view, never the daemon-global focus, so it is a move
+    /// a read-only viewer may make — AND replied like
+    /// [`QueryLayout`](Self::QueryLayout): the inbound arm calls
     /// [`MuxSender::switch_space`](crate::multiplexer::MuxSender::switch_space)
     /// (re-points the wire stream at the target space's focused pane, with no
     /// daemon-global focus change) and fulfills `reply` so the gRPC SwitchSpace
@@ -256,16 +258,6 @@ pub(crate) const TOKEN_RECHECK_INTERVAL: std::time::Duration = std::time::Durati
 /// `blocking_send` rather than buffering unbounded memory) without starving
 /// a healthy client.
 pub(crate) const RENDER_CHANNEL_BOUND: usize = 64;
-
-/// Neutral fallback size for a **read-only** attach when the session's current
-/// size can't be queried (review round-2 Major A).
-///
-/// Deliberately modest — large enough not to shrink a typical writer's session,
-/// but small enough to avoid a giant grid allocation (a huge sentinel like
-/// 1000×1000 is rejected on memory grounds). The preferred path is the actual
-/// current session size; this is only a last resort.
-pub(crate) const RO_FALLBACK_ROWS: u16 = 50;
-pub(crate) const RO_FALLBACK_COLS: u16 = 200;
 
 /// Upper bound on a single inbound terminal `Input` frame (1 MiB), matching the
 /// `WriteToPane` cap in `grpc.rs`.  A read-write client could otherwise push an
