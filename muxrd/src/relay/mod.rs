@@ -157,7 +157,7 @@ fn mint_connection_id() -> String {
 }
 
 use reader::{ShutdownGuard, render_loop};
-use types::{InFlightQuery, RENDER_CHANNEL_BOUND, RO_FALLBACK_COLS, RO_FALLBACK_ROWS};
+use types::{InFlightQuery, RENDER_CHANNEL_BOUND};
 
 // ─── attach_relay ─────────────────────────────────────────────────────────────
 
@@ -192,20 +192,28 @@ pub async fn attach_relay(
         None => return Err(Status::invalid_argument("first ClientFrame had no kind")),
     };
 
-    let client_rows = clamp_dim(attach.rows, 24);
-    let client_cols = clamp_dim(attach.cols, 80);
+    // Geometry: EVERY attach renders the grid it asked for, read-only included.
+    // A viewer's rows/cols are how big its own viewport is, not what the session
+    // contains, so they sit inside the read-only boundary.
+    //
+    // Accepted consequence: on zellij a tab is sized to the smallest client
+    // focused on it, so the smallest read-only viewer wins that tab for everyone
+    // on it. That is deliberate for a viewer-first deployment, where there is no
+    // desktop writer whose geometry needs protecting; a deployment that does have
+    // one hands its phones read-write tokens instead.
+    let rows = clamp_dim(attach.rows, 24);
+    let cols = clamp_dim(attach.cols, 80);
 
-    // Best-effort resume hint (additive AttachReq fields), tier-gated on write
-    // access. Empty for every client that does not send them — and an empty target
-    // is today's behavior exactly. See [`resume_target_for`] for why a read-only
-    // attach never carries one.
+    // Best-effort resume hint (additive AttachReq fields). Empty for every client
+    // that does not send them — and an empty target is the hint-less behavior
+    // exactly. Honoured on both tiers ([`resume_target_for`]).
     let resume = resume_target_for(&attach, read_only);
 
     // ── 1a. Option C: resolve the opaque session id → owning backend + bare name.
     // The id is `<backend>:<bare>` (e.g. `zellij:dev`); the client echoes the SAME
     // id in later unary RPCs, so the *id* is what we store in the control / view-
     // state registries (registry match stays id-vs-id), while the *bare* name is
-    // what we hand the backend for the size query / attach. `resolve_session` runs
+    // what we hand the backend for the attach itself. `resolve_session` runs
     // the path-traversal guard on the bare name (the attach path was previously
     // unvalidated — this tightens it).
     let id = attach.session.clone();
@@ -221,53 +229,6 @@ pub async fn attach_relay(
     // bare-name attach on a single-backend server still lands in the same bucket
     // the canonical `make_id`-keyed `ListSessions` reads.
     let count_key = crate::multiplexer::make_id(backend_kind, &session);
-
-    // ── 1b. Major A (round-2): read-only attaches must NOT drive geometry ────
-    //
-    // zellij recomputes a tab's size from the MINIMUM terminal size across only
-    // the clients currently focused on that tab, on every AttachClient handshake
-    // (zellij-server lib.rs; the old session-wide `min_client_terminal_size` was
-    // deleted in 0.45.1 in favour of this per-tab recompute). A small read-only
-    // observer would otherwise shrink the writer's tab. So for a read-only
-    // attach we attach with the session's CURRENT size (queried up-front),
-    // never the client's. Writers (RW) keep driving their own size exactly as
-    // before.
-    let (rows, cols) = if read_only {
-        let query_session = session.clone();
-        let size_backend = backend.clone();
-        match tokio::task::spawn_blocking(move || size_backend.query_session_size(&query_session))
-            .await
-        {
-            Ok(Ok((r, c))) => {
-                log::info!(
-                    "AttachTerminal: read-only attach to '{session}' — using current \
-                     session size {r}x{c} (ignoring client {client_rows}x{client_cols})"
-                );
-                (r, c)
-            }
-            Ok(Err(e)) => {
-                // Couldn't read the session size — fall back to a sane neutral
-                // size that won't shrink a typical writer (and won't allocate a
-                // giant grid). NEVER the client's small dims.
-                log::warn!(
-                    "AttachTerminal: read-only attach to '{session}' — could not query \
-                     session size ({e:#}); falling back to neutral {RO_FALLBACK_ROWS}x\
-                     {RO_FALLBACK_COLS}"
-                );
-                (RO_FALLBACK_ROWS, RO_FALLBACK_COLS)
-            }
-            Err(e) => {
-                log::warn!(
-                    "AttachTerminal: read-only attach to '{session}' — session-size query \
-                     task panicked ({e}); falling back to neutral {RO_FALLBACK_ROWS}x\
-                     {RO_FALLBACK_COLS}"
-                );
-                (RO_FALLBACK_ROWS, RO_FALLBACK_COLS)
-            }
-        }
-    } else {
-        (client_rows, client_cols)
-    };
 
     log::info!(
         "AttachTerminal: opening IPC attach to session '{}' ({rows}x{cols}, read_only={read_only})",
@@ -513,44 +474,31 @@ pub async fn attach_relay(
 /// a violation is **dropped, never rejected** (see [`resume_target`]).
 const MAX_RESUME_SPACE_ID_LEN: usize = 128;
 
-/// The resume hint this attach is allowed to carry: [`resume_target`] for a
-/// read-write attach, **nothing at all** for a read-only one.
+/// The resume hint this attach carries — [`resume_target`] on **both** tiers.
 ///
-/// A resume hint is navigation: it names the space/tab/pane this connection will
-/// render. Read-only relays are not permitted to navigate — the inbound loop drops
-/// exactly these moves for a read-only token (`relay/inbound.rs`: `FocusPane`
-/// dropped, `SwitchTab` skipped, `SwitchSpace` refused with an error reply; the
-/// `GoToTab`/`SwitchSpace` RPC gates reject earlier still). Honouring the hint at
-/// attach time would be the same navigation through a different door, and a wider
-/// one: it would let a read-only token steer its attach to *any* pane it can name
-/// (content disclosure beyond the daemon-focused pane) and take the herdr
-/// owner/resize locks on that pane.
+/// A resume hint names the space/tab/pane this one connection will render, which
+/// is navigation within the viewer's own stream: it moves nothing for anybody
+/// else, so it sits inside the read-only boundary exactly like the in-stream
+/// focus/tab/space controls the inbound loop applies (`relay/inbound.rs`). A
+/// reconnecting viewer therefore lands back where it was watching instead of on
+/// the backend's daemon-global focus.
 ///
-/// **The two paths must not drift.** If read-only relays ever gain a sanctioned
-/// navigation story, this gate and the inbound-loop guards change together —
-/// neither is meaningful on its own.
+/// The tier is still read here, for one reason: a read-only attach that resolves
+/// a hint is worth a line in the log, since it is the one place a viewer's stream
+/// is pointed somewhere other than the daemon's own focus. The returned target is
+/// identical on both tiers.
 ///
-/// The hint is *dropped*, never rejected: a read-only client that sends one still
-/// attaches, exactly as it does today, on the backend's own focused pane. An empty
-/// [`ResumeTarget`] also means the backend reports no `resumed_view`, so nothing
-/// downstream (view-state seeding included) can observe the difference between
-/// this and a hint-less attach.
+/// A malformed hint is *dropped*, never rejected — see [`resume_target`]. An empty
+/// [`ResumeTarget`] means the backend reports no `resumed_view`, so nothing
+/// downstream (view-state seeding included) can tell it from a hint-less attach.
 fn resume_target_for(attach: &AttachReq, read_only: bool) -> ResumeTarget {
-    if read_only {
-        // Log only when a hint was actually present, and never the values
-        // themselves (client-supplied strings stay out of the logs).
-        if !attach.resume_space_id.is_empty()
-            || attach.resume_tab_id != 0
-            || attach.resume_pane_id != 0
-        {
-            log::debug!(
-                "AttachTerminal: dropping resume hint on a read-only attach \
-                 (read-only relays do not navigate — see relay/inbound.rs)"
-            );
-        }
-        return ResumeTarget::default();
+    let target = resume_target(attach);
+    // Log only when a hint actually resolved, and never the values themselves
+    // (client-supplied strings stay out of the logs).
+    if read_only && !target.is_empty() {
+        log::debug!("AttachTerminal: honouring a resume hint on a read-only attach");
     }
-    resume_target(attach)
+    target
 }
 
 /// Translate the additive `AttachReq.resume_*` fields into the neutral
@@ -722,7 +670,7 @@ mod tests {
         assert_eq!(target.space_id.as_deref(), Some(ok.as_str()));
     }
 
-    // ── Resume hint: read-only gate (Defect A) ───────────────────────────────
+    // ── Resume hint: honoured on both tiers ──────────────────────────────────
 
     /// An `AttachReq` with every resume field set to a well-formed value.
     fn fully_hinted_attach() -> AttachReq {
@@ -734,43 +682,57 @@ mod tests {
         }
     }
 
-    /// A read-only attach ignores EVERY hint: the target it yields is byte-for-byte
-    /// the one a hint-less attach yields, so the whole downstream chain (no
-    /// `resumed_view` from the backend → no seeded view state → the usual live
-    /// view-state init) is identical. Read-only relays do not navigate — the
-    /// inbound loop drops the equivalent moves (`FocusPane`/`SwitchTab`/
-    /// `SwitchSpace`) for the same reason.
+    /// A read-only attach HONOURS every hint: resuming points only this one
+    /// connection's stream, so a reconnecting viewer lands back on the pane it was
+    /// watching. The target it yields is byte-for-byte the read-write one, which is
+    /// what makes the whole downstream chain (backend `resumed_view` → seeded view
+    /// state → first `GetLayout`) identical on both tiers.
     #[test]
-    fn read_only_attach_drops_every_resume_hint() {
-        let gated = resume_target_for(&fully_hinted_attach(), true);
+    fn read_only_attach_honours_every_resume_hint() {
+        let attach = fully_hinted_attach();
+        let resumed = resume_target_for(&attach, true);
         assert!(
-            gated.is_empty(),
-            "a read-only attach must carry no resume hint at all"
+            !resumed.is_empty(),
+            "a read-only attach must carry its resume hint"
         );
+        assert_eq!(resumed.space_id.as_deref(), Some("ws-2"));
+        assert_eq!(resumed.tab_id, Some(7));
+        assert_eq!(resumed.pane_id, Some(21));
         assert_eq!(
-            gated,
-            resume_target_for(&bare_attach(), false),
-            "a hinted read-only attach must be indistinguishable from a hint-less one"
+            resumed,
+            resume_target_for(&attach, false),
+            "the tier must not change the resolved target"
         );
-        // An empty target is what makes the backend report no resumed view, which
-        // in turn is what keeps `attach_relay` on its normal view-state init path
-        // (the `Some(view)` seed arm is unreachable without one).
-        assert_eq!(gated, ResumeTarget::default());
     }
 
-    /// Even a hint whose only usable axis is the space id is dropped for a
-    /// read-only attach — the gate is on the tier, not on which fields are set.
+    /// A hint whose only usable axis is the space id survives for a read-only
+    /// attach too — nothing about the hint is tier-gated any more.
     #[test]
-    fn read_only_attach_drops_a_space_only_hint() {
+    fn read_only_attach_honours_a_space_only_hint() {
         let space_only = AttachReq {
             resume_space_id: "ws-2".into(),
             ..bare_attach()
         };
-        assert!(resume_target_for(&space_only, true).is_empty());
+        let resumed = resume_target_for(&space_only, true);
+        assert_eq!(resumed.space_id.as_deref(), Some("ws-2"));
+        assert!(resumed.tab_id.is_none() && resumed.pane_id.is_none());
     }
 
-    /// The read-write path is untouched: a corroborating hint survives the gate
-    /// exactly as `resume_target` produced it.
+    /// A hint-less attach still yields an empty target on either tier — that is
+    /// what keeps the backend reporting no `resumed_view` and `attach_relay` on its
+    /// live view-state init path (the `Some(view)` seed arm is unreachable without
+    /// one).
+    #[test]
+    fn hint_less_attach_carries_no_target_on_either_tier() {
+        for read_only in [false, true] {
+            let target = resume_target_for(&bare_attach(), read_only);
+            assert_eq!(target, ResumeTarget::default());
+            assert!(target.is_empty());
+        }
+    }
+
+    /// The read-write path is untouched: a corroborating hint arrives exactly as
+    /// `resume_target` produced it.
     #[test]
     fn read_write_attach_keeps_the_resume_hint() {
         let attach = fully_hinted_attach();
