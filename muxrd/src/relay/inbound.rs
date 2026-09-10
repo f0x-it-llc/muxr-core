@@ -351,9 +351,13 @@ pub(crate) async fn inbound_loop(
                         // Applied on both tiers: a resize changes the size of the
                         // grid THIS client renders — a phone rotating or opening
                         // its keyboard — which is the viewer's own viewport, not
-                        // session content.
-                        let rows = super::clamp_dim(r.rows, 24);
-                        let cols = super::clamp_dim(r.cols, 80);
+                        // session content. Floored the same as attach-time
+                        // geometry (`super::clamp_dim`): a live Resize frame is
+                        // the repeatable path, so a degenerate `1×1` sent here at
+                        // will — not just once at attach — is the real lever for
+                        // shrinking the tab out from under every other client.
+                        let rows = super::clamp_dim(r.rows, 24, super::MIN_TERMINAL_ROWS);
+                        let cols = super::clamp_dim(r.cols, 80, super::MIN_TERMINAL_COLS);
                         if let Err(e) = sender.send_resize(rows, cols) {
                             log::warn!("relay inbound [{session}]: resize send failed: {e:#}");
                         } else {

@@ -200,9 +200,15 @@ pub async fn attach_relay(
     // focused on it, so the smallest read-only viewer wins that tab for everyone
     // on it. That is deliberate for a viewer-first deployment, where there is no
     // desktop writer whose geometry needs protecting; a deployment that does have
-    // one hands its phones read-write tokens instead.
-    let rows = clamp_dim(attach.rows, 24);
-    let cols = clamp_dim(attach.cols, 80);
+    // one hands its phones read-write tokens instead. The case that tradeoff does
+    // NOT cover is viewer-versus-viewer: on a public demo, many read-only
+    // strangers attach concurrently, and one of them sending a degenerate `1×1`
+    // would shrink the tab for every other visitor, not just itself. `clamp_dim`'s
+    // [`MIN_TERMINAL_ROWS`]/[`MIN_TERMINAL_COLS`] floor bounds that adversarial
+    // extreme while leaving the normal "smallest legitimate client wins" tradeoff
+    // untouched above it.
+    let rows = clamp_dim(attach.rows, 24, MIN_TERMINAL_ROWS);
+    let cols = clamp_dim(attach.cols, 80, MIN_TERMINAL_COLS);
 
     // Best-effort resume hint (additive AttachReq fields). Empty for every client
     // that does not send them — and an empty target is the hint-less behavior
@@ -569,14 +575,29 @@ fn view_state_from_resumed(view: &ResumedView) -> RelayViewState {
 /// case at ~1M cells.
 pub(crate) const MAX_TERMINAL_DIM: u16 = 1024;
 
-/// Clamp a proto `uint32` dimension into a sane `u16`, falling back to
-/// `default` when zero/unset and capping at [`MAX_TERMINAL_DIM`] so a
-/// client-controlled dimension cannot drive an unbounded backend allocation.
-pub(crate) fn clamp_dim(v: u32, default: u16) -> u16 {
+/// Lower bound on the rows dimension — see [`clamp_dim`] for why this exists.
+pub(crate) const MIN_TERMINAL_ROWS: u16 = 4;
+
+/// Lower bound on the cols dimension — see [`clamp_dim`] for why this exists.
+pub(crate) const MIN_TERMINAL_COLS: u16 = 20;
+
+/// Clamp a proto `uint32` dimension into a sane `u16`: falls back to `default`
+/// when zero/unset, floors at `min` and caps at [`MAX_TERMINAL_DIM`] otherwise.
+///
+/// The floor is a degenerate-value guard, not a usability guarantee. On zellij
+/// a tab is sized to the smallest client focused on it, so an unfloored `1×1`
+/// from one viewer would shrink that tab for every other client on it — on a
+/// public demo, every other read-only visitor and any co-attached read-write
+/// user alike. [`MIN_TERMINAL_ROWS`]/[`MIN_TERMINAL_COLS`] are set far below
+/// any plausible device (the app derives rows/cols from widget pixels and can
+/// legitimately be small on a narrow phone with a large accessibility font),
+/// so above the floor the accepted "smallest client wins the tab" tradeoff
+/// still fully applies; the floor removes only the adversarial extreme.
+pub(crate) fn clamp_dim(v: u32, default: u16, min: u16) -> u16 {
     if v == 0 {
         default
     } else {
-        v.min(MAX_TERMINAL_DIM as u32) as u16
+        (v.min(MAX_TERMINAL_DIM as u32) as u16).max(min)
     }
 }
 
@@ -777,14 +798,53 @@ mod tests {
     #[test]
     fn clamp_dim_caps_at_max_terminal_dim() {
         // Zero → default.
-        assert_eq!(clamp_dim(0, 24), 24);
+        assert_eq!(clamp_dim(0, 24, MIN_TERMINAL_ROWS), 24);
         // Normal value passes through.
-        assert_eq!(clamp_dim(80, 24), 80);
+        assert_eq!(clamp_dim(80, 24, MIN_TERMINAL_ROWS), 80);
         // Oversized client value is capped, not forwarded (memory-DoS guard).
-        assert_eq!(clamp_dim(65535, 80), MAX_TERMINAL_DIM);
-        assert_eq!(clamp_dim(u32::MAX, 80), MAX_TERMINAL_DIM);
+        assert_eq!(clamp_dim(65535, 80, MIN_TERMINAL_ROWS), MAX_TERMINAL_DIM);
+        assert_eq!(clamp_dim(u32::MAX, 80, MIN_TERMINAL_ROWS), MAX_TERMINAL_DIM);
         // Exactly at the cap is preserved.
-        assert_eq!(clamp_dim(MAX_TERMINAL_DIM as u32, 24), MAX_TERMINAL_DIM);
+        assert_eq!(
+            clamp_dim(MAX_TERMINAL_DIM as u32, 24, MIN_TERMINAL_ROWS),
+            MAX_TERMINAL_DIM
+        );
+    }
+
+    #[test]
+    fn clamp_dim_floors_a_degenerate_client_value_on_both_axes() {
+        // Zero is still "unset" → default, unaffected by the floor.
+        assert_eq!(clamp_dim(0, 24, MIN_TERMINAL_ROWS), 24);
+        assert_eq!(clamp_dim(0, 80, MIN_TERMINAL_COLS), 80);
+
+        // The degenerate 1×1 case this card exists for: below the floor on
+        // both axes, so it is raised to the floor rather than passed through.
+        assert_eq!(clamp_dim(1, 24, MIN_TERMINAL_ROWS), MIN_TERMINAL_ROWS);
+        assert_eq!(clamp_dim(1, 80, MIN_TERMINAL_COLS), MIN_TERMINAL_COLS);
+
+        // One below the floor also raises to the floor.
+        assert_eq!(
+            clamp_dim((MIN_TERMINAL_ROWS - 1) as u32, 24, MIN_TERMINAL_ROWS),
+            MIN_TERMINAL_ROWS
+        );
+        assert_eq!(
+            clamp_dim((MIN_TERMINAL_COLS - 1) as u32, 80, MIN_TERMINAL_COLS),
+            MIN_TERMINAL_COLS
+        );
+
+        // Exactly at the floor is preserved, not bumped further.
+        assert_eq!(
+            clamp_dim(MIN_TERMINAL_ROWS as u32, 24, MIN_TERMINAL_ROWS),
+            MIN_TERMINAL_ROWS
+        );
+        assert_eq!(
+            clamp_dim(MIN_TERMINAL_COLS as u32, 80, MIN_TERMINAL_COLS),
+            MIN_TERMINAL_COLS
+        );
+
+        // A normal value between the floor and the cap is unaffected.
+        assert_eq!(clamp_dim(24, 24, MIN_TERMINAL_ROWS), 24);
+        assert_eq!(clamp_dim(80, 80, MIN_TERMINAL_COLS), 80);
     }
 
     #[test]
