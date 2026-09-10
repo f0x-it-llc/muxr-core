@@ -39,6 +39,10 @@
 //!   ([`HerdrControl::query_layout`], surfaced out-of-band via
 //!   [`MuxSender::query_layout_result`]) — geometry for all panes, live content for
 //!   the attached one. This needs **no client change**.
+//! - **Read-only attaches observe.** A read-only client opens the same pane with
+//!   `ObserveTerminal` instead of `AttachTerminal`, so herdr itself refuses its
+//!   writes and it never takes the pane away from whoever owns it. [`AttachMode`]
+//!   carries what an observer may and may not do, determined live.
 //!
 //! ## One terminal per wire connection (the resize-lock leak fix)
 //!
@@ -200,9 +204,11 @@ const SWAP_GRACE: Duration = Duration::from_secs(
 /// through [`DualHandle::resumed_view`] so the relay can seed its per-connection
 /// view state from the pane we actually landed on.
 ///
-/// `read_only` is logged for traceability; herdr enforces write ownership on the
-/// terminal itself, and the read-only teardown nudge is `Detach`
-/// ([`MuxSender::send_client_exited`]) for both modes.
+/// `read_only` selects the herdr terminal mode this connection opens in
+/// ([`AttachMode`]): a read-only attach observes, a read-write attach takes
+/// ownership. The mode is carried on the sender so every later re-point
+/// ([`HerdrMuxSender::reattach`]) opens the new connection in the same mode. The
+/// teardown nudge is `Detach` ([`MuxSender::send_client_exited`]) for both.
 // One argument over clippy's threshold: this is the single P2.04 attach entry
 // point and every parameter is an independent input to the handshake (matching
 // the `#[allow]`s the relay's own `attach_relay`/`inbound_loop` carry).
@@ -232,7 +238,16 @@ pub fn open_attach(
 
     // Connect + handshake + attach on a fresh wire connection, then split into the
     // blocking read half and the bounded write half.
-    let stream = connect_and_attach(&wire_socket, rows, cols, &target.terminal_id, protocol)?;
+    // A read-only attach OBSERVES; only a read-write attach takes ownership.
+    let mode = AttachMode::for_read_only(read_only);
+    let stream = connect_and_attach(
+        &wire_socket,
+        rows,
+        cols,
+        &target.terminal_id,
+        protocol,
+        mode,
+    )?;
     let (read_half, write_half) = split_wire(stream)?;
 
     // Shared, swappable connection state. The write half lives behind a mutex so a
@@ -260,6 +275,7 @@ pub fn open_attach(
             cols,
             wire_socket,
             protocol,
+            mode,
         }),
         receiver: Box::new(HerdrMuxReceiver {
             read: read_half,
@@ -335,11 +351,116 @@ fn discover_protocol(control: &HerdrControl) -> Result<u32> {
     Ok(info.protocol)
 }
 
+// ─── Attach mode: writable control vs. read-only observe ──────────────────────
+
+/// Which herdr terminal mode a wire connection opens in after the handshake.
+///
+/// herdr reads the mode off the message that follows `TerminalHello`, and a
+/// connection keeps that mode for its whole life — so a re-point
+/// ([`HerdrMuxSender::reattach`]) has to re-select the same mode on the fresh
+/// connection, which is why the sender carries this value rather than deriving it
+/// once at attach time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AttachMode {
+    /// Writable direct attach: muxrd becomes herdr's **owner** of that terminal.
+    ///
+    /// Sent as `AttachTerminal { takeover: true }`, which evicts whichever client
+    /// owns the terminal already — herdr allows exactly one owner at a time.
+    Control,
+    /// Read-only observe: muxrd renders the terminal without owning it (herdr
+    /// 0.9.0's server-enforced viewer mode, `ObserveTerminal`).
+    ///
+    /// # What an observer may do
+    ///
+    /// Determined by experiment against a live herdr 0.9.0 (wire protocol 22),
+    /// not from its documentation: herdr's JSON API reports no attach clients and
+    /// no terminal owner at all — `pane.list`, `session.snapshot` and
+    /// `herdr status server` say nothing about who is attached — so ownership is
+    /// observable only through behaviour. The `#[ignore]`d
+    /// `muxrd/tests/herdr_integration.rs` cases named below are the experiment,
+    /// each with the paired positive that makes its negative meaningful.
+    ///
+    /// | | observer | owner |
+    /// |---|---|---|
+    /// | receives full + incremental terminal frames | yes | yes |
+    /// | holds the terminal's write ownership | **no** | yes |
+    /// | evicts whoever attached before it | **no** | yes (`"terminal attach taken over"`) |
+    /// | `Input` reaches the pty | **no**, dropped by herdr | yes |
+    /// | `AttachScroll` (wheel) scrolls the pane | **no**, dropped by herdr | yes |
+    /// | `Resize` resizes the pane's pty | **no** | yes |
+    /// | `Resize` re-sizes what THIS connection is rendered at | yes | yes |
+    /// | release-then-reconnect re-point (focus / tab / space) | yes | yes |
+    ///
+    /// - **(a) owner vs. observer** — `smoke_read_only_attach_observes_without_taking_ownership`.
+    ///   An observe attach renders, leaves the pane at the owner's size, leaves the
+    ///   owner's stream up, and its keystrokes never reach the pty; a second
+    ///   read-write attach evicts the first with `"terminal attach taken over"`.
+    ///   So the server, not just muxrd's inbound filter, now refuses a viewer's writes.
+    /// - **(b) re-point** — `smoke_observer_repoints_across_tabs_and_panes`.
+    ///   `go_to_tab` / `focus_pane` (a `Detach` plus a fresh connection) work in
+    ///   observe mode, frames keep flowing, and no pane visited is resized — which
+    ///   is why [`HerdrMuxSender`] carries the mode instead of re-deriving it.
+    /// - **(c) resize** — `smoke_observer_resize_never_resizes_the_pane`.
+    ///   herdr accepts the frame (no error, no teardown, and it repaints the
+    ///   observer at its new size) but does not touch the pty; the pane keeps the
+    ///   owner's size. muxrd therefore keeps forwarding `Resize` unconditionally —
+    ///   a viewer resizing its own window is not a mutation — and this is a
+    ///   documented backend difference, not an error path.
+    ///
+    /// Wheel scroll is the one place where muxrd's read-only boundary is wider
+    /// than herdr's: muxrd treats a wheel event as a read-only-PERMITTED view
+    /// change, herdr routes `AttachScroll` through the same owner-only path as
+    /// input and drops it for an observer
+    /// (`smoke_observer_wheel_scroll_does_not_reach_the_pane`). herdr's scroll
+    /// position is pane state shared by every client, so honouring it for a viewer
+    /// would move the owner's viewport too — the drop is coherent, not an
+    /// oversight, and a read-only client simply cannot scroll on this backend.
+    Observe,
+}
+
+impl AttachMode {
+    /// The mode a `read_only` attach flag selects.
+    fn for_read_only(read_only: bool) -> Self {
+        if read_only {
+            Self::Observe
+        } else {
+            Self::Control
+        }
+    }
+
+    /// The message that puts a freshly handshaken connection into this mode for
+    /// `terminal_id`.
+    ///
+    /// herdr resolves `ObserveTerminal.target` as a pane, terminal **or** agent
+    /// target and tries a raw terminal id first, so one `terminal_id` addresses
+    /// both variants.
+    fn attach_message(self, terminal_id: &str) -> ClientMessage {
+        match self {
+            Self::Control => ClientMessage::AttachTerminal {
+                terminal_id: terminal_id.to_string(),
+                takeover: true,
+            },
+            Self::Observe => ClientMessage::ObserveTerminal {
+                target: terminal_id.to_string(),
+            },
+        }
+    }
+
+    /// Wire name of [`Self::attach_message`], for logs and error context.
+    fn wire_name(self) -> &'static str {
+        match self {
+            Self::Control => "AttachTerminal",
+            Self::Observe => "ObserveTerminal",
+        }
+    }
+}
+
 /// Connect a fresh herdr wire socket and drive the full attach handshake for
 /// `terminal_id`: set the handshake timeouts, send `TerminalHello` (carrying the
-/// client's current `rows`×`cols`), read + assert `Welcome`, then send
-/// `AttachTerminal { takeover: true }`. Returns the connected stream with both the
-/// read and write timeouts still at [`WIRE_TIMEOUT`] — the caller splits it via
+/// client's current `rows`×`cols`), read + assert `Welcome`, then send the message
+/// `mode` selects — `AttachTerminal { takeover: true }` for a writer,
+/// `ObserveTerminal` for a read-only viewer. Returns the connected stream with both
+/// the read and write timeouts still at [`WIRE_TIMEOUT`] — the caller splits it via
 /// [`split_wire`]. Shared by [`open_attach`] and [`HerdrMuxSender::reattach`] so the
 /// initial attach and every reconnect run byte-for-byte the same handshake.
 fn connect_and_attach(
@@ -348,6 +469,7 @@ fn connect_and_attach(
     cols: u16,
     terminal_id: &str,
     protocol: u32,
+    mode: AttachMode,
 ) -> Result<UnixStream> {
     let stream = UnixStream::connect(wire_socket)
         .with_context(|| format!("connect herdr wire socket {}", wire_socket.display()))?;
@@ -359,9 +481,10 @@ fn connect_and_attach(
         .context("set herdr wire handshake write timeout")?;
 
     // herdr 0.9.0 dropped the requested-encoding, keybindings and launch-mode
-    // fields: a direct attach is implied by this handshake plus the AttachTerminal
+    // fields: a direct attach is implied by this handshake plus the attach message
     // below, and herdr forces TerminalAnsi for every non-endpoint client — which is
-    // exactly what muxrd wants.
+    // exactly what muxrd wants. The same handshake precedes both modes; only the
+    // message after `Welcome` differs.
     let hello = ClientMessage::TerminalHello {
         version: protocol,
         cols,
@@ -383,11 +506,9 @@ fn connect_and_attach(
     };
     assert_welcome(&welcome)?;
 
-    let attach = ClientMessage::AttachTerminal {
-        terminal_id: terminal_id.to_string(),
-        takeover: true,
-    };
-    write_message(&mut &stream, &attach).context("send herdr AttachTerminal")?;
+    let attach = mode.attach_message(terminal_id);
+    write_message(&mut &stream, &attach)
+        .with_context(|| format!("send herdr {}", mode.wire_name()))?;
 
     Ok(stream)
 }
@@ -777,6 +898,14 @@ pub struct HerdrMuxSender {
     /// unreachable — a reconnect must not fail merely because the control plane
     /// blipped when the wire socket itself is fine.
     protocol: u32,
+    /// Terminal mode every connection of this attach opens in, fixed at
+    /// [`open_attach`] from the client's read-only flag.
+    ///
+    /// A herdr connection cannot change mode after its attach message, so the
+    /// re-point in [`Self::reattach`] carries this value onto the fresh
+    /// connection: navigation must never silently promote a read-only viewer to
+    /// the terminal's owner.
+    mode: AttachMode,
 }
 
 impl HerdrMuxSender {
@@ -873,6 +1002,9 @@ impl HerdrMuxSender {
                 self.cols,
                 &terminal_id,
                 protocol,
+                // Re-point in the SAME mode: a read-only viewer's focus/tab/space
+                // move must not open the new connection as the terminal's owner.
+                self.mode,
             )
             .and_then(split_wire)
             {
@@ -1079,6 +1211,7 @@ impl MuxSender for HerdrMuxSender {
             cols: self.cols,
             wire_socket: self.wire_socket.clone(),
             protocol: self.protocol,
+            mode: self.mode,
         })
     }
 }
@@ -1302,6 +1435,7 @@ mod tests {
             cols: 80,
             wire_socket: PathBuf::from("/nonexistent/herdr.sock"),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         }
     }
 
@@ -2260,7 +2394,15 @@ mod tests {
         });
 
         // Establish conn1 as the sender's current connection.
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Control,
+        )
+        .unwrap();
         let (_read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -2276,6 +2418,7 @@ mod tests {
             cols: 80,
             wire_socket: sock.clone(),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         };
 
         // Change client dimensions, then switch to terminal B.
@@ -2364,7 +2507,15 @@ mod tests {
             (c1, c2)
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Control,
+        )
+        .unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -2385,6 +2536,7 @@ mod tests {
             cols: 80,
             wire_socket: sock.clone(),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         };
 
         // Reader blocked on conn1 in a background thread, as in the real relay.
@@ -2483,6 +2635,7 @@ mod tests {
             // Nonexistent socket → the reconnect connect fails.
             wire_socket: PathBuf::from("/nonexistent/mxr_hr_missing.sock"),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         };
         let mut receiver = HerdrMuxReceiver {
             read: read_half,
@@ -2529,7 +2682,15 @@ mod tests {
             (c1, c3) // keep both server ends open
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Control,
+        )
+        .unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -2550,6 +2711,7 @@ mod tests {
             cols: 80,
             wire_socket: sock.clone(),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         };
 
         // Reader blocked on conn1 in a background thread, as in the real relay.
@@ -2590,7 +2752,15 @@ mod tests {
             c1 // keep the initial server end open; the sender's shutdown ends the reader
         });
 
-        let conn1 = connect_and_attach(&sock, 24, 80, "term-A", HERDR_MAX_TESTED_PROTOCOL).unwrap();
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Control,
+        )
+        .unwrap();
         let (read1, write1) = split_wire(conn1).unwrap();
 
         let swap_pending = Arc::new(AtomicBool::new(false));
@@ -2611,6 +2781,7 @@ mod tests {
             cols: 80,
             wire_socket: sock.clone(),
             protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
         };
 
         let reader = std::thread::spawn(move || receiver.recv());
@@ -2723,5 +2894,224 @@ mod tests {
         );
 
         let _srv2 = deliver.join().unwrap();
+    }
+
+    // ── Attach mode: read-only observes, read-write owns ──────────────────────
+
+    /// A read-only attach must open the terminal in herdr's **observe** mode, so
+    /// the server itself refuses the writes rather than muxrd's inbound filter
+    /// being the only thing between a viewer and someone else's terminal. The
+    /// observer must also never displace the terminal's owner, which is what
+    /// `AttachTerminal { takeover: true }` does.
+    #[test]
+    fn read_only_attach_opens_the_terminal_in_observe_mode() {
+        let sock = unique_socket_path("observe");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c1, _) = listener.accept().unwrap();
+            serve_handshake(&mut c1).1
+        });
+
+        let conn = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Observe,
+        )
+        .unwrap();
+
+        let attach = server.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::ObserveTerminal { ref target } if target == "term-A"),
+            "a read-only attach must send ObserveTerminal for the target terminal, got {attach:?}"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// The paired positive: a read-write attach still claims ownership, takeover
+    /// included. Without this the observe change could silently turn every attach
+    /// into a viewer.
+    #[test]
+    fn read_write_attach_still_claims_ownership_with_takeover() {
+        let sock = unique_socket_path("control");
+        let listener = UnixListener::bind(&sock).unwrap();
+        let server = std::thread::spawn(move || {
+            let (mut c1, _) = listener.accept().unwrap();
+            serve_handshake(&mut c1).1
+        });
+
+        let conn = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Control,
+        )
+        .unwrap();
+
+        let attach = server.join().unwrap();
+        assert!(
+            matches!(
+                attach,
+                ClientMessage::AttachTerminal { ref terminal_id, takeover: true }
+                    if terminal_id == "term-A"
+            ),
+            "a read-write attach must still send AttachTerminal with takeover, got {attach:?}"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// `for_read_only` is the single place the attach flag becomes a mode.
+    #[test]
+    fn attach_mode_follows_the_read_only_flag() {
+        assert_eq!(AttachMode::for_read_only(true), AttachMode::Observe);
+        assert_eq!(AttachMode::for_read_only(false), AttachMode::Control);
+    }
+
+    /// The regression that matters most: a read-only viewer navigating (focus,
+    /// tab or space — all of which are a release-then-reconnect) must come back
+    /// up as an OBSERVER. A mode carried only at attach time, or re-derived as
+    /// the default, would promote the viewer to the new pane's owner on its
+    /// first tab switch — the exact ownership seizure observe mode exists to stop.
+    #[test]
+    fn reattach_keeps_a_read_only_connection_in_observe_mode() {
+        let sock = unique_socket_path("reobserve");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut c1, _) = listener.accept().unwrap();
+            let (_hello1, observe1) = serve_handshake(&mut c1);
+            let detach = read_client_message(&mut c1);
+
+            let (mut c2, _) = listener.accept().unwrap();
+            let (_hello2, observe2) = serve_handshake(&mut c2);
+            (observe1, detach, observe2)
+        });
+
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Observe,
+        )
+        .unwrap();
+        let (_read1, write1) = split_wire(conn1).unwrap();
+
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(write1)),
+            control: test_control(),
+            workspace_id: "ws-1".into(),
+            current_terminal_id: "term-A".into(),
+            swap_pending: Arc::new(AtomicBool::new(false)),
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Observe,
+        };
+
+        sender.reattach("term-B".into()).unwrap();
+        assert!(
+            matches!(swap_rx.try_recv(), Ok(Some(_))),
+            "reader must receive the swapped-in read half"
+        );
+
+        let (observe1, detach, observe2) = server.join().unwrap();
+        assert!(
+            matches!(observe1, ClientMessage::ObserveTerminal { ref target } if target == "term-A"),
+            "conn1 must have observed term-A, got {observe1:?}"
+        );
+        assert!(
+            matches!(detach, ClientMessage::Detach),
+            "conn1 must be released before the reconnect, got {detach:?}"
+        );
+        assert!(
+            matches!(observe2, ClientMessage::ObserveTerminal { ref target } if target == "term-B"),
+            "the re-point must OBSERVE term-B, never attach as its owner, got {observe2:?}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// `box_clone` (the handle the relay's `ShutdownGuard` holds) must carry the
+    /// mode too — a clone that reconnected as a writer would reintroduce the
+    /// seizure through a second code path. Asserted behaviourally, through a real
+    /// `focus_pane` on the clone: the registry resolves the target with no
+    /// JSON-API call, so the fake herdr below sees the whole re-point.
+    #[test]
+    fn box_clone_keeps_reattaching_as_an_observer() {
+        let sock = unique_socket_path("cloneobs");
+        let listener = UnixListener::bind(&sock).unwrap();
+
+        let server = std::thread::spawn(move || {
+            let (mut c1, _) = listener.accept().unwrap();
+            let _ = serve_handshake(&mut c1);
+            let detach = read_client_message(&mut c1);
+
+            let (mut c2, _) = listener.accept().unwrap();
+            let (_hello2, observe2) = serve_handshake(&mut c2);
+            (detach, observe2)
+        });
+
+        let conn1 = connect_and_attach(
+            &sock,
+            24,
+            80,
+            "term-A",
+            HERDR_MAX_TESTED_PROTOCOL,
+            AttachMode::Observe,
+        )
+        .unwrap();
+        let (_read1, write1) = split_wire(conn1).unwrap();
+
+        let control = test_control();
+        let pane_id = control.pane_registry().assign_or_get("w1:p2", "term-B");
+
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(write1)),
+            control,
+            workspace_id: "ws-1".into(),
+            current_terminal_id: "term-A".into(),
+            swap_pending: Arc::new(AtomicBool::new(false)),
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Observe,
+        };
+
+        let mut cloned = sender.box_clone();
+        cloned
+            .focus_pane(PaneRef::terminal(pane_id))
+            .expect("focus_pane on the cloned handle failed");
+        assert!(
+            matches!(swap_rx.try_recv(), Ok(Some(_))),
+            "reader must receive the swapped-in read half"
+        );
+
+        let (detach, observe2) = server.join().unwrap();
+        assert!(
+            matches!(detach, ClientMessage::Detach),
+            "the clone must release the old connection first, got {detach:?}"
+        );
+        assert!(
+            matches!(observe2, ClientMessage::ObserveTerminal { ref target } if target == "term-B"),
+            "a cloned handle's re-point must stay in observe mode, got {observe2:?}"
+        );
+
+        let _ = std::fs::remove_file(&sock);
     }
 }
