@@ -147,12 +147,12 @@ impl MuxrService {
         .await
     }
 
-    /// Resize a specific pane. Permitted for read-only sessions (view-only —
-    /// changes only the size of THIS viewer's pane, not session content).
+    /// Resize a specific pane. MUTATING (read-only rejected).
     pub(super) async fn resize_pane_impl(
         &self,
         request: Request<ResizePaneReq>,
     ) -> Result<Response<ProtoAck>, Status> {
+        reject_if_read_only(&request, "ResizePane")?;
         let req = request.into_inner();
         let target = req
             .target
@@ -298,129 +298,30 @@ impl MuxrService {
 #[cfg(test)]
 mod tests {
     //! Paired read-only-gate tests for the RPC un-gate (read-only→explorer, Phase
-    //! 1): `ResizePane` is now permitted for a read-only session token, while
-    //! every other mutating pane RPC stays refused. `FocusPane`/`ScrollPane` were
-    //! already ungated and are unchanged by this card. A weakened trust boundary
+    //! 1): every mutating pane RPC — INCLUDING `ResizePane`, which an earlier
+    //! round of this card wrongly un-gated — stays refused for a read-only
+    //! session token. `resize_pane_impl` has no relay/connection-scoped routing:
+    //! it calls straight through to the session-scoped backend, so it mutates
+    //! the shared tab layout every attached client renders, not just the
+    //! caller's own view. `FocusPane`/`ScrollPane` are unaffected by this card
+    //! (already ungated) and are not re-tested here. A weakened trust boundary
     //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
-
-    use std::sync::Arc;
-    use std::time::Duration;
+    //!
+    //! None of these requests need to resolve a real session or backend: the
+    //! read-only gate is the very first thing each handler checks, so a default
+    //! [`MuxrService`] (zellij backend, never reached) is enough.
 
     use tonic::{Code, Request};
 
     use crate::auth::SessionReadOnly;
-    use crate::cli::BackendKind;
     use crate::grpc::MuxrService;
-    use crate::multiplexer::{
-        ActionAck, BackendSet, DualHandle, LayoutSnapshot, MuxBackend, PaneRef, ResizeDir,
-        ResizeKind as NeutralResizeKind, ScrollDir,
-    };
     use crate::proto::{
         NewPaneReq, PaneTarget, RenamePaneReq, ResizeKind, ResizePaneReq, ToggleFullscreenReq,
         WriteToPaneReq,
     };
 
-    /// A pane backend that always acknowledges `resize_pane` successfully — used
-    /// to prove a request reached the backend (i.e. passed the read-only gate)
-    /// rather than being rejected by it. Every other method is out of scope for
-    /// these tests and panics if reached.
-    #[derive(Debug, Default)]
-    struct StubPanes;
-
-    impl MuxBackend for StubPanes {
-        fn resize_pane(
-            &self,
-            _session: &str,
-            _pane: PaneRef,
-            _kind: NeutralResizeKind,
-            _dir: Option<ResizeDir>,
-        ) -> anyhow::Result<ActionAck> {
-            Ok(ActionAck {
-                ok: true,
-                error: None,
-                info: None,
-            })
-        }
-
-        // ── Everything else is out of scope for these tests ──────────────────
-        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
-            unimplemented!()
-        }
-        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
-            unimplemented!()
-        }
-        fn validate_session_name(&self, _: &str) -> Result<(), String> {
-            unimplemented!()
-        }
-        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
-            unimplemented!()
-        }
-        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
-            unimplemented!()
-        }
-        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
-            unimplemented!()
-        }
-        fn pane_is_floating_with_visibility(
-            &self,
-            _: &str,
-            _: PaneRef,
-        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
-            unimplemented!()
-        }
-        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
-            unimplemented!()
-        }
-        fn backend_version(&self) -> String {
-            "stub-panes".to_owned()
-        }
-    }
-
     fn service() -> MuxrService {
-        let backend: Arc<dyn MuxBackend> = Arc::new(StubPanes);
-        MuxrService::with_backends(BackendSet::single(BackendKind::Zellij, backend))
+        MuxrService::new()
     }
 
     fn pane_target() -> PaneTarget {
@@ -491,19 +392,7 @@ mod tests {
     const READ_ONLY_MESSAGE: &str =
         "session token is read-only — mutating operations are not allowed";
 
-    // ─── POSITIVE: ResizePane is permitted for a read-only session ───────────
-
-    #[tokio::test]
-    async fn resize_pane_is_permitted_for_a_read_only_session() {
-        let ack = service()
-            .resize_pane_impl(resize_req(true))
-            .await
-            .expect("ResizePane must not be rejected by the read-only gate")
-            .into_inner();
-        assert!(ack.ok, "error: {}", ack.error);
-    }
-
-    // ─── NEGATIVE: every other mutating pane RPC stays refused ───────────────
+    // ─── NEGATIVE: every mutating pane RPC stays refused ─────────────────────
 
     #[tokio::test]
     async fn write_to_pane_still_rejects_a_read_only_session() {
@@ -541,6 +430,21 @@ mod tests {
             .rename_pane_impl(rename_pane_req(true))
             .await
             .expect_err("RenamePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    /// `resize_pane_impl` has no relay/connection-scoped routing — it calls
+    /// straight through to the session-scoped backend, mutating the shared tab
+    /// layout every attached client renders — so a read-only session must not
+    /// reach it. (Re-added by rework round 1: a prior round of this card wrongly
+    /// un-gated ResizePane on the mistaken premise that it was view-only.)
+    #[tokio::test]
+    async fn resize_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .resize_pane_impl(resize_req(true))
+            .await
+            .expect_err("ResizePane must stay refused for read-only sessions");
         assert_eq!(err.code(), Code::PermissionDenied);
         assert_eq!(err.message(), READ_ONLY_MESSAGE);
     }
