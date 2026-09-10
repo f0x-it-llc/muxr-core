@@ -352,12 +352,12 @@ pub(crate) async fn inbound_loop(
                         // grid THIS client renders — a phone rotating or opening
                         // its keyboard — which is the viewer's own viewport, not
                         // session content. Floored the same as attach-time
-                        // geometry (`super::clamp_dim`): a live Resize frame is
-                        // the repeatable path, so a degenerate `1×1` sent here at
-                        // will — not just once at attach — is the real lever for
-                        // shrinking the tab out from under every other client.
-                        let rows = super::clamp_dim(r.rows, 24, super::MIN_TERMINAL_ROWS);
-                        let cols = super::clamp_dim(r.cols, 80, super::MIN_TERMINAL_COLS);
+                        // geometry (`super::clamp_dim`), via [`floored_resize`]:
+                        // a live Resize frame is the repeatable path, so a
+                        // degenerate `1×1` sent here at will — not just once at
+                        // attach — is the real lever for shrinking the tab out
+                        // from under every other client.
+                        let (rows, cols) = floored_resize(&r);
                         if let Err(e) = sender.send_resize(rows, cols) {
                             log::warn!("relay inbound [{session}]: resize send failed: {e:#}");
                         } else {
@@ -422,6 +422,22 @@ pub(crate) async fn inbound_loop(
         );
     }
     // _guard drops here → reader thread shutdown.
+}
+
+// ─── Resize floor ───────────────────────────────────────────────────────────
+
+/// Floor a live `Resize` frame's rows/cols the same way attach-time geometry
+/// is floored ([`super::clamp_dim`], rows to [`super::MIN_TERMINAL_ROWS`],
+/// cols to [`super::MIN_TERMINAL_COLS`]).
+///
+/// Pulled out of the `select!` arm so the live-resize path — repeatable at
+/// will inside an open stream, unlike the one-shot attach path — has its own
+/// direct test coverage rather than relying on "it calls the same helper" by
+/// inspection alone.
+fn floored_resize(r: &crate::proto::Resize) -> (u16, u16) {
+    let rows = super::clamp_dim(r.rows, 24, super::MIN_TERMINAL_ROWS);
+    let cols = super::clamp_dim(r.cols, 80, super::MIN_TERMINAL_COLS);
+    (rows, cols)
 }
 
 // ─── Read-only boundary (routed controls) ────────────────────────────────────
@@ -1102,6 +1118,41 @@ mod tests {
         assert!(
             inputs.lock().unwrap().is_empty(),
             "one frame must not push an unbounded write into the session"
+        );
+    }
+
+    // ─── Resize floor ─────────────────────────────────────────────────────────
+
+    /// Exercises `floored_resize` directly — the live-resize path, repeatable
+    /// at will inside an open stream, unlike the one-shot attach geometry.
+    #[test]
+    fn floored_resize_floors_caps_and_passes_through() {
+        // The degenerate case this card exists to block: a live Resize frame
+        // carrying 1×1 reaches the sender floored, not verbatim.
+        let degenerate = crate::proto::Resize { rows: 1, cols: 1 };
+        assert_eq!(
+            floored_resize(&degenerate),
+            (
+                crate::relay::MIN_TERMINAL_ROWS,
+                crate::relay::MIN_TERMINAL_COLS
+            )
+        );
+
+        // A normal value passes through unchanged.
+        let normal = crate::proto::Resize { rows: 24, cols: 80 };
+        assert_eq!(floored_resize(&normal), (24, 80));
+
+        // The upper cap still applies.
+        let oversized = crate::proto::Resize {
+            rows: 65535,
+            cols: 65535,
+        };
+        assert_eq!(
+            floored_resize(&oversized),
+            (
+                crate::relay::MAX_TERMINAL_DIM,
+                crate::relay::MAX_TERMINAL_DIM
+            )
         );
     }
 
