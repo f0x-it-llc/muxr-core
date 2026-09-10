@@ -118,7 +118,9 @@ impl MuxrService {
 
     // ── SwitchSpace ───────────────────────────────────────────────────────────
 
-    /// Switch the connection's relay to a different space. MUTATING.
+    /// Switch the connection's relay to a different space. Permitted for
+    /// read-only sessions (view-only — re-points only THIS connection's relay,
+    /// not the daemon-global focus or any other connection's stream).
     ///
     /// Routed through the connection's live relay by an **exact** connection_id match
     /// (fail-closed — no session-scoped fallback; see `resolve_space_relay`). With no
@@ -127,7 +129,6 @@ impl MuxrService {
         &self,
         request: Request<SwitchSpaceReq>,
     ) -> Result<Response<ProtoAck>, Status> {
-        reject_if_read_only(&request, "SwitchSpace")?;
         let req = request.into_inner();
         let session = req.session;
         let connection_id = req.connection_id;
@@ -1022,7 +1023,7 @@ mod tests {
         ActionAck, BackendSet, DualHandle, LayoutSnapshot, MuxBackend, PaneRef, ResizeDir,
         ResizeKind, ScrollDir,
     };
-    use crate::proto::CloseSpaceReq;
+    use crate::proto::{CloseSpaceReq, CreateSpaceReq, RenameSpaceReq, SwitchSpaceReq};
 
     /// A spaces backend with scripted listings and a scripted removal set, which
     /// records every close it is actually asked to perform.
@@ -1413,5 +1414,111 @@ mod tests {
         );
         // Nothing left → nothing to re-point onto.
         assert_eq!(pick_repoint_target(&[]), None);
+    }
+
+    // ─── Read-only-gate tests: the RPC un-gate (read-only→explorer, Phase 1) ─
+    //
+    // SwitchSpace is now permitted for a read-only session token; CreateSpace /
+    // RenameSpace / CloseSpace stay refused. A weakened trust boundary without a
+    // paired test is Critical per docs/REVIEW_FOCUS.md.
+
+    const READ_ONLY_MESSAGE: &str =
+        "session token is read-only — mutating operations are not allowed";
+
+    fn switch_space_req(read_only: bool) -> Request<SwitchSpaceReq> {
+        let mut req = Request::new(SwitchSpaceReq {
+            session: "herdr:herdr".to_owned(),
+            space_id: "ws-1".to_owned(),
+            connection_id: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn create_space_req(read_only: bool) -> Request<CreateSpaceReq> {
+        let mut req = Request::new(CreateSpaceReq {
+            session: "herdr:herdr".to_owned(),
+            label: String::new(),
+            connection_id: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn rename_space_req(read_only: bool) -> Request<RenameSpaceReq> {
+        let mut req = Request::new(RenameSpaceReq {
+            session: "herdr:herdr".to_owned(),
+            space_id: "ws-1".to_owned(),
+            label: "renamed".to_owned(),
+            connection_id: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    /// SwitchSpace is view-only (re-points only the caller's own relay), so a
+    /// read-only token must reach relay resolution instead of being rejected by
+    /// the gate. No relay is attached in this test, so the ack legitimately fails
+    /// "no matching connection" — the point is that it is an ack, never
+    /// `PermissionDenied`.
+    #[tokio::test]
+    async fn switch_space_is_permitted_for_a_read_only_session() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1"])]));
+        let service = service_with(&backend);
+
+        let ack = service
+            .switch_space_impl(switch_space_req(true))
+            .await
+            .expect("SwitchSpace must not be rejected by the read-only gate")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert!(
+            ack.error.contains("reattach required"),
+            "error: {}",
+            ack.error
+        );
+    }
+
+    #[tokio::test]
+    async fn create_space_still_rejects_a_read_only_session() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1"])]));
+        let service = service_with(&backend);
+
+        let err = service
+            .create_space_impl(create_space_req(true))
+            .await
+            .expect_err("CreateSpace must stay refused for read-only sessions");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn rename_space_still_rejects_a_read_only_session() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1"])]));
+        let service = service_with(&backend);
+
+        let err = service
+            .rename_space_impl(rename_space_req(true))
+            .await
+            .expect_err("RenameSpace must stay refused for read-only sessions");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn close_space_still_rejects_a_read_only_session() {
+        let backend = Arc::new(ScriptedSpaces::new(vec![snapshots(&["ws-1", "ws-2"])]));
+        let service = service_with(&backend);
+
+        let mut req = close_req("ws-1", false);
+        req.extensions_mut().insert(SessionReadOnly(true));
+
+        let err = service
+            .close_space_impl(req)
+            .await
+            .expect_err("CloseSpace must stay refused for read-only sessions");
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
     }
 }

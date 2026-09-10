@@ -292,3 +292,180 @@ impl MuxrService {
         .await
     }
 }
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    //! Paired read-only-gate tests for the RPC un-gate (read-only→explorer, Phase
+    //! 1): every mutating pane RPC — INCLUDING `ResizePane`, which an earlier
+    //! round of this card wrongly un-gated — stays refused for a read-only
+    //! session token. `resize_pane_impl` has no relay/connection-scoped routing:
+    //! it calls straight through to the session-scoped backend, so it mutates
+    //! the shared tab layout every attached client renders, not just the
+    //! caller's own view. `FocusPane`/`ScrollPane` are unaffected by this card
+    //! (already ungated) and are not re-tested here. A weakened trust boundary
+    //! without a paired test is Critical per `docs/REVIEW_FOCUS.md`.
+    //!
+    //! None of these requests need to resolve a real session or backend: the
+    //! read-only gate is the very first thing each handler checks, so a default
+    //! [`MuxrService`] (zellij backend, never reached) is enough.
+
+    use tonic::{Code, Request};
+
+    use crate::auth::SessionReadOnly;
+    use crate::grpc::MuxrService;
+    use crate::proto::{
+        NewPaneReq, PaneTarget, RenamePaneReq, ResizeKind, ResizePaneReq, ToggleFullscreenReq,
+        WriteToPaneReq,
+    };
+
+    fn service() -> MuxrService {
+        MuxrService::new()
+    }
+
+    fn pane_target() -> PaneTarget {
+        PaneTarget {
+            session: "zellij:test".to_owned(),
+            pane_id: 1,
+            is_plugin: false,
+            connection_id: String::new(),
+        }
+    }
+
+    fn resize_req(read_only: bool) -> Request<ResizePaneReq> {
+        let mut req = Request::new(ResizePaneReq {
+            target: Some(pane_target()),
+            resize: ResizeKind::Increase as i32,
+            direction: 0,
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn write_req(read_only: bool) -> Request<WriteToPaneReq> {
+        let mut req = Request::new(WriteToPaneReq {
+            target: Some(pane_target()),
+            data: b"x".to_vec(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn pane_target_req(read_only: bool) -> Request<PaneTarget> {
+        let mut req = Request::new(pane_target());
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn new_pane_req(read_only: bool) -> Request<NewPaneReq> {
+        let mut req = Request::new(NewPaneReq {
+            session: "zellij:test".to_owned(),
+            floating: false,
+            pane_name: String::new(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn rename_pane_req(read_only: bool) -> Request<RenamePaneReq> {
+        let mut req = Request::new(RenamePaneReq {
+            target: Some(pane_target()),
+            name: "renamed".to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    fn toggle_fullscreen_req(read_only: bool) -> Request<ToggleFullscreenReq> {
+        let mut req = Request::new(ToggleFullscreenReq {
+            target: Some(pane_target()),
+            target_is_floating: false,
+            floating_visible: false,
+            target_is_focused_floating: false,
+            has_floating_hint: false,
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    const READ_ONLY_MESSAGE: &str =
+        "session token is read-only — mutating operations are not allowed";
+
+    // ─── NEGATIVE: every mutating pane RPC stays refused ─────────────────────
+
+    #[tokio::test]
+    async fn write_to_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .write_to_pane_impl(write_req(true))
+            .await
+            .expect_err("WriteToPane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn close_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .close_pane_impl(pane_target_req(true))
+            .await
+            .expect_err("ClosePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn new_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .new_pane_impl(new_pane_req(true))
+            .await
+            .expect_err("NewPane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn rename_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .rename_pane_impl(rename_pane_req(true))
+            .await
+            .expect_err("RenamePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    /// `resize_pane_impl` has no relay/connection-scoped routing — it calls
+    /// straight through to the session-scoped backend, mutating the shared tab
+    /// layout every attached client renders — so a read-only session must not
+    /// reach it. (Re-added by rework round 1: a prior round of this card wrongly
+    /// un-gated ResizePane on the mistaken premise that it was view-only.)
+    #[tokio::test]
+    async fn resize_pane_still_rejects_a_read_only_session() {
+        let err = service()
+            .resize_pane_impl(resize_req(true))
+            .await
+            .expect_err("ResizePane must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_floating_still_rejects_a_read_only_session() {
+        let err = service()
+            .toggle_pane_floating_impl(pane_target_req(true))
+            .await
+            .expect_err("TogglePaneFloating must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_still_rejects_a_read_only_session() {
+        let err = service()
+            .toggle_pane_fullscreen_impl(toggle_fullscreen_req(true))
+            .await
+            .expect_err("TogglePaneFullscreen must stay refused for read-only sessions");
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+}
