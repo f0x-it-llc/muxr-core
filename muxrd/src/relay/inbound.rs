@@ -710,8 +710,11 @@ fn handle_query_layout(
 /// 2. **Viewport bound check** — coordinates must lie inside THIS relay's own
 ///    grid (attach size, updated by Resize frames); anything outside is a
 ///    client bug or abuse and is dropped with a warning.
-/// 3. Forward via [`MuxSender::send_mouse`] (as-self routing — the event lands
-///    in this rendering client's viewport, never a co-attached client's).
+/// 3. Forward via [`MuxSender::send_mouse`]. As-self routing resolves the target
+///    pane from THIS connection's own focus, but the resulting scroll lands on
+///    that pane's SHARED viewport — every client watching the same pane sees it,
+///    so it is NOT scoped to this connection. Measured, not inferred; see
+///    `ZellijBackend::send_mouse` for the experiment.
 fn handle_mouse_frame(
     sender: &mut dyn MuxSender,
     m: &MouseInput,
