@@ -49,9 +49,14 @@ context is just this directory and no Rust toolchain is needed.
 **The public token is read-only for a reason.** `muxrd` has no per-login session
 isolation: everyone presenting the same token attaches to the *same* session and
 sees the same activity. This is a shared window onto a live terminal, **not a
-private sandbox** — do not describe it as one. Read-only clients cannot type at
-each other, and (unlike read-write clients) attach at the session's existing
-size rather than shrinking the shared view to the smallest phone.
+private sandbox** — do not describe it as one. Read-only viewers can navigate
+tabs, panes and spaces, scroll, and resize their own view; they cannot type and
+cannot send anything but wheel-scroll (no clicks or drags). On zellij, a tab is
+sized to the *smallest* client focused on it, read-only viewers included — so
+one visitor's small window does affect what everyone else on that tab sees,
+though it's floored at a minimum size so it can't be shrunk to nothing. On
+herdr, a read-only attach is an observer: its resize is accepted without
+resizing the pane, and its scroll never reaches the terminal.
 
 ### Abuse kill switch
 
@@ -174,16 +179,18 @@ QR of it) wherever people will scan it.
 | `DEMO_READ_ONLY` | `1` | `1` = read-only public posture. `0` = interactive (store reviewers). |
 | `DEMO_REVIEWER_TOKEN` | `0` | `1` also mints the read-write `demo-reviewer` token. |
 | `DEMO_SESSION` | `demo` | zellij session name. |
-| `MUXR_VERSION` | `0.4.2` | muxr-core release installed. **Minimum 0.4.2** — see below. |
+| `MUXR_VERSION` | `0.4.3` | muxr-core release installed. **Minimum 0.4.3** — see below. |
 | `HERDR_VERSION` | `0.9.0` | herdr release; muxrd is tested against its wire protocol. |
 
-> **`MUXR_VERSION` must be ≥ 0.4.2.** `muxrd` refuses to drive a zellij whose
+> **`MUXR_VERSION` must be ≥ 0.4.3.** `muxrd` refuses to drive a zellij whose
 > version differs from the `zellij-utils` it was linked against, and **silently
 > drops the backend rather than failing** — the symptom is
 > `backend: zellij not in served set` and a demo that serves herdr only. v0.4.1
 > predates the zellij 0.45.1 rebaseline, so it links `zellij-utils` 0.44.3 and
-> cannot drive this image's zellij. If you bump the zellij pin, pair it with a
-> muxr-core release built against the same zellij.
+> cannot drive this image's zellij. Below 0.4.3, a read-only viewer is pinned to
+> a single fixed-size tab, so a public demo visitor has nothing to explore. If
+> you bump the zellij pin, pair it with a muxr-core release built against the
+> same zellij.
 
 ### What's inside
 
