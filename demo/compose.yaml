@@ -21,8 +21,9 @@
 #
 # PUBLIC POSTURE IS READ-ONLY (DEMO_READ_ONLY=1 by default): muxrd has no
 # per-login session isolation (session_ops.rs:256-306) — every client sharing
-# one token attaches to the SAME session. A read-only client attaches at the
-# session's existing size and never shrinks it (relay/mod.rs:225-270), and
+# one token attaches to the SAME session. A read-only client drives geometry
+# exactly like a read-write one, so it CAN shrink a shared zellij tab (floored
+# at MIN_TERMINAL_ROWS=4 / MIN_TERMINAL_COLS=20 in relay/inbound.rs), and still
 # cannot type at whoever else is attached. Set DEMO_READ_ONLY=0 for the
 # interactive store-reviewer posture; set DEMO_REVIEWER_TOKEN=1 alongside it
 # to also mint a separate read-write reviewer token.
@@ -46,7 +47,7 @@ services:
       context: .
       dockerfile: Dockerfile
       args:
-        MUXR_VERSION: "${MUXR_VERSION:-0.4.2}"
+        MUXR_VERSION: "${MUXR_VERSION:-0.4.3}"
         HERDR_VERSION: "${HERDR_VERSION:-0.9.0}"
     image: ghcr.io/f0x-it-llc/muxr-demo:latest
     container_name: muxr-demo

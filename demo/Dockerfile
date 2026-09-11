@@ -37,16 +37,27 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 # Pin the muxr-core release the demo clones + installs. Bump alongside the app.
 #
-# MINIMUM 0.4.2 — do NOT downgrade. muxrd refuses to drive a zellij whose
-# version differs from the zellij-utils it was linked against, and silently
-# drops the backend rather than failing: `backend: zellij not in served set`.
-# v0.4.1 was tagged 2026-08-22, BEFORE the zellij 0.45.1 rebaseline merged
-# (9c912b5, 2026-09-09), so a 0.4.1 binary links zellij-utils 0.44.3 and this
-# image — which installs zellij 0.45.1 — serves herdr ONLY. v0.4.2 is the first
-# release containing that rebaseline. If you bump the zellij pin below, bump
-# this to a release built against the same zellij, and re-check that muxrd
-# actually reports BOTH backends at startup.
-ARG MUXR_VERSION="0.4.2"
+# MINIMUM 0.4.3 — do NOT downgrade.
+#
+# 0.4.2 reason (zellij 0.45.1 rebaseline): muxrd refuses to drive a zellij
+# whose version differs from the zellij-utils it was linked against, and
+# silently drops the backend rather than failing: `backend: zellij not in
+# served set`. v0.4.1 was tagged 2026-08-22, BEFORE the zellij 0.45.1
+# rebaseline merged (9c912b5, 2026-09-09), so a 0.4.1 binary links
+# zellij-utils 0.44.3 and this image — which installs zellij 0.45.1 — serves
+# herdr ONLY. v0.4.2 is the first release containing that rebaseline.
+#
+# 0.4.3 reason (read-only navigate + resize): below 0.4.3 a read-only token is
+# pinned to a single fixed-size tab, so a public demo visitor cannot navigate
+# or resize their own view and there is nothing to explore. v0.4.3 is the
+# first release where a read-only viewer can switch tabs/panes/spaces, scroll,
+# and resize its own viewport (floored at MIN_TERMINAL_ROWS/MIN_TERMINAL_COLS)
+# via the attach stream's Resize frame.
+#
+# If you bump the zellij pin below, bump this to a release built against the
+# same zellij, and re-check that muxrd actually reports BOTH backends at
+# startup.
+ARG MUXR_VERSION="0.4.3"
 
 # Pin the herdr release muxrd is TESTED against (HERDR_MAX_TESTED_PROTOCOL in
 # muxrd/src/multiplexer/herdr/wire.rs — currently wire protocol 22). muxrd
