@@ -384,9 +384,11 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     /// Open an attach to `session` at `rows`×`cols`, returning a [`DualHandle`]
     /// of boxed neutral sender/receiver halves. `read_only` is part of the
-    /// contract for backends that vary the open by mode; the zellij backend's
-    /// read-only geometry handling lives at the call site (the relay pre-resolves
-    /// the size) and in the shutdown path (`send_client_exited` vs resize nudge).
+    /// contract for backends that vary the open by mode; for the zellij
+    /// backend `rows`/`cols` are already this client's own dimensions on both
+    /// tiers (the relay passes them through unchanged — see
+    /// `crate::relay::attach_relay`), so the only place `read_only` matters to
+    /// it is the shutdown path (`send_client_exited` vs resize nudge).
     fn open_attach(
         &self,
         session: &str,

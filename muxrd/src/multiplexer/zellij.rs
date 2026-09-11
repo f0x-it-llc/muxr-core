@@ -274,9 +274,11 @@ impl MuxBackend for ZellijBackend {
         read_only: bool,
     ) -> Result<DualHandle> {
         // For the zellij backend the AttachClient open is identical regardless
-        // of `read_only`: the relay pre-resolves the read-only size before
-        // calling, and the read-only teardown nudge lives in the ShutdownGuard
-        // (send_client_exited vs send_resize). We log the mode for traceability.
+        // of `read_only`: the relay passes THIS caller's own rows/cols on both
+        // tiers (floored at MIN_TERMINAL_ROWS/MIN_TERMINAL_COLS — see
+        // `crate::relay::attach_relay`), and the read-only teardown nudge lives
+        // in the ShutdownGuard (send_client_exited vs send_resize). We log the
+        // mode for traceability.
         log::debug!(
             "ZellijBackend::open_attach session='{session}' {rows}x{cols} read_only={read_only}"
         );
@@ -395,9 +397,17 @@ impl MuxSender for ZellijMuxSender {
         // Release following — the exact encoding the real zellij client
         // produces (zellij-client input_handler.rs). Position is
         // (line, column), zero-based. Sent as-self on the persistent relay
-        // connection, so the server routes it within THIS client's viewport
-        // (pane under position → app mouse-capture forwarding or scrollback),
-        // never a co-attached client's.
+        // connection, so the server resolves the target pane from THIS
+        // client's own focus (`send_action_as_self` routes by this
+        // connection's client_id, not `get_last_active_client()`) — the
+        // useful property this relies on. But the resulting scroll (or
+        // mouse-capture forward) lands on that pane's SHARED viewport, which
+        // every other client currently watching the same pane also sees —
+        // it is NOT scoped to this connection. Measured, not inferred: a
+        // pane seeded with 400 numbered lines, scrolled here with 40
+        // wheel-up notches, moved a third-party `zellij action dump-screen`
+        // observer's view from lines 354-400 to 272-281 (~120 lines,
+        // matching zellij's ~3 lines/notch).
         let mut event = MouseEvent::new();
         event.event_type = MouseEventType::Press;
         event.position = Position::new(row as i32, col);

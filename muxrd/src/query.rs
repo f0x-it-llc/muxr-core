@@ -251,13 +251,21 @@ pub fn query_list_panes_json(session: &str) -> Result<String> {
 
 /// Query the **current display size** of a session (active tab's display area).
 ///
-/// Used by the relay for **read-only attaches** (review round-2 Major A): a
-/// read-only observer must attach with the session's *current* size, never its
-/// own (possibly tiny) client size. `zellij-server/src/lib.rs`'s
-/// `min_client_terminal_size`, which used to resize the whole session to the
-/// minimum across every attached client, was deleted in 0.45.1: resizing is
-/// now recomputed per tab, from only the clients currently focused on that
-/// tab. A small read-only client would otherwise shrink the writer's tab.
+/// Currently UNUSED by any production path: the relay now passes every
+/// attaching client's own rows/cols on both tiers, read-only included (see
+/// `crate::relay::attach_relay`), so nothing calls this to pre-resolve a size
+/// before attaching — only the [`crate::multiplexer::MuxBackend`] trait
+/// declaration, its two backend impls, and test mocks reference it.
+///
+/// It exists because that was not always the policy: before the
+/// read-only→explorer arc, a read-only observer attached with the session's
+/// *current* size instead of its own (review round-2 Major A), reasoning from
+/// `zellij-server/src/lib.rs`'s `min_client_terminal_size` (deleted in
+/// 0.45.1, which stopped resizing the whole session to the minimum across
+/// every attached client in favor of a per-tab recompute from only the
+/// clients focused on that tab). It is retained on the trait as a
+/// still-useful query — removing it is a `MuxBackend` API decision, not one
+/// this comment makes.
 ///
 /// Returns `(rows, cols)` taken from the **active** tab's
 /// `display_area_rows`/`display_area_columns` (falling back to the first tab if
