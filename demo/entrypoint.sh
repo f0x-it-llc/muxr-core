@@ -333,17 +333,106 @@ start_herdr_backend() {
   if [ -S "${socket}" ]; then
     HERDR_UP=1
     herdr status server 2>&1 | sed 's/^/[demo][herdr] /' || true
-    # Seed one demo space idempotently (skip if it already exists across restarts).
-    local existing
-    existing="$(herdr workspace list 2>/dev/null || true)"
-    if ! printf '%s\n' "${existing}" | grep -q "${SESSION}"; then
-      echo "[demo] seeding herdr workspace '${SESSION}'…"
-      herdr workspace create --label "${SESSION}" --cwd "${DEMO_CLONE_DIR}" --focus 2>/dev/null || true
-    fi
+    seed_herdr_workspace
   else
     echo "############################################################" >&2
     echo "[demo] ERROR: herdr socket ${socket} did not appear — see ${XDG_RUNTIME_DIR}/herdr-server.log; continuing without herdr (zellij may still be usable)" >&2
     echo "############################################################" >&2
+  fi
+}
+
+# Seed one herdr workspace idempotently (skip if a workspace with this label
+# is already present — e.g. an entrypoint re-run against a herdr server that
+# somehow survived) with a multi-tab, multi-pane layout comparable to
+# layout.kdl's zellij session: tab "editor" (nvim beside a cwd/btop stack),
+# tab "shell" (cwd + htop), tab "logs" (the same commit-history loop). This
+# mirrors layout.kdl's SHAPE — three tabs, one of them split more than once —
+# not its exact config syntax, since herdr has no layout-file equivalent.
+#
+# CLI re-checked against the PINNED herdr version inside this image (not just
+# against docs written for an older release): `workspace create`, `tab
+# create` and `pane split` all take --cwd but NO --command — a seeded pane
+# always starts attached to its cwd's login shell. What actually gets a pane
+# RUNNING something is `herdr pane run <PANE_ID> <COMMAND>...`, which — per
+# its own --help under `pane send-text` ("next: herdr pane run <PANE_ID>
+# <COMMAND> sends text and Enter in one call") — TYPES the given words into
+# that shell and presses Enter, exactly as a person would; it does NOT
+# re-quote them for a nested shell. A command needing its own quoting/`;`
+# (the log loop below) must be passed as ONE already-quoted argument, literal
+# quote characters included, or the receiving shell's own parsing splits on
+# the unquoted punctuation inside it.
+#
+# Every step is best-effort (`|| true` / empty-id checks): a herdr hiccup
+# here must not take the container down, and zellij is still served either way.
+seed_herdr_workspace() {
+  local existing ws_json ws_id tab1_id pane1_id pane2_id pane3_id
+  local tab2_json pane4_id pane5_id
+  local tab3_json pane6_id log_cmd
+
+  existing="$(herdr workspace list 2>/dev/null || true)"
+  if printf '%s' "${existing}" | jq -e --arg s "${SESSION}" \
+       '.result.workspaces[]? | select(.label == $s)' >/dev/null 2>&1; then
+    echo "[demo] herdr workspace '${SESSION}' already present — skipping seed"
+    return 0
+  fi
+
+  echo "[demo] seeding herdr workspace '${SESSION}' (tabs: editor, shell, logs)…"
+
+  ws_json="$(herdr workspace create --label "${SESSION}" --cwd "${DEMO_CLONE_DIR}" --focus 2>/dev/null)" || {
+    echo "[demo] WARNING: herdr workspace create failed — continuing without a seeded herdr workspace" >&2
+    return 0
+  }
+  ws_id="$(printf '%s' "${ws_json}" | jq -r '.result.workspace.workspace_id // empty' 2>/dev/null)"
+  tab1_id="$(printf '%s' "${ws_json}" | jq -r '.result.tab.tab_id // empty' 2>/dev/null)"
+  pane1_id="$(printf '%s' "${ws_json}" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
+  if [ -z "${ws_id}" ] || [ -z "${pane1_id}" ]; then
+    echo "[demo] WARNING: could not parse herdr workspace-create output — leaving herdr with an unlabeled default workspace this boot" >&2
+    return 0
+  fi
+
+  # tab "editor" (focused, like layout.kdl): nvim (left, 70%) beside a column
+  # split into a plain cwd shell (top) and btop (bottom).
+  [ -n "${tab1_id}" ] && { herdr tab rename "${tab1_id}" editor >/dev/null 2>&1 || true; }
+  herdr pane run "${pane1_id}" nvim -R muxrd/src/grpc/mod.rs >/dev/null 2>&1 || \
+    echo "[demo] WARNING: could not start nvim in the herdr editor pane" >&2
+  # --ratio is the share LEFT WITH the pane being split (empirically verified
+  # against this pinned herdr build, since the CLI's own --help does not say)
+  # — 0.7 keeps 70% on the nvim pane and gives the new column 30%.
+  pane2_id="$(herdr pane split "${pane1_id}" --direction right --ratio 0.7 --cwd "${DEMO_CLONE_DIR}" --no-focus 2>/dev/null \
+    | jq -r '.result.pane.pane_id // empty' 2>/dev/null)"
+  if [ -n "${pane2_id}" ]; then
+    pane3_id="$(herdr pane split "${pane2_id}" --direction down --ratio 0.5 --cwd "${DEMO_CLONE_DIR}" --no-focus 2>/dev/null \
+      | jq -r '.result.pane.pane_id // empty' 2>/dev/null)"
+    if [ -n "${pane3_id}" ]; then
+      herdr pane run "${pane3_id}" btop >/dev/null 2>&1 || echo "[demo] WARNING: could not start btop in herdr" >&2
+    fi
+  else
+    echo "[demo] WARNING: herdr pane split (editor column) failed — 'editor' tab keeps only the nvim pane" >&2
+  fi
+
+  # tab "shell": a plain cwd shell beside htop.
+  tab2_json="$(herdr tab create --workspace "${ws_id}" --cwd "${DEMO_CLONE_DIR}" --label shell --no-focus 2>/dev/null)" || true
+  pane4_id="$(printf '%s' "${tab2_json}" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
+  if [ -n "${pane4_id}" ]; then
+    pane5_id="$(herdr pane split "${pane4_id}" --direction right --ratio 0.5 --cwd "${DEMO_CLONE_DIR}" --no-focus 2>/dev/null \
+      | jq -r '.result.pane.pane_id // empty' 2>/dev/null)"
+    if [ -n "${pane5_id}" ]; then
+      herdr pane run "${pane5_id}" htop >/dev/null 2>&1 || echo "[demo] WARNING: could not start htop in herdr" >&2
+    fi
+  else
+    echo "[demo] WARNING: herdr tab create 'shell' failed — that tab is missing this boot" >&2
+  fi
+
+  # tab "logs": the same commit-history loop as layout.kdl's "logs" tab (real
+  # `git log` reads better than a fake access log). Passed to `pane run` as a
+  # single pre-quoted argument — see the mechanism note above.
+  log_cmd="bash -c 'while true; do clear; echo \"[\$(date +%T)] ${DEMO_CLONE_DIR} git log\"; git -C ${DEMO_CLONE_DIR} --no-pager log --oneline --graph --all -30; sleep 5; done'"
+  tab3_json="$(herdr tab create --workspace "${ws_id}" --cwd "${DEMO_CLONE_DIR}" --label logs --no-focus 2>/dev/null)" || true
+  pane6_id="$(printf '%s' "${tab3_json}" | jq -r '.result.root_pane.pane_id // empty' 2>/dev/null)"
+  if [ -n "${pane6_id}" ]; then
+    herdr pane run "${pane6_id}" "${log_cmd}" >/dev/null 2>&1 || echo "[demo] WARNING: could not start the log loop in herdr" >&2
+  else
+    echo "[demo] WARNING: herdr tab create 'logs' failed — that tab is missing this boot" >&2
   fi
 }
 
