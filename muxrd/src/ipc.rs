@@ -115,17 +115,19 @@ impl AttachHandle {
     ///
     /// Sends the `AttachClient` handshake message before returning.
     ///
-    /// **Security (review round-2 Major A — read-only attach must not drive
-    /// shared session geometry):** on every `AttachClient` handshake zellij
-    /// recomputes the size of the tab the client lands on from only the
-    /// clients currently focused on that tab (`zellij-server/src/lib.rs`) — a
-    /// per-tab minimum, not a session-wide one since 0.45.1.  The caller is
-    /// therefore responsible for passing a size that won't shrink writers on
-    /// that tab for a read-only attach: the relay resolves the session's
-    /// *current* size (via [`crate::query::query_session_size`]) and passes
-    /// that here, rather than the read-only client's own (possibly tiny)
-    /// dimensions.  This function just sends whatever size it's given — the
-    /// gate lives in `attach_relay`.
+    /// **Geometry (originally review round-2 Major A):** on every
+    /// `AttachClient` handshake zellij recomputes the size of the tab the
+    /// client lands on from only the clients currently focused on that tab
+    /// (`zellij-server/src/lib.rs`) — a per-tab minimum, not a session-wide
+    /// one since 0.45.1.  The relay passes THIS caller's own rows/cols here
+    /// on both tiers, read-only included — a viewer's own viewport size is
+    /// not session content, so it sits inside the read-only boundary, and
+    /// the accepted tradeoff is that the smallest client focused on a tab
+    /// sizes it for everyone there.  `attach_relay` floors every size at
+    /// `MIN_TERMINAL_ROWS`/`MIN_TERMINAL_COLS` before it ever reaches here,
+    /// bounding only the degenerate case of a client asking for a near-zero
+    /// grid.  This function just sends whatever size it's given — the floor
+    /// lives in `attach_relay`.
     pub fn open(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
         // Defence in depth (Major G): never build a socket path from an
         // unvalidated name, even if a caller forgot to gate it.
@@ -421,10 +423,13 @@ impl AttachSender {
     ///
     /// The server removes this client and closes its connection, so a reader
     /// thread parked in a blocking `recv()` wakes (recv returns `None`).  Used
-    /// by the relay drop-guard for **read-only** attaches in place of the resize
-    /// "nudge": unlike a `TerminalResize`, removing a client never *lowers* the
-    /// shared session's min terminal size, so a read-only detach can never
-    /// shrink a writer's geometry (review round-2 Major A).
+    /// by the relay drop-guard for **read-only** attaches in place of the
+    /// resize "nudge": both wake the parked reader the same way, but
+    /// `ClientExited` avoids sending an extra `TerminalResize` at the exact
+    /// moment the connection is closing.  (A read-only attach's own geometry
+    /// already drove its tab's size on the way in — floored at
+    /// `MIN_TERMINAL_ROWS`/`MIN_TERMINAL_COLS`, see
+    /// `crate::relay::attach_relay` — this is not a privilege boundary.)
     pub fn send_client_exited(&mut self) -> Result<()> {
         self.sender
             .send_client_msg(ClientToServerMsg::ClientExited)

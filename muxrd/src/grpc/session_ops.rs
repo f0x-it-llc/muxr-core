@@ -211,11 +211,15 @@ impl MuxrService {
         request: Request<Streaming<ClientFrame>>,
     ) -> Result<Response<crate::relay::ServerFrameStream>, Status> {
         // ── Major A: enforce the read-only flag on the terminal stream ────────
-        // A read-only token must NOT be able to inject input/resize.  Policy:
+        // A read-only token must NOT be able to inject input.  Policy:
         // **render-only** — a read-only attach still receives the live render
-        // stream (good UX for observers), but the relay drops every inbound
-        // input/resize frame.  (We deliberately do not reject the whole stream
-        // so RO viewers can still watch.)
+        // stream (good UX for observers), and its own `Resize` frames ARE
+        // applied (geometry is the viewer's own viewport, not session
+        // content — see `crate::relay::attach_relay`); only `Input` frames
+        // and non-wheel `Mouse` frames are dropped, and routed controls
+        // (focus/tab/space, fullscreen) are gated by `read_only_denies`
+        // (`relay/inbound.rs`).  (We deliberately do not reject the whole
+        // stream so RO viewers can still watch.)
         let read_only = request
             .extensions()
             .get::<crate::auth::SessionReadOnly>()
