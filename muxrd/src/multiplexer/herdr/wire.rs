@@ -401,10 +401,22 @@ pub enum ClientMessage {
     },
 
     /// Switch this connection into read-only terminal observe mode. Tag = 7.
-    /// (Protocol 17's batched-input message occupied this tag; muxrd never sent it.)
+    ///
+    /// Sent in place of [`ClientMessage::AttachTerminal`] for a **read-only**
+    /// attach (`relay::AttachMode`): herdr then refuses this connection's input,
+    /// wheel and resize against the pty, and the connection never becomes the
+    /// terminal's owner. `target` accepts a pane, terminal or agent target; muxrd
+    /// passes the same `terminal_id` it would attach with.
+    ///
+    /// (Protocol 17's batched-input message occupied this tag; muxrd never sent
+    /// that one.)
     ObserveTerminal { target: String },
 
     /// Switch this connection into writable terminal control mode. Tag = 8.
+    ///
+    /// muxrd does not send this: a writable attach is
+    /// [`ClientMessage::AttachTerminal`], which addresses the same terminal by id
+    /// without herdr's target resolution in front of it.
     ControlTerminal { target: String, takeover: bool },
 
     /// Result of a herdr-owned direct Kitty graphics transmission. Tag = 9.

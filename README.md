@@ -121,6 +121,9 @@ The wire contract is `muxrd/proto/muxr.proto` (package
 their own stubs from the same file. A reference Dart client lives in
 [`muxrd/clients/dart_test_client/`](muxrd/clients/dart_test_client/).
 
+A read-only token can navigate tabs, panes and spaces, scroll, and resize
+their own terminal, but cannot type or otherwise change the session.
+
 **Read-only tokens and spaces (deliberate trade-off):** reads are not gated by
 the read-only-token check, so a read-only token can list every herdr space
 (`GetSpaces`) and read any one space's tab/pane *structure* via

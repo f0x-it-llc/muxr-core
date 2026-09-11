@@ -20,33 +20,56 @@ use crate::proto::{ActionAck as ProtoAck, PaneTarget};
 /// Routing priority:
 /// 1. **Exact per-connection match.** If `connection_id` is non-empty AND an entry
 ///    with that key exists AND its stored session matches `session` → route to that
-///    specific relay.
+///    specific relay. This step is not gated by `read_only`: an exact
+///    `connection_id` match can only ever reach the CALLER's OWN relay entry,
+///    which is always isolation-safe regardless of the caller's read-only status.
 /// 2. **Collapsed-session sessions are fail-closed** (S-M2/S-M4). When `session`
 ///    names a collapsed backend (herdr — see
 ///    [`crate::multiplexer::is_collapsed_backend_session`]) EVERY co-attached relay
 ///    shares the same session id, so `entry.session == session` cannot distinguish
 ///    connections — connection_id is the SOLE discriminator. A session-scoped
-///    fallback would let an authed RW client steer a *victim* connection's stream
+///    fallback would let an authed client steer a *victim* connection's stream
 ///    by sending an empty/guessed connection_id. So for a collapsed session with no
 ///    exact match we return `Some(ok:false, "reattach required …")` — we never
 ///    steer to an arbitrary relay and never fall through to the daemon-global
-///    ephemeral path.
-/// 3. **Session-scoped fallback (non-collapsed only).** For zellij (distinct
-///    session names per session, so `entry.session == session` IS a real
-///    discriminator) the legacy behavior is preserved: scan for any **writable**
-///    relay attached to `session` (preserves solo-client and legacy-client flows
-///    that don't send a connection_id). Read-only entries are skipped: sending to
-///    one would succeed at the channel level but the inbound task would silently
-///    drop the command → false `ok:true` and client UI desync (Issue B).
+///    ephemeral path. This step is also unconditional on `read_only`: it was
+///    already exact-match-only before read-only callers existed here.
+/// 3. **Session-scoped fallback (non-collapsed only, read-write callers only).**
+///    For zellij (distinct session names per session, so `entry.session ==
+///    session` IS a real discriminator) the legacy read-write behavior is
+///    preserved: scan for any **writable** relay attached to `session`
+///    (preserves solo-client and legacy-client flows that don't send a
+///    connection_id). Read-only entries are skipped: sending to one would
+///    succeed at the channel level but the inbound task would silently drop the
+///    command → false `ok:true` and client UI desync (Issue B).
+///
+///    A **read-only caller never takes this fallback.** Some navigation RPCs
+///    (`FocusPane`, `GoToTab`) are permitted for read-only tokens and skip
+///    `reject_if_read_only` entirely, so — unlike step 1 — this step CAN be
+///    reached by a read-only caller. Falling back to *any* writable relay on the
+///    session would let a read-only viewer move a co-attached WRITABLE client's
+///    own view — exactly the isolation violation relay routing exists to
+///    prevent. So a read-only caller with no exact match gets the same explicit
+///    fail-closed ack as the collapsed-session arm (`ok:false, "reattach
+///    required …"`) — never the writable-relay fallback, and never a bare
+///    `None` that would let the caller fall through to the daemon-global
+///    ephemeral `run_action` path.
 ///
 /// All commands routed through this function are mutating *at the relay level*
-/// (`SwitchTab`, `FocusPane`, `ToggleFullscreen`). `FocusPane` is accepted for
-/// read-only token holders at the RPC gate, but the inbound task still drops it
-/// for a read-only *relay*.
+/// (`SwitchTab`, `FocusPane`, `ToggleFullscreen`). `FocusPane` and `GoToTab` are
+/// accepted for read-only token holders at the RPC gate; the inbound task still
+/// drops a mutating command for a read-only *relay* regardless.
+///
+/// `read_only` is the CALLER's own read-only status — the same source of truth
+/// `reject_if_read_only` reads (the `SessionReadOnly` request extension),
+/// fail-closed (treat-as-read-only) when the extension is absent. It only
+/// affects step 3; steps 1 and 2 are unconditional on it.
 ///
 /// Returns `Some(ok-ack)` if a relay was found and the command was queued;
-/// `Some(ok:false-ack)` for a collapsed session with no exact match (fail-closed);
-/// `None` → caller falls back to the ephemeral CLI path (non-collapsed, no relay).
+/// `Some(ok:false-ack)` for a collapsed session with no exact match, or for a
+/// read-only caller with no exact match on a non-collapsed session (both
+/// fail-closed); `None` → caller falls back to the ephemeral CLI path
+/// (non-collapsed, read-write caller, no relay found).
 ///
 /// Never errors (returns a `Status`) on a stale / unknown / mismatched
 /// `connection_id`.
@@ -54,13 +77,17 @@ pub(super) fn try_route_control(
     control: &crate::relay::ControlRegistry,
     session: &str,
     connection_id: &str,
+    read_only: bool,
     cmd: crate::relay::RelayControl,
 ) -> Option<Response<ProtoAck>> {
     // ── 1. Exact per-connection match (clone the sender out so the DashMap Ref
-    //       shard read-lock is released before we send). The exact path is NOT
-    //       filtered for read_only — the caller's own `reject_if_read_only` gate
-    //       already denied the RPC if the caller's token is read-only; routing to
-    //       the caller's OWN relay is always intentional.
+    //       shard read-lock is released before we send). This path is NOT gated
+    //       by `read_only`: an exact `connection_id` match can only ever reach
+    //       the CALLER's OWN relay entry, which is always intentional and
+    //       isolation-safe whether the caller (or that relay) is read-only or
+    //       not. `FocusPane`/`GoToTab` skip `reject_if_read_only` entirely (they
+    //       are permitted for read-only tokens), so that gate cannot be assumed
+    //       here — ownership of the matched connection is the safety property.
     let exact = if !connection_id.is_empty() {
         control
             .get(connection_id)
@@ -74,7 +101,7 @@ pub(super) fn try_route_control(
     // No session-scoped fallback: it would re-point a co-attached connection's
     // stream (the S-M2/S-M4 isolation violation). Return an explicit ok:false
     // ack rather than None so the caller does NOT fall through to the
-    // daemon-global ephemeral path either.
+    // daemon-global ephemeral path either. Unconditional on `read_only`.
     if crate::multiplexer::is_collapsed_backend_session(session) {
         return match exact {
             Some(tx) if tx.send(cmd).is_ok() => Some(Response::new(ProtoAck {
@@ -90,16 +117,31 @@ pub(super) fn try_route_control(
         };
     }
 
-    // ── 3. Non-collapsed (zellij): exact match, then writable session fallback. ─
+    // ── 3. Non-collapsed (zellij): exact match, then — for a read-write caller
+    //       only — a writable session fallback. ──────────────────────────────
     let (tx, info): (
         tokio::sync::mpsc::UnboundedSender<crate::relay::RelayControl>,
         &str,
     ) = match exact {
         Some(sender) => (sender, "routed via relay client (per-connection)"),
+        None if read_only => {
+            // A read-only caller with no exact match must NEVER take the
+            // writable session fallback below (it would move a co-attached
+            // WRITABLE relay's own view — an isolation violation) and must
+            // NEVER get a bare `None` either (that would let the caller fall
+            // through to the daemon-global ephemeral `run_action` path, which
+            // is session-scoped, not view-scoped). Mirror the collapsed-session
+            // arm's explicit fail-closed ack instead.
+            return Some(Response::new(ProtoAck {
+                ok: false,
+                error: "reattach required (no matching connection)".to_owned(),
+                info: String::new(),
+            }));
+        }
         None => {
-            // connection_id absent/stale/mismatched — session fallback.
-            // Only writable relays: a read-only relay's inbound task would
-            // silently drop mutating commands (Issue B).
+            // Read-write caller, connection_id absent/stale/mismatched —
+            // session fallback. Only writable relays: a read-only relay's
+            // inbound task would silently drop mutating commands (Issue B).
             let maybe_fallback = control
                 .iter()
                 .find(|entry| entry.session == session && !entry.read_only)
@@ -124,6 +166,25 @@ pub(super) fn try_route_control(
 }
 
 // ─── Read-only gate + ack helpers ──────────────────────────────────────────────
+
+/// Read the caller's read-only status as a plain `bool`, without rejecting the
+/// request.
+///
+/// Used by navigation RPCs (`FocusPane`, `GoToTab`) that are themselves
+/// permitted for read-only tokens (so they never call [`reject_if_read_only`])
+/// but must still pass the caller's read-only status into
+/// [`try_route_control`] so its routing stays exact-connection-only for a
+/// read-only caller.
+///
+/// Reads the SAME `SessionReadOnly` extension as [`reject_if_read_only`] and
+/// keeps its fail-closed default: an ABSENT extension is treated as
+/// read-only, never as writable.
+pub(super) fn session_is_read_only<T>(request: &Request<T>) -> bool {
+    match request.extensions().get::<crate::auth::SessionReadOnly>() {
+        Some(ro) => ro.0,
+        None => true, // fail-closed: absent extension → treat as read-only
+    }
+}
 
 /// Reject a request if its session token is read-only.
 ///
@@ -365,7 +426,13 @@ mod tests {
         // A request carrying the exact connection_id that matches an entry for
         // the same session must be routed to that relay's sender.
         let (reg, mut rx) = make_registry("conn-1", "my-session");
-        let result = try_route_control(&reg, "my-session", "conn-1", RelayControl::SwitchTab(42));
+        let result = try_route_control(
+            &reg,
+            "my-session",
+            "conn-1",
+            false,
+            RelayControl::SwitchTab(42),
+        );
         assert!(result.is_some(), "should route via connection_id");
         // Verify the command arrived on the relay's receiver.
         match rx.try_recv() {
@@ -382,7 +449,8 @@ mod tests {
         let result = try_route_control(
             &reg,
             "session-A",
-            "", // empty — no connection_id from client
+            "",    // empty — no connection_id from client
+            false, // read-write caller
             RelayControl::SwitchTab(99),
         );
         assert!(result.is_some(), "session fallback should route");
@@ -401,6 +469,7 @@ mod tests {
             &reg,
             "session-B",
             "stale-id-xyz", // not in the registry
+            false,          // read-write caller
             RelayControl::SwitchTab(7),
         );
         assert!(
@@ -423,6 +492,7 @@ mod tests {
             &reg,
             "OTHER-SESSION", // mismatch — conn-4 belongs to session-C
             "conn-4",
+            false, // read-write caller
             RelayControl::SwitchTab(1),
         );
         assert!(result.is_none(), "session mismatch should not route");
@@ -441,6 +511,7 @@ mod tests {
             &registry,
             "nonexistent-session",
             "",
+            false, // read-write caller
             RelayControl::SwitchTab(1),
         );
         assert!(
@@ -479,6 +550,7 @@ mod tests {
             &reg,
             "shared-session",
             "conn-A",
+            false, // read-write caller
             RelayControl::SwitchTab(11),
         );
         assert!(result.is_some(), "should route via conn-A");
@@ -502,10 +574,13 @@ mod tests {
         // herdr session + exact connection_id match → routes (happy path that FA1
         // makes the client hit by forwarding a real connection_id).
         let (reg, mut rx) = make_registry("conn-abc123", "herdr:herdr");
+        // read_only=false: collapsed-session exact match is read_only-independent
+        // (see the fn doc), a read-write caller exercises the same code path.
         let result = try_route_control(
             &reg,
             "herdr:herdr",
             "conn-abc123",
+            false,
             RelayControl::SwitchTab(4),
         );
         let resp = result.expect("collapsed exact match must return an ack");
@@ -523,7 +598,7 @@ mod tests {
         // attack: an authed RW client omits connection_id to hijack a co-attached
         // connection's stream.
         let (reg, mut rx) = make_registry("victim-conn", "herdr:herdr");
-        let result = try_route_control(&reg, "herdr:herdr", "", RelayControl::SwitchTab(9));
+        let result = try_route_control(&reg, "herdr:herdr", "", false, RelayControl::SwitchTab(9));
         let resp = result.expect("collapsed session must return an explicit ack, not None");
         assert!(!resp.get_ref().ok, "empty connection_id must fail closed");
         assert!(
@@ -546,6 +621,7 @@ mod tests {
             &reg,
             "herdr:herdr",
             "guessed-2",
+            false, // read-write caller
             RelayControl::FocusPane(crate::multiplexer::PaneRef {
                 id: 1,
                 is_plugin: false,
@@ -582,19 +658,29 @@ mod tests {
                 read_only: false,
             },
         );
-        let result = try_route_control(&reg, "herdr:herdr", "", RelayControl::SwitchTab(1));
+        let result = try_route_control(&reg, "herdr:herdr", "", false, RelayControl::SwitchTab(1));
         assert!(!result.expect("must return ack").get_ref().ok);
         assert!(rx_a.try_recv().is_err(), "relay A must not be steered");
         assert!(rx_b.try_recv().is_err(), "relay B must not be steered");
     }
 
-    // ─── Issue B: read-only fallback filtering ───────────────────────────────
+    // ─── Issue B: read-only RELAY fallback filtering (read-write CALLER) ─────
+    //
+    // These three tests predate the caller-level `read_only` parameter and
+    // originally encoded a premise that no longer holds in full: that the
+    // session-scoped fallback only ever needed to filter out a read-only
+    // *relay* entry. They are rewritten (not deleted) to call the new
+    // signature explicitly with `read_only: false` — i.e. they now document
+    // the read-write-CALLER path specifically, preserving that coverage
+    // without regression. The read-only-CALLER isolation rule this card adds
+    // is covered separately by the `read_only_caller_*` tests below.
 
     #[test]
     fn fallback_skips_read_only_and_routes_to_writable() {
-        // Two relays on the same session: one read-only, one writable.
-        // A mutating command with an empty/stale connection_id must skip the
-        // read-only entry and route to the writable one (Issue B fix).
+        // Two relays on the same session: one read-only, one writable. A
+        // read-write CALLER sending a mutating command with an empty/stale
+        // connection_id must skip the read-only entry and route to the
+        // writable one (Issue B fix) — unchanged by this card.
         let reg: ControlRegistry = Arc::new(dashmap::DashMap::new());
 
         let (tx_ro, mut rx_ro) = mpsc::unbounded_channel::<RelayControl>();
@@ -620,8 +706,8 @@ mod tests {
             },
         );
 
-        // Empty connection_id → session fallback.
-        let result = try_route_control(&reg, "sess", "", RelayControl::SwitchTab(5));
+        // Empty connection_id, read-write caller → session fallback.
+        let result = try_route_control(&reg, "sess", "", false, RelayControl::SwitchTab(5));
         assert!(
             result.is_some(),
             "should route to the writable relay, not be blocked by read-only entry"
@@ -641,12 +727,16 @@ mod tests {
 
     #[test]
     fn fallback_returns_none_when_only_read_only_relay_exists() {
-        // Only a read-only relay registered for the session. A mutating command
-        // with no connection_id must return None so the caller falls through to
-        // the ephemeral path — never a false ok:true (Issue B fix).
+        // Only a read-only relay registered for the session. A read-write
+        // CALLER's mutating command with no connection_id must return None so
+        // the caller falls through to the ephemeral path — never a false
+        // ok:true (Issue B fix) — unchanged by this card. (A read-ONLY
+        // caller in this exact situation is a different case, covered by
+        // `read_only_caller_absent_connection_id_never_reaches_a_co_attached_writable_relay`
+        // below: it must get an explicit ok:false ack, not `None`.)
         let (reg, mut rx_ro) = make_registry_with_flags("conn-ro-only", "sess-ro", true);
 
-        let result = try_route_control(&reg, "sess-ro", "", RelayControl::SwitchTab(9));
+        let result = try_route_control(&reg, "sess-ro", "", false, RelayControl::SwitchTab(9));
         assert!(
             result.is_none(),
             "only read-only relay → None (must fall through to ephemeral)"
@@ -660,8 +750,9 @@ mod tests {
 
     #[test]
     fn stale_id_fallback_skips_read_only_and_routes_to_writable() {
-        // Stale connection_id + one read-only relay + one writable relay.
-        // The stale-id fallback path must also skip the read-only entry.
+        // Stale connection_id + one read-only relay + one writable relay. The
+        // stale-id fallback path must also skip the read-only entry for a
+        // read-write CALLER — unchanged by this card.
         let reg: ControlRegistry = Arc::new(dashmap::DashMap::new());
 
         let (tx_ro, mut rx_ro) = mpsc::unbounded_channel::<RelayControl>();
@@ -684,7 +775,13 @@ mod tests {
             },
         );
 
-        let result = try_route_control(&reg, "sess2", "stale-xyz", RelayControl::SwitchTab(3));
+        let result = try_route_control(
+            &reg,
+            "sess2",
+            "stale-xyz",
+            false,
+            RelayControl::SwitchTab(3),
+        );
         assert!(
             result.is_some(),
             "stale id fallback should route to writable relay"
@@ -696,6 +793,113 @@ mod tests {
         assert!(
             rx_ro.try_recv().is_err(),
             "read-only relay must not receive the command"
+        );
+    }
+
+    // ─── Read-only CALLER isolation (this card) ──────────────────────────────
+    //
+    // A read-only caller is permitted to reach `try_route_control` at all only
+    // via a navigation RPC (`FocusPane`, `GoToTab`) that skips
+    // `reject_if_read_only`. These tests prove the routing itself still holds
+    // the isolation boundary: a read-only caller may only ever reach its OWN
+    // relay by exact `connection_id`, never a co-attached relay via fallback.
+
+    #[test]
+    fn read_only_caller_exact_connection_id_routes_to_own_relay() {
+        // A read-only caller's OWN connection_id still routes: exact match is
+        // caller-identity routing, not a writable-fallback, so it is permitted
+        // regardless of the caller's read-only status.
+        let (reg, mut rx) = make_registry("conn-ro-1", "sess-exact");
+        let result = try_route_control(
+            &reg,
+            "sess-exact",
+            "conn-ro-1",
+            true, // read-only caller
+            RelayControl::SwitchTab(21),
+        );
+        let resp = result.expect("exact match must route even for a read-only caller");
+        assert!(resp.get_ref().ok, "exact match must be ok:true");
+        match rx.try_recv() {
+            Ok(RelayControl::SwitchTab(21)) => {}
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn read_only_caller_absent_connection_id_never_reaches_a_co_attached_writable_relay() {
+        // The test that matters most: a read-only caller omits connection_id
+        // while a co-attached WRITABLE relay exists in the same (non-collapsed)
+        // session. Falling back to that writable relay would let the
+        // read-only caller move a DIFFERENT client's view — exactly the
+        // isolation violation relay routing exists to prevent. Must return
+        // ok:false, and the writable relay must receive nothing.
+        let reg: ControlRegistry = Arc::new(dashmap::DashMap::new());
+        let (tx_rw, mut rx_rw) = mpsc::unbounded_channel::<RelayControl>();
+        reg.insert(
+            "conn-other-writer".to_owned(),
+            ControlEntry {
+                session: "sess-iso".to_owned(),
+                sender: tx_rw,
+                read_only: false,
+            },
+        );
+
+        let result = try_route_control(
+            &reg,
+            "sess-iso",
+            "",   // absent connection_id
+            true, // read-only caller
+            RelayControl::SwitchTab(7),
+        );
+        let resp =
+            result.expect("read-only caller with no match must get an explicit ack, not None");
+        assert!(
+            !resp.get_ref().ok,
+            "read-only caller with no exact match must fail closed"
+        );
+        assert!(
+            resp.get_ref().error.contains("reattach required"),
+            "error must explain reattach is required: {:?}",
+            resp.get_ref().error
+        );
+        assert!(
+            rx_rw.try_recv().is_err(),
+            "co-attached writable relay must NOT receive a command routed from a \
+             read-only caller with no connection_id"
+        );
+    }
+
+    #[test]
+    fn read_only_caller_stale_connection_id_fails_closed_no_writable_fallback() {
+        // Same isolation guarantee as above, but with a stale/guessed
+        // connection_id rather than an empty one.
+        let reg: ControlRegistry = Arc::new(dashmap::DashMap::new());
+        let (tx_rw, mut rx_rw) = mpsc::unbounded_channel::<RelayControl>();
+        reg.insert(
+            "conn-other-writer".to_owned(),
+            ControlEntry {
+                session: "sess-iso2".to_owned(),
+                sender: tx_rw,
+                read_only: false,
+            },
+        );
+
+        let result = try_route_control(
+            &reg,
+            "sess-iso2",
+            "guessed-stale-id",
+            true, // read-only caller
+            RelayControl::SwitchTab(8),
+        );
+        let resp =
+            result.expect("read-only caller with a stale id must get an explicit ack, not None");
+        assert!(
+            !resp.get_ref().ok,
+            "stale connection_id must fail closed for a read-only caller"
+        );
+        assert!(
+            rx_rw.try_recv().is_err(),
+            "co-attached writable relay must NOT be steered by a stale connection_id"
         );
     }
 
@@ -750,6 +954,30 @@ mod tests {
         let mut req = tonic::Request::new(());
         req.extensions_mut().insert(SessionReadOnly(false));
         assert!(reject_if_read_only(&req, "Test").is_ok());
+    }
+
+    // ─── session_is_read_only tests ──────────────────────────────────────────
+
+    #[test]
+    fn session_is_read_only_treats_absent_extension_as_read_only() {
+        // Same fail-closed default as `reject_if_read_only`: an ABSENT
+        // extension must never be read as writable.
+        let req = tonic::Request::new(());
+        assert!(super::session_is_read_only(&req));
+    }
+
+    #[test]
+    fn session_is_read_only_reflects_true() {
+        let mut req = tonic::Request::new(());
+        req.extensions_mut().insert(SessionReadOnly(true));
+        assert!(super::session_is_read_only(&req));
+    }
+
+    #[test]
+    fn session_is_read_only_reflects_false() {
+        let mut req = tonic::Request::new(());
+        req.extensions_mut().insert(SessionReadOnly(false));
+        assert!(!super::session_is_read_only(&req));
     }
 
     // ─── Proto ↔ BackendKind conversion tests ────────────────────────────────
