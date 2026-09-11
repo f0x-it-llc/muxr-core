@@ -291,10 +291,13 @@ pub fn open_attach(
 /// resolved `target` from `resume`.
 ///
 /// `Some` **only** when the client actually asked to resume: an empty
-/// [`ResumeTarget`] — a client that sent no hint, or one whose hint was dropped
-/// upstream (a read-only attach; see `relay::resume_target_for`) — yields `None`,
-/// which is what keeps the relay on its usual view-state init and makes such an
-/// attach byte-identical to the pre-resume behavior.
+/// [`ResumeTarget`] — a client that sent no `resume_*` fields, or one whose
+/// value was malformed and dropped by `resume_target` (proto3 defaults ARE
+/// the "unset" encoding) — yields `None`, which is what keeps the relay on
+/// its usual view-state init and makes such an attach byte-identical to the
+/// pre-resume behavior. Honoured identically on both tiers (see
+/// `relay::resume_target_for`): a read-only attach with a valid hint
+/// resolves `Some` exactly like a read-write one.
 fn resumed_view_for(resume: &ResumeTarget, target: &AttachTarget) -> Option<ResumedView> {
     (!resume.is_empty()).then(|| ResumedView {
         space_id: target.workspace_id.clone(),
@@ -754,8 +757,12 @@ fn pick_resume_pane(
 /// the workspace the attach resolved; the genuinely stable axis is the space
 /// hint (an opaque herdr id, not a registry number), which bounds every
 /// mis-resolution to the workspace the client asked for. Same class of damage as
-/// the daemon-global-focus default this feature replaces, never an authorization
-/// step (read-only attaches carry no hint at all).
+/// the daemon-global-focus default this feature replaces, never an
+/// authorization step: `resume_target_for` honours a hint on both tiers, but
+/// a read-only token already has pre-existing read access to every space's
+/// tab/pane structure via `GetSpaces` and `SessionRef.space_id` on
+/// `GetLayout` (neither gated for read-only), so landing on a hinted
+/// pane/tab discloses nothing a read-only client could not already see.
 ///
 /// The complete fix is to stamp ids with a **per-process epoch** (a value minted
 /// at muxrd start, echoed in `GetLayout` and back in `AttachReq`) and drop any

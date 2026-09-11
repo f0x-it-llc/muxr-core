@@ -340,12 +340,14 @@ pub(super) struct ShutdownGuard {
     pub(super) reader: Option<JoinHandle<u64>>,
     pub(super) rows: u16,
     pub(super) cols: u16,
-    /// When set, this attach is read-only and must NOT emit the teardown resize
-    /// nudge (review round-2 Major A): the nudge is a `TerminalResize`, which
-    /// re-triggers zellij's per-tab size recompute (the session-wide
-    /// `min_client_terminal_size` this used to cite was deleted in 0.45.1) and
-    /// could disturb a writer's tab geometry. For RO we rely solely on the
-    /// IPC-close path to wake the reader.
+    /// When set, this attach is read-only and skips the teardown resize
+    /// nudge, sending `ClientExited` instead: both wake the parked reader the
+    /// same way, but `ClientExited` avoids an extra `TerminalResize` at the
+    /// exact moment the connection is closing. (This attach's own geometry
+    /// already drove its tab's size on the way in, floored at
+    /// `MIN_TERMINAL_ROWS`/`MIN_TERMINAL_COLS` — see
+    /// `crate::relay::attach_relay` — so this is not a geometry-protection
+    /// boundary, just an unneeded resize avoided.)
     pub(super) read_only: bool,
     pub(super) session: String,
 }
@@ -362,13 +364,13 @@ impl Drop for ShutdownGuard {
         //      same dims — enough to provoke a redraw. RW already drives the
         //      session's geometry, so re-asserting its own size is a no-op.
         //
-        //    • RO (round-2 Major A): a TerminalResize would make zellij
-        //      recompute the shared min terminal size and could shrink a
-        //      writer's geometry, so we must NOT resize here. Instead send
-        //      `ClientExited`: the server removes this client and closes our
-        //      connection, which wakes the parked recv() (returns None) — and
-        //      *removing* a client can only raise/keep the min, never lower it,
-        //      so a read-only detach can never perturb a writer's geometry.
+        //    • RO: send `ClientExited` instead — the server removes this
+        //      client and closes our connection, which wakes the parked
+        //      recv() (returns None) just as well, without an extra resize at
+        //      the moment the client is leaving. (This attach's own geometry
+        //      already followed it in on the way up, floored at
+        //      MIN_TERMINAL_ROWS/MIN_TERMINAL_COLS; a teardown resize would be
+        //      bounded the same way — it is simply not needed.)
         //
         //    Errors are ignored — the socket may already be gone.
         if self.read_only {
