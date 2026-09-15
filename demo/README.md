@@ -16,8 +16,9 @@ context is just this directory and no Rust toolchain is needed.
 
 - Pair the app by scanning the QR (or entering the pairing URI).
 - Attach to a live, bar-less zellij session with an editor / monitors / logs,
-  **or** a herdr space — the demo serves **both backends**, so both session
-  types appear in the app's session list.
+  **or** a comparable herdr space (editor / shell / logs tabs, one of them
+  split) — the demo serves **both backends**, so both session types appear in
+  the app's session list with something to explore either way.
 - Read a real, read-only clone of this repository at `/opt/demo/muxr-core`:
   `git log`, `git show`, `rg`, `bat` and `nvim` all work against actual source.
 
