@@ -180,14 +180,28 @@ mod tests {
     use crate::multiplexer::{BackendSet, ZellijBackend};
     use crate::notify::devices::PushDeviceStore;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
+    /// A store on a path no other test in this binary can produce.
+    ///
+    /// The pid is shared by every test here, so uniqueness rested entirely on
+    /// the clock — and `SystemTime::now()` is coarse enough on macOS that two
+    /// tests starting together format the SAME nanos. They then share one
+    /// store file, and since several tests register the same `device_name`
+    /// under different platforms, one silently replaces another's entry: the
+    /// list assertion sees the right name with the wrong platform. Observed as
+    /// a macOS-only CI failure in `register_then_list_shows_prefix_only`.
+    /// The counter makes collision impossible rather than unlikely; mirrors
+    /// `multiplexer/herdr/control.rs`'s `unique_socket_path`.
     fn temp_store() -> (PushDeviceStore, std::path::PathBuf) {
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .expect("system clock")
             .as_nanos();
         let path = std::env::temp_dir().join(format!(
-            "muxrd-push-ops-test-{}-{secs}.json",
+            "muxrd-push-ops-test-{}-{secs}-{n}.json",
             std::process::id()
         ));
         (PushDeviceStore::at_path(path.clone()), path)
