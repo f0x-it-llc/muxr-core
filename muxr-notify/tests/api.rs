@@ -141,6 +141,8 @@ async fn notify_burst_over_ten_per_min_is_429() {
     let (router, _s, _d) = app(150);
     let handle = register_handle(&router, "tok").await;
     let body = format!(r#"{{"push_handle":"{handle}","kind":"blocked"}}"#);
+    // The bucket starts full and refill only ever adds (capped at capacity),
+    // so the first ten are allowed however slowly they run.
     for i in 0..10 {
         assert_eq!(
             notify(&router, &body).await,
@@ -148,7 +150,25 @@ async fn notify_burst_over_ten_per_min_is_429() {
             "send {i}"
         );
     }
-    assert_eq!(notify(&router, &body).await, StatusCode::TOO_MANY_REQUESTS);
+
+    // Beyond that the burst must be refused — but not necessarily on the very
+    // next send. The bucket refills at 10/minute, so a loaded runner that
+    // spreads those ten sends over six seconds hands a token back and the
+    // eleventh legitimately succeeds. That is what went red on CI: this suite
+    // finishes in 0.01 s locally and took 9.46 s there. Assert the property
+    // that actually holds — the burst is bounded — instead of pinning which
+    // send trips it. Passing all forty would need three minutes of refill.
+    let mut denied = false;
+    for _ in 0..40 {
+        if notify(&router, &body).await == StatusCode::TOO_MANY_REQUESTS {
+            denied = true;
+            break;
+        }
+    }
+    assert!(
+        denied,
+        "the per-handle burst limiter must refuse a sustained burst"
+    );
 }
 
 #[tokio::test]
