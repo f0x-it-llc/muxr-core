@@ -11,24 +11,33 @@
 //! behind it. Everything but the QR matrix itself is painted from the layer's
 //! own `PaintCtx`; the matrix needs a [`Frame`] (see [`paint_matrix`]), which
 //! only the caller of [`super::render`] holds, so it is painted over the layer
-//! immediately afterwards — the same way the toast stack is.
+//! immediately afterwards — the same way the toast stack is. The two halves
+//! share [`split`] and [`split_showing`], so the matrix always lands exactly
+//! where the chrome left room for it.
 
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::Style;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Clear, Paragraph};
-use ratcn::runtime::{DeclareCtx, PaintCtx, ScopeOptions};
+use ratcn::Button;
+use ratcn::runtime::{
+    Component, DeclareCtx, Event, EventCtx, EventResult, KeyCode, PaintCtx, ScopeOptions,
+};
 
 use crate::app::UiMsg;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
-use crate::app::state::tokens::{QrOverlay, QrOverlayPhase};
+use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
 use crate::tui::theme::{palette, styles};
 use crate::tui::widgets::qr::QrWidget;
 
 /// Rows the caption under the QR occupies.
 const INFO_ROWS: u16 = 5;
+
+/// Columns reserved for the Close control at the right of the bottom strip:
+/// the label plus ratcn's two cells of button padding on each side.
+const CLOSE_WIDTH: u16 = 9;
 
 /// Declare the QR overlay as a modal layer.
 pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
@@ -40,6 +49,12 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         move |ctx| {
             let area = ctx.area();
             ctx.paint(move |ctx| paint_chrome(ctx, area));
+            // Declared after the chrome so it paints over the strip, and so the
+            // layer has a focus target at all — a modal scope with nothing
+            // focusable inside parks focus outside itself, and then no key
+            // reaches the layer.
+            let (_, close_area) = split_strip(split(area).1);
+            ctx.component("qr_close", CloseControl::new(), close_area);
         },
     );
 }
@@ -62,6 +77,15 @@ fn split_showing(body: Rect) -> (Rect, Rect) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(13), Constraint::Length(INFO_ROWS)])
         .split(body);
+    (rows[0], rows[1])
+}
+
+/// Split the bottom strip into its caption and the Close control.
+fn split_strip(strip: Rect) -> (Rect, Rect) {
+    let rows = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(CLOSE_WIDTH)])
+        .split(strip);
     (rows[0], rows[1])
 }
 
@@ -97,7 +121,7 @@ fn paint_chrome(ctx: &mut PaintCtx<'_, AppState>, area: Rect) {
         QrOverlayPhase::Connected => paint_connected(ctx, body),
         QrOverlayPhase::Failed { err } => paint_failed(ctx, err, body),
     }
-    paint_bottom_strip(ctx, overlay, strip);
+    paint_bottom_strip(ctx, overlay, split_strip(strip).0);
 }
 
 /// Paint the QR matrix over the declared overlay.
@@ -230,4 +254,203 @@ fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, are
         Span::styled(overlay.token_name.clone(), styles::accent()),
     ]);
     ctx.widget(Paragraph::new(line), area);
+}
+
+// ── The Close control ─────────────────────────────────────────────────────────
+
+/// The layer's Close button, which also answers Esc.
+///
+/// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`/`dismiss_key`; a
+/// `modal_scope` in ratcn 0.0.3 has neither, and an open modal turns every key
+/// nothing inside it handled into `Consumed` rather than letting it bubble out
+/// to the app. So an Esc routed "through the reducer" would never arrive: the
+/// only place it can be answered is a component inside the layer. Answering it
+/// here, beside the Enter/Space the button already answers, is what makes the
+/// strip's "Esc close" true — and both emit [`TokensMsg::QrClose`], which never
+/// revokes the token being shown.
+struct CloseControl {
+    button: Button<UiMsg>,
+}
+
+impl CloseControl {
+    fn new() -> Self {
+        Self {
+            button: Button::new("Close")
+                .ghost()
+                .on_press(|| UiMsg::Tokens(TokensMsg::QrClose)),
+        }
+    }
+}
+
+impl Component<AppState, UiMsg> for CloseControl {
+    fn declare(&mut self, ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
+        Component::<AppState, UiMsg>::declare(&mut self.button, ctx);
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx<'_, AppState>) {
+        Component::<AppState, UiMsg>::paint(&mut self.button, ctx);
+    }
+
+    fn handle_event(
+        &mut self,
+        event: &Event,
+        state: &AppState,
+        ctx: &mut EventCtx<'_>,
+    ) -> EventResult<UiMsg> {
+        if let Event::Key(key) = event
+            && key.code == KeyCode::Esc
+            && !key.modifiers.any()
+        {
+            return EventResult::Emit(UiMsg::Tokens(TokensMsg::QrClose));
+        }
+        Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx)
+    }
+
+    fn scope_options(&self) -> ScopeOptions {
+        Component::<AppState, UiMsg>::scope_options(&self.button)
+    }
+
+    fn interaction_area(&self, area: Rect) -> Rect {
+        Component::<AppState, UiMsg>::interaction_area(&self.button, area)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::state::tokens::QrOverlay;
+    use crate::app::{Message, update};
+    use crate::tui::runner::build_ratcn;
+    use crate::tui::views::render;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use ratcn::Theme;
+    use ratcn::runtime::{Event, KeyEvent, Ratcn};
+
+    struct Harness {
+        terminal: Terminal<TestBackend>,
+        ratcn: Ratcn<AppState, UiMsg>,
+        theme: Theme,
+        state: AppState,
+    }
+
+    impl Harness {
+        fn new(width: u16, height: u16) -> Self {
+            let mut harness = Self {
+                terminal: Terminal::new(TestBackend::new(width, height)).expect("terminal"),
+                ratcn: build_ratcn(),
+                theme: crate::tui::theme::muxr(),
+                state: AppState::new(),
+            };
+            harness.draw();
+            harness
+        }
+
+        fn draw(&mut self) {
+            let Self {
+                terminal,
+                ratcn,
+                theme,
+                state,
+            } = self;
+            terminal
+                .draw(|frame| render(frame, ratcn, state, theme))
+                .expect("draw");
+        }
+
+        fn screen(&self) -> String {
+            let buffer = self.terminal.backend().buffer();
+            let area = buffer.area;
+            (0..area.height)
+                .map(|y| {
+                    (0..area.width)
+                        .map(|x| buffer[(x, y)].symbol())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }
+
+        /// Open the layer directly in `phase`, the way the reducer would.
+        fn open(&mut self, phase: QrOverlayPhase) {
+            self.state.tokens.qr_overlay = Some(QrOverlay {
+                phase,
+                seq: 1,
+                baseline_clients: 0,
+                token_name: "phone".to_string(),
+                read_only: true,
+                tick_counter: 0,
+            });
+            self.state.open_dialog(DialogId::Qr);
+            self.draw();
+        }
+    }
+
+    fn showing() -> QrOverlayPhase {
+        QrOverlayPhase::Showing {
+            uri: "muxr://pair?v=2&h=10.0.0.1&p=50051&t=abcdefghijklmnop&ro=1&tm=pin".to_string(),
+            host: "10.0.0.1".to_string(),
+            port: 50051,
+            fingerprint_short: "ab:cd:ef…".to_string(),
+        }
+    }
+
+    /// The QR block does not fit a 40×12 terminal, so the widget prints its
+    /// fallback instead — which is the whole reason the matrix is painted from
+    /// the frame rather than the layer's canvas.
+    #[test]
+    fn the_layer_falls_back_to_text_on_a_small_terminal() {
+        let mut harness = Harness::new(40, 12);
+        harness.open(showing());
+        let screen = harness.screen();
+        assert!(
+            screen.contains("terminal too small"),
+            "expected the QR fallback:\n{screen}"
+        );
+    }
+
+    #[test]
+    fn the_bottom_strip_reports_the_token_and_its_access() {
+        let mut harness = Harness::new(80, 24);
+        harness.open(showing());
+        let screen = harness.screen();
+        assert!(screen.contains("Esc close"), "no dismiss hint:\n{screen}");
+        assert!(screen.contains("ro=on"), "no access flag:\n{screen}");
+        assert!(screen.contains("phone"), "no token name:\n{screen}");
+        assert!(screen.contains("Close"), "no close control:\n{screen}");
+    }
+
+    #[test]
+    fn the_generating_phase_says_what_it_is_doing() {
+        let mut harness = Harness::new(80, 24);
+        harness.open(QrOverlayPhase::Generating);
+        assert!(
+            harness.screen().contains("Generating pairing code"),
+            "no progress copy:\n{}",
+            harness.screen()
+        );
+    }
+
+    /// Esc is answered inside the layer (see [`CloseControl`]) and closes it
+    /// without revoking the token it showed.
+    #[test]
+    fn esc_closes_the_layer_and_revokes_nothing() {
+        let mut harness = Harness::new(80, 24);
+        harness.open(showing());
+        let key = KeyEvent::new(KeyCode::Esc);
+        let result = harness.ratcn.handle_event(Event::Key(key), &harness.state);
+        let EventResult::Emit(msg) = result else {
+            panic!("Esc must emit from inside the layer, got {result:?}");
+        };
+        let actions = update(&mut harness.state, Message::Ui(msg));
+        assert!(harness.state.tokens.qr_overlay.is_none());
+        assert_eq!(harness.state.top_dialog(), None);
+        assert!(
+            actions
+                .iter()
+                .all(|action| !matches!(action, crate::app::UpdateAction::RevokeToken(_)))
+        );
+    }
 }
