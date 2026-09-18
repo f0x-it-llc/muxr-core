@@ -12,12 +12,7 @@ pub mod styles;
 /// `ratcn::Theme` is `#[non_exhaustive]` with public fields, so a theme is
 /// authored by starting from a preset and overriding the fields that carry
 /// the muxrctl palette rather than with a struct literal.
-///
-/// No screen wires the ratcn runtime in yet — that lands in a later wave —
-/// so nothing but this module's own test calls it; suppress the resulting
-/// dead-code warning rather than dropping the function until then.
 #[must_use]
-#[allow(dead_code)]
 pub const fn muxr() -> ratcn::Theme {
     let mut theme = ratcn::Theme::default_dark();
     theme.name = "Muxr";

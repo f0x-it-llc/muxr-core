@@ -1,13 +1,13 @@
 //! muxrctl — install / configure / pair TUI for muxrd.
 //!
-//! A standalone ratatui control panel that drives muxrd's library + CLI
+//! A standalone ratatui + ratcn control panel that drives muxrd's library + CLI
 //! surface (config / cert / tokens / control / pairing). This binary wires up
 //! logging, the terminal, the panic hook, the tokio runtime, and hands off to
 //! the event loop in [`tui::runner`].
 //!
 //! Architecture (TEA, single crate):
 //! - [`app`] — pure state / message / update / action (no ratatui).
-//! - [`tui`] — terminal lifecycle, event loop, theme, screen rendering.
+//! - [`tui`] — terminal lifecycle, event loop, theme, ratcn rendering.
 
 mod app;
 mod pairing;

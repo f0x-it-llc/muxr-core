@@ -1,19 +1,26 @@
 //! Messages: the only way state changes.
 //!
-//! A `Message` is produced by the runner (terminal input, ticks) or by async
-//! tasks spawned from [`super::action::UpdateAction`], then fed to
-//! [`super::update::update`]. This is the sole input to the TEA update cycle.
+//! A `Message` is produced by the runner (keys ratcn did not handle, ticks),
+//! by the ratcn runtime (every [`UiMsg`] a component emits), or by async tasks
+//! spawned from [`super::action::UpdateAction`]. It is the sole input to the
+//! TEA update cycle.
 
-use crossterm::event::KeyEvent;
+use ratcn::runtime::{FocusState, KeyEvent};
 
 use crate::server::devices::DeviceRecord;
 use crate::server::tokens::TokenRecord;
 
-use super::state::{Screen, ServerInfo};
+use super::state::cert::{CertMsg, TlsMode};
+use super::state::config::ConfigMsg;
+use super::state::devices::DevicesMsg;
+use super::state::server::ServerMsg;
+use super::state::tokens::TokensMsg;
+use super::state::wizard::WizardMsg;
+use super::state::{DialogId, ServerInfo};
 
 /// A lightweight snapshot of the effective server configuration.
 ///
-/// Plain struct (no ratatui, no proto types) that the Config screen renders.
+/// Plain struct (no drawing or proto types) that the Config dialog renders.
 /// Populated from `server::effective_config()` + `pairing::net::reachable_ipv4()`.
 #[derive(Debug, Clone)]
 pub struct ConfigSnapshot {
@@ -32,18 +39,48 @@ pub struct ConfigSnapshot {
     pub advertise_sans: Vec<String>,
 }
 
+/// Everything a declared component can ask the app for.
+///
+/// This is the message type the ratcn runtime is parameterised over: focus
+/// moves, dialog open/close, and one wrapper per feature reducer.
+#[derive(Debug, Clone)]
+pub enum UiMsg {
+    /// The runtime moved keyboard focus; store the new snapshot.
+    Focus(FocusState),
+    /// Open a dialog (and run whatever loads it needs).
+    Open(DialogId),
+    /// Close the top dialog. (Each feature's own `Close` message is what the
+    /// dialogs emit; this is the un-attributed close a later card can reach for.)
+    #[allow(dead_code)]
+    Close,
+    /// Config dialog.
+    Config(ConfigMsg),
+    /// Daemon controls.
+    Server(ServerMsg),
+    /// Cert dialogs.
+    Cert(CertMsg),
+    /// Token dialogs.
+    Tokens(TokensMsg),
+    /// Devices dialogs.
+    Devices(DevicesMsg),
+    /// Setup wizard.
+    Wizard(WizardMsg),
+}
+
 /// Everything that can drive a state change.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Some variants emitted only by async tasks or later waves.
 pub enum Message {
-    /// A key was pressed (delivered by the runner's input poll).
+    /// A key the ratcn runtime did not handle (delivered by the runner).
     Key(KeyEvent),
-    /// The ~50 ms wall-clock tick (poll timeout path). Drives animations + live poll counter.
+    /// The ~50 ms wall-clock tick (poll timeout path). Drives the live poll counter.
     Tick,
     /// Request a clean shutdown; the runner restores the terminal and exits.
+    /// Quitting from a key sets `should_quit` directly, so nothing posts this
+    /// today — it is the shutdown path an async task would use.
+    #[allow(dead_code)]
     Quit,
-    /// Navigate to a specific screen.
-    NavTo(Screen),
+    /// A message emitted by a declared component.
+    Ui(UiMsg),
 
     // ── Async task results ──────────────────────────────────────────────────
     /// Server status result, posted by a `RefreshStatus` task.
@@ -59,12 +96,25 @@ pub enum Message {
         fingerprint: String,
         sans: Vec<String>,
     },
+    /// Read-only cert info for the dashboard's Certificate section.
+    ///
+    /// Posted by a [`super::action::UpdateAction::LoadCertInfo`] task via the
+    /// read-only facade — never regenerates the cert.
+    CertInfoLoaded {
+        /// SHA-256 fingerprint of the on-disk cert, or `None` if no cert exists.
+        fingerprint: Option<String>,
+        /// SANs read from the persisted SAN sidecar (`server.san.json`).
+        sans: Vec<String>,
+    },
+    /// The daemon's reported transport identity, posted by a `LoadCertMode`
+    /// task. `None` when the daemon is not running.
+    CertModeLoaded(Option<TlsMode>),
     /// A background action failed with a human-readable error message.
     ActionFailed(String),
-    /// A background action completed successfully with an optional message.
+    /// A background action completed successfully with a message.
     ActionOk(String),
 
-    // ── Token screen messages ─────────────────────────────────────────────────
+    // ── Token messages ────────────────────────────────────────────────────────
     /// Tokens list loaded from the token DB.
     TokensLoaded(Vec<TokenRecord>),
 
@@ -81,7 +131,7 @@ pub enum Message {
     /// A token operation (create/revoke) completed; the list needs a refresh.
     TokensChanged,
 
-    // ── Devices screen messages ───────────────────────────────────────────────
+    // ── Devices messages ──────────────────────────────────────────────────────
     /// Push devices + relay URL loaded, posted by a `LoadDevices` task.
     DevicesLoaded {
         /// All registered push devices.
@@ -118,17 +168,5 @@ pub enum Message {
         err: String,
         /// Sequence number (must match current overlay seq to be accepted).
         seq: u64,
-    },
-
-    // ── Dashboard screen messages ─────────────────────────────────────────────
-    /// Read-only cert info for the Dashboard overview.
-    ///
-    /// Posted by a [`super::action::UpdateAction::LoadCertInfo`] task via the
-    /// read-only facade — never regenerates the cert.
-    CertInfoLoaded {
-        /// SHA-256 fingerprint of the on-disk cert, or `None` if no cert exists.
-        fingerprint: Option<String>,
-        /// SANs read from the persisted SAN sidecar (`server.san.json`).
-        sans: Vec<String>,
     },
 }

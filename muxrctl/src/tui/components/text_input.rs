@@ -12,13 +12,6 @@
 //! component reads the current value through a binding and emits a message
 //! with the whole new value on every edit; nothing here mutates app state
 //! directly.
-//!
-//! No screen declares a `TextInput` yet — that lands in a later wave — so
-//! nothing outside this module's own tests uses its public items; suppress
-//! the resulting dead-code warnings module-wide rather than reintroducing
-//! them each wave, the way `theme/palette.rs` and `theme/styles.rs` do for
-//! the same reason.
-#![allow(dead_code)]
 
 use std::{fmt, rc::Rc};
 
@@ -204,6 +197,7 @@ impl<S, M> TextInput<S, M> {
     /// Draw a `Block::bordered()` box around the one text row. Defaults to
     /// `true`; `false` paints the row alone on [`TextInputStyle::background`].
     #[must_use]
+    #[allow(dead_code)] // no dialog declares a borderless field yet.
     pub const fn bordered(mut self, bordered: bool) -> Self {
         self.bordered = bordered;
         self
@@ -211,6 +205,7 @@ impl<S, M> TextInput<S, M> {
 
     /// Supply exact colors, taking precedence over the theme.
     #[must_use]
+    #[allow(dead_code)] // no dialog overrides the theme's field colors yet.
     pub fn style(mut self, style: impl Fn(&Theme) -> TextInputStyle + 'static) -> Self {
         self.style = Some(Rc::new(style));
         self
