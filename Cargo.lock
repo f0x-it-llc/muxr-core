@@ -2406,6 +2406,7 @@ dependencies = [
  "muxrd",
  "qrcode",
  "ratatui",
+ "ratcn",
  "tokio",
  "tui-qrcode",
  "zellij-utils",
@@ -3271,6 +3272,17 @@ dependencies = [
  "serde",
  "strum",
  "time",
+ "unicode-segmentation",
+ "unicode-width 0.2.2",
+]
+
+[[package]]
+name = "ratcn"
+version = "0.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75c2a4b0de6235b0ecaeb49a50460324b2eddf6f8b792bb283206acf06d1de9a"
+dependencies = [
+ "ratatui",
  "unicode-segmentation",
  "unicode-width 0.2.2",
 ]

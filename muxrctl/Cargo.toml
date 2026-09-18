@@ -21,6 +21,11 @@ muxrd = { path = "../muxrd" }
 ratatui = "0.30"
 crossterm = "0.29"
 
+# Interactive component runtime on top of ratatui (focus/hover/event routing,
+# Theme, TextInput-style components). The API is unstable (preview release);
+# pin the exact version.
+ratcn = { version = "=0.0.3", features = ["crossterm"] }
+
 # Async runtime — UpdateAction tasks post results back over an mpsc channel.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }
 
