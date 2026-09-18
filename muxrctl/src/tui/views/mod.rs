@@ -10,7 +10,7 @@ use ratatui::Frame;
 use ratatui::style::Style;
 use ratatui::widgets::Block;
 use ratcn::runtime::{DeclareCtx, Ratcn};
-use ratcn::{Button, Dialog, Theme, ToastPosition, ToasterWidget};
+use ratcn::{Theme, ToastPosition, ToasterWidget};
 
 use crate::app::UiMsg;
 use crate::app::state::{AppState, DialogId};
@@ -46,8 +46,21 @@ pub fn render(
         }
     });
 
-    // The QR matrix needs the frame (see `qr_overlay::paint_matrix`).
-    qr_overlay::paint_matrix(frame, state, area);
+    // The QR matrix needs the frame (see `qr_overlay::paint_matrix`), so it is
+    // painted after the ratcn pass — but only for the layer on top, and only
+    // where that layer put it.
+    match state.top_dialog() {
+        // The Tokens flow's fullscreen layer: the matrix lands in the frame it
+        // laid its own chrome out in.
+        Some(DialogId::Qr) => qr_overlay::paint_matrix(frame, state, area),
+        // The wizard's Pair step: a rect inside its 72-cell panel, which the
+        // wizard owns, measures and paints itself.
+        Some(DialogId::Wizard) => wizard::paint_pair_matrix(frame, state, area),
+        // Anything else — the wizard on another step, a dialog stacked over
+        // either layer, a lingering overlay behind the dashboard — gets no
+        // matrix, which is what keeps it off the panel it would cover.
+        _ => {}
+    }
 
     // Toasts sit outside the ratcn pass so an open dialog's backdrop never
     // dims them.
@@ -84,32 +97,11 @@ fn declare_dialog(ctx: &mut DeclareCtx<'_, AppState, UiMsg>, id: Option<DialogId
     }
 }
 
-/// A placeholder dialog: the title its feature will keep, one Close action, and
-/// Esc bound to the same message.
-///
-/// The cert, tokens, devices and wizard cards each replace their own
-/// `declare*` body; the id strings and the message each emits are already the
-/// ones those cards inherit.
-pub(crate) fn stub_dialog(
-    ctx: &mut DeclareCtx<'_, AppState, UiMsg>,
-    id: DialogId,
-    title: &'static str,
-    action_id: &'static str,
-    on_close: fn() -> UiMsg,
-) {
-    let area = ctx.frame_area();
-    let dialog = Dialog::new()
-        .title(title)
-        .description("Coming in the next wave.")
-        .action(action_id, Button::new("Close").on_press(on_close))
-        .on_dismiss(on_close);
-    ctx.modal(id.id(), dialog, area);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::state::DialogId;
+    use crate::app::state::tokens::{QrOverlay, QrOverlayPhase};
     use crate::app::{Message, update};
     use crate::tui::runner::build_ratcn;
     use ratatui::Terminal;
@@ -127,8 +119,12 @@ mod tests {
 
     impl Harness {
         fn new() -> Self {
+            Self::sized(80, 24)
+        }
+
+        fn sized(width: u16, height: u16) -> Self {
             let mut harness = Self {
-                terminal: Terminal::new(TestBackend::new(80, 24)).expect("terminal"),
+                terminal: Terminal::new(TestBackend::new(width, height)).expect("terminal"),
                 ratcn: build_ratcn(),
                 theme: crate::tui::theme::muxr(),
                 state: AppState::new(),
@@ -181,6 +177,83 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join("\n")
         }
+
+        /// The bounding box of every white cell — the QR block paints its quiet
+        /// zone white and nothing else in the app does, so this is where (and
+        /// whether) the matrix landed.
+        fn white_box(&self) -> Option<ratatui::layout::Rect> {
+            let buffer = self.terminal.backend().buffer();
+            let area = buffer.area;
+            let mut hit: Option<(u16, u16, u16, u16)> = None;
+            for y in 0..area.height {
+                for x in 0..area.width {
+                    if buffer[(x, y)].bg != ratatui::style::Color::White {
+                        continue;
+                    }
+                    hit = Some(match hit {
+                        None => (x, y, x, y),
+                        Some((x0, y0, x1, y1)) => (x0.min(x), y0.min(y), x1.max(x), y1.max(y)),
+                    });
+                }
+            }
+            hit.map(|(x0, y0, x1, y1)| ratatui::layout::Rect::new(x0, y0, x1 - x0 + 1, y1 - y0 + 1))
+        }
+
+        /// A `Showing` overlay, the way the Tokens flow leaves one.
+        fn showing_overlay(&mut self) {
+            self.state.tokens.qr_overlay = Some(QrOverlay {
+                phase: QrOverlayPhase::Showing {
+                    uri: "muxr://pair?v=2&h=10.0.0.5&p=50051&t=abcdefghijklmnopqrst&ro=1&tm=pin"
+                        .to_string(),
+                    host: "10.0.0.5".to_string(),
+                    port: 50051,
+                    fingerprint_short: "ab:cd:ef…".to_string(),
+                },
+                seq: 1,
+                baseline_clients: 0,
+                token_name: "phone".to_string(),
+                read_only: true,
+                tick_counter: 0,
+            });
+        }
+    }
+
+    /// The Tokens flow's fullscreen layer keeps the whole frame: `render`'s gate
+    /// hands `paint_matrix` the frame area exactly as before the wizard existed.
+    #[test]
+    fn the_qr_dialog_still_gets_the_matrix_over_the_whole_frame() {
+        let mut harness = Harness::sized(100, 44);
+        harness.showing_overlay();
+        harness.state.open_dialog(DialogId::Qr);
+        harness.draw();
+
+        let painted = harness
+            .white_box()
+            .expect("the fullscreen matrix did not paint");
+        assert!(
+            painted.width >= 41 && painted.height >= 19,
+            "the fullscreen layer painted a {painted:?} block"
+        );
+        assert!(
+            harness.screen().contains("Scan with the Muxr app"),
+            "the layer lost its caption:\n{}",
+            harness.screen()
+        );
+    }
+
+    /// Only the topmost layer gets a matrix: one stacked over the QR layer is
+    /// not painted over.
+    #[test]
+    fn a_dialog_stacked_over_the_qr_layer_gets_no_matrix() {
+        let mut harness = Harness::sized(100, 44);
+        harness.showing_overlay();
+        harness.state.open_dialog(DialogId::Qr);
+        harness.state.open_dialog(DialogId::TokenMinted);
+        harness.draw();
+        assert!(
+            harness.white_box().is_none(),
+            "the matrix painted over the dialog on top of it"
+        );
     }
 
     #[test]
