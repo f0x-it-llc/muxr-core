@@ -1,18 +1,57 @@
-//! The certificate reducer — a stub for the cert card, plus the SAN derivation
-//! the cert card owns.
+//! The certificate reducer: the Certificate dialog, its explainer, its
+//! regenerate confirmation, and the SAN derivation all three read.
 
 use crate::app::action::UpdateAction;
-use crate::app::state::cert::{CertMsg, TlsMode};
-use crate::app::state::{AppState, San};
+use crate::app::state::cert::{AdvertiseTrust, CertMsg, TlsMode};
+use crate::app::state::{AppState, DialogId, San};
 
-/// Apply a [`CertMsg`]. The cert card extends this.
+/// The SANs muxrd always bakes into a certificate, whatever else is requested
+/// (`docs/CORE_CONFIGURATION.md` § muxrd: `--san` and `MUXRD_SAN` extend this
+/// pair, they never replace it). The cert sidecar records only the extras, so
+/// both SAN columns prepend these to be comparable.
+const BUILT_IN_SANS: [&str; 2] = ["127.0.0.1", "localhost"];
+
+/// Apply a [`CertMsg`].
 pub fn update(state: &mut AppState, msg: CertMsg) -> Vec<UpdateAction> {
     match msg {
-        CertMsg::Close => super::close_top(state),
+        CertMsg::Close | CertMsg::CloseHelp | CertMsg::RegenerateCancelled => {
+            super::close_top(state)
+        }
+        CertMsg::TrustChanged(index) => {
+            let trust = AdvertiseTrust::from_index(index);
+            state.cert.advertise_trust = trust;
+            vec![UpdateAction::SaveAdvertiseTrust(trust)]
+        }
+        CertMsg::OpenHelp => {
+            state.cert.help_scroll = 0;
+            super::open_hook(state, DialogId::CertHelp)
+        }
+        CertMsg::HelpScrolled(offset) => {
+            state.cert.help_scroll = offset;
+            Vec::new()
+        }
+        CertMsg::RegenerateRequested => super::open_hook(state, DialogId::CertRegenConfirm),
+        CertMsg::RegenerateConfirmed => {
+            // Closed directly rather than through `close_top`: that path would
+            // also dispatch the confirmation's `LoadCertInfo`, which would race
+            // the regeneration we are about to start. `on_cert_ensured` issues
+            // that read itself once the new cert is on disk.
+            state.close_dialog();
+            state.cert.loading = true;
+            vec![UpdateAction::EnsureCert(build_sans_from_config(state))]
+        }
+        CertMsg::Refresh => {
+            state.cert.loading = true;
+            vec![UpdateAction::LoadCertInfo, UpdateAction::LoadCertMode]
+        }
     }
 }
 
 /// A cert was (re)generated: adopt its fingerprint and SANs.
+///
+/// The toast is the re-pair warning landing where the operator is looking; the
+/// follow-up read re-syncs the SAN sidecar, which is what the dialog's
+/// "Current" column shows.
 pub fn on_cert_ensured(
     state: &mut AppState,
     fingerprint: String,
@@ -21,7 +60,8 @@ pub fn on_cert_ensured(
     state.cert.fingerprint = Some(fingerprint);
     state.cert.sans = sans;
     state.cert.loading = false;
-    Vec::new()
+    state.toast_ok("Certificate ready — re-pair every phone");
+    vec![UpdateAction::LoadCertInfo]
 }
 
 /// A passive read of the on-disk cert (never regenerates).
@@ -63,7 +103,6 @@ pub fn on_cert_mode_loaded(state: &mut AppState, mode: Option<TlsMode>) -> Vec<U
 /// When the bind host is `0.0.0.0` (wildcard) — the common tailnet scenario — it
 /// is **omitted** as a SAN (a wildcard SAN is meaningless to TLS clients). Only the
 /// real interface IPs from `reachable_ips` are added.
-#[allow(dead_code)] // called by the cert card's regenerate action.
 pub fn build_sans_from_config(state: &AppState) -> Vec<San> {
     let mut seen = std::collections::HashSet::new();
     let mut sans: Vec<San> = Vec::new();
@@ -115,6 +154,40 @@ pub fn build_sans_from_config(state: &AppState) -> Vec<San> {
     }
 
     sans
+}
+
+/// Every SAN the certificate would carry after a regenerate: the built-ins plus
+/// whatever [`build_sans_from_config`] derives from the live configuration.
+///
+/// This is the "Planned after regenerate" column, and the exact list
+/// `CertMsg::RegenerateConfirmed` asks the daemon's cert code for (the built-ins
+/// are added by muxrd itself, so they are shown but never sent).
+pub fn planned_sans(state: &AppState) -> Vec<String> {
+    dedup(
+        BUILT_IN_SANS.iter().map(|s| (*s).to_string()).chain(
+            build_sans_from_config(state)
+                .iter()
+                .map(|s| s.value().to_string()),
+        ),
+    )
+}
+
+/// Every SAN the certificate on disk carries: the built-ins plus the extras
+/// recorded in the SAN sidecar (`server.san.json`), which is what
+/// `LoadCertInfo` reads into `state.cert.sans`.
+pub fn current_sans(state: &AppState) -> Vec<String> {
+    dedup(
+        BUILT_IN_SANS
+            .iter()
+            .map(|s| (*s).to_string())
+            .chain(state.cert.sans.iter().cloned()),
+    )
+}
+
+/// Drop repeats, preserving first-seen order.
+fn dedup(values: impl Iterator<Item = String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    values.filter(|value| seen.insert(value.clone())).collect()
 }
 
 #[cfg(test)]
@@ -293,5 +366,194 @@ mod tests {
                 .iter()
                 .any(|a| matches!(a, UpdateAction::LoadCertInfo))
         );
+    }
+
+    // ── The dialog's own messages ─────────────────────────────────────────────
+
+    /// The Cert dialog open over a configuration that derives one extra SAN.
+    fn cert_dialog_state() -> AppState {
+        use std::net::Ipv4Addr;
+        let mut state = AppState::new();
+        state.config.host = "0.0.0.0".to_string();
+        state.config.reachable_ips = vec![Ipv4Addr::new(192, 168, 1, 10)];
+        update(&mut state, Message::Ui(UiMsg::Open(DialogId::Cert)));
+        // Opening dispatches three loads; pretend they have landed.
+        state.cert.loading = false;
+        state
+    }
+
+    fn cert(state: &mut AppState, msg: CertMsg) -> Vec<UpdateAction> {
+        update(state, Message::Ui(UiMsg::Cert(msg)))
+    }
+
+    #[test]
+    fn trust_changed_adopts_the_index_and_persists_it() {
+        let mut state = cert_dialog_state();
+        for (index, expected) in [
+            (1, AdvertiseTrust::Ca),
+            (2, AdvertiseTrust::Pin),
+            (0, AdvertiseTrust::Auto),
+        ] {
+            let actions = cert(&mut state, CertMsg::TrustChanged(index));
+            assert_eq!(state.cert.advertise_trust, expected);
+            assert!(
+                actions.iter().any(|a| matches!(
+                    a,
+                    UpdateAction::SaveAdvertiseTrust(trust) if *trust == expected
+                )),
+                "index {index} did not persist {expected:?}: {actions:?}"
+            );
+            // The cycle stays open while the operator changes their mind.
+            assert_eq!(state.top_dialog(), Some(DialogId::Cert));
+        }
+    }
+
+    #[test]
+    fn help_opens_over_the_dialog_scrolls_and_closes_back_to_it() {
+        let mut state = cert_dialog_state();
+        state.cert.help_scroll = 7;
+
+        cert(&mut state, CertMsg::OpenHelp);
+        assert_eq!(state.top_dialog(), Some(DialogId::CertHelp));
+        assert_eq!(state.cert.help_scroll, 0, "help opens at the top");
+
+        assert!(cert(&mut state, CertMsg::HelpScrolled(4)).is_empty());
+        assert_eq!(state.cert.help_scroll, 4);
+
+        cert(&mut state, CertMsg::CloseHelp);
+        assert_eq!(
+            state.top_dialog(),
+            Some(DialogId::Cert),
+            "closing the explainer returns to the certificate dialog"
+        );
+    }
+
+    #[test]
+    fn regenerate_is_confirmed_before_anything_is_written() {
+        let mut state = cert_dialog_state();
+
+        let actions = cert(&mut state, CertMsg::RegenerateRequested);
+        assert_eq!(state.top_dialog(), Some(DialogId::CertRegenConfirm));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::EnsureCert(_))),
+            "asking must not regenerate: {actions:?}"
+        );
+        assert!(!state.cert.loading);
+
+        let actions = cert(&mut state, CertMsg::RegenerateConfirmed);
+        assert_eq!(state.top_dialog(), Some(DialogId::Cert));
+        assert!(state.cert.loading);
+        let sans = actions
+            .iter()
+            .find_map(|a| match a {
+                UpdateAction::EnsureCert(sans) => Some(sans.clone()),
+                _ => None,
+            })
+            .expect("EnsureCert expected");
+        assert_eq!(
+            sans.iter().map(San::value).collect::<Vec<_>>(),
+            build_sans_from_config(&state)
+                .iter()
+                .map(San::value)
+                .collect::<Vec<_>>(),
+            "regeneration must request exactly the planned SANs"
+        );
+    }
+
+    #[test]
+    fn cancelling_the_confirmation_regenerates_nothing() {
+        let mut state = cert_dialog_state();
+        cert(&mut state, CertMsg::RegenerateRequested);
+        let actions = cert(&mut state, CertMsg::RegenerateCancelled);
+        assert_eq!(state.top_dialog(), Some(DialogId::Cert));
+        assert!(
+            !actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::EnsureCert(_))),
+            "cancelling must not regenerate: {actions:?}"
+        );
+    }
+
+    #[test]
+    fn refresh_rereads_the_cert_and_the_live_mode() {
+        let mut state = cert_dialog_state();
+        let actions = cert(&mut state, CertMsg::Refresh);
+        assert!(state.cert.loading);
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::LoadCertInfo))
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::LoadCertMode))
+        );
+    }
+
+    #[test]
+    fn cert_ensured_warns_about_re_pairing_and_rereads_the_sidecar() {
+        let mut state = cert_dialog_state();
+        state.cert.loading = true;
+        let actions = update(
+            &mut state,
+            Message::CertEnsured {
+                fingerprint: "ab".repeat(32),
+                sans: vec!["192.168.1.10".to_string()],
+            },
+        );
+        assert!(!state.cert.loading);
+        assert_eq!(
+            state.ui.toasts.len(),
+            1,
+            "the re-pair warning must be shown"
+        );
+        assert!(
+            actions
+                .iter()
+                .any(|a| matches!(a, UpdateAction::LoadCertInfo))
+        );
+    }
+
+    // ── The two SAN columns ───────────────────────────────────────────────────
+
+    #[test]
+    fn both_san_columns_lead_with_the_built_ins() {
+        let mut state = cert_dialog_state();
+        state.cert.sans = vec!["10.0.0.1".to_string()];
+        for column in [current_sans(&state), planned_sans(&state)] {
+            assert_eq!(&column[..2], &["127.0.0.1", "localhost"], "{column:?}");
+        }
+    }
+
+    #[test]
+    fn planned_sans_shows_what_a_regenerate_would_add() {
+        let mut state = cert_dialog_state();
+        state.cert.sans = Vec::new();
+        let planned = planned_sans(&state);
+        assert!(
+            planned.contains(&"192.168.1.10".to_string()),
+            "reachable IP missing: {planned:?}"
+        );
+        assert!(
+            !current_sans(&state).contains(&"192.168.1.10".to_string()),
+            "the current column must show only what the sidecar records"
+        );
+    }
+
+    #[test]
+    fn san_columns_never_repeat_an_address() {
+        let mut state = cert_dialog_state();
+        // The sidecar can legitimately echo a built-in back at us.
+        state.cert.sans = vec!["127.0.0.1".to_string(), "192.168.1.10".to_string()];
+        state.config.advertise_sans = vec!["192.168.1.10".to_string()];
+        for column in [current_sans(&state), planned_sans(&state)] {
+            let mut sorted = column.clone();
+            sorted.sort();
+            sorted.dedup();
+            assert_eq!(sorted.len(), column.len(), "duplicate SAN in {column:?}");
+        }
     }
 }
