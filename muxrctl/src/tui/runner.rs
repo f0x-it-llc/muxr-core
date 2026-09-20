@@ -478,8 +478,9 @@ fn build_token_qr_task(
             Ok(Some(fp)) => PairingTrust::Pin { fingerprint: fp },
             Ok(None) => {
                 return Message::TokenQrFailed {
-                    err: "No certificate yet — open the Cert screen and generate one first."
-                        .to_string(),
+                    err:
+                        "No certificate yet — open the Certificate dialog (e) and regenerate first."
+                            .to_string(),
                     seq,
                 };
             }
@@ -510,15 +511,15 @@ fn build_token_qr_task(
                 //
                 // If the operator is actually behind a CA-fronted proxy AND the
                 // server reports SelfSigned (Recipe B), they should override via
-                // the `t` toggle to force `Ca` explicitly.  The Cert screen shows
-                // an advisory hint when the host looks like a DNS name + SelfSigned
+                // the trust cycle to force `Ca` explicitly.  The Certificate dialog
+                // shows an advisory hint when the host looks like a DNS name + SelfSigned
                 // (Finding 2), nudging the operator toward that override.
                 match crate::server::current_cert_fingerprint() {
                     Ok(Some(fp)) => PairingTrust::Pin { fingerprint: fp },
                     Ok(None) => {
                         return Message::TokenQrFailed {
-                            err: "No certificate yet — open the Cert screen and \
-                                  generate one first."
+                            err: "No certificate yet — open the Certificate dialog (e) \
+                                  and regenerate first."
                                 .to_string(),
                             seq,
                         };
