@@ -1,7 +1,7 @@
 //! net — reachable IPv4 address discovery.
 //!
 //! Returns non-loopback, non-link-local IPv4 addresses the mobile client could
-//! plausibly reach (LAN candidates).  Used by the Config screen to
+//! plausibly reach (LAN candidates).  Used by the Configure dialog to
 //! populate the address picker for the pairing QR.
 
 use std::net::Ipv4Addr;

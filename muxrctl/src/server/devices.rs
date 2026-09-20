@@ -69,7 +69,7 @@ pub fn remove(name: &str) -> Result<bool> {
 /// Prefers the running daemon's advertised `notify_relay_url` (read from
 /// `StatusInfo` via [`super::status`]); falls back to resolving the
 /// effective config directly when the daemon is stopped/unreachable, so the
-/// Devices screen still shows a meaningful value with the daemon down.
+/// Devices dialog still shows a meaningful value with the daemon down.
 #[allow(dead_code)]
 pub fn relay_url() -> Option<String> {
     if let Some(info) = super::status() {
