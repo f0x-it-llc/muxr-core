@@ -11,7 +11,7 @@ Two distributed binaries, plus a third workspace crate distributed separately:
 | Crate | Binary | What it does |
 |-------|--------|--------------|
 | [`muxrd`](muxrd/) | `muxrd` | gRPC server (protobuf package `muxr.v1`) that relays over a terminal multiplexer — zellij (Unix-domain IPC) or herdr (JSON-API + binary wire sockets). TLS (self-signed, an external CA cert, or plaintext h2c behind a proxy) + per-token auth, read-only tokens, daemonize. |
-| [`muxrctl`](muxrctl/) | `muxrctl` | Terminal UI to install, configure, and pair the server: cert/SAN setup, token management, QR-code device pairing (fingerprint-pinned or system-CA), live status. Links `muxrd` as a library for its pure ops. |
+| [`muxrctl`](muxrctl/) | `muxrctl` | Terminal UI to install, configure, and pair the server: one live dashboard (daemon, network, certificate, tokens, devices), every action a dialog, a first-run setup wizard (network → certificate → token → start → pair), QR-code device pairing (fingerprint-pinned or system-CA). Links `muxrd` as a library for its pure ops. |
 | [`muxr-notify`](muxr-notify/) | `muxr-notify` | A small, self-hostable push-notification relay (mints device push-handles, forwards `muxrd`'s notify requests to FCM). **Not** part of the release suite above — it ships only as its own Docker image (see [`muxr-notify/README.md`](muxr-notify/README.md)), since a self-hosted relay only delivers push to apps you build yourself (FCM tokens are project-scoped). The dev rig runs an in-container instance (`FCM_MODE=log`) for e2e testing. |
 
 ## Install
@@ -78,9 +78,7 @@ chosen mode (e.g. parses the external key) so misconfigurations surface before `
 
 `muxrctl` detects the active mode over the control socket and builds the pairing QR to match:
 a **fingerprint-pinned** pairing (`tm=pin`) for self-signed, or a **system-CA** pairing (`tm=ca`,
-no fingerprint) for external/h2c. Press **`t`** on the Cert screen to override the advertised trust
-(**Auto → CA → Pin**) — needed when a *self-signed* origin sits behind a CA-terminating proxy. The
-choice persists across restarts.
+no fingerprint) for external/h2c. The Certificate dialog (`e` on the dashboard) shows the live mode, the fingerprint and the SANs, explains what each means, and lets you override the advertised trust (Auto / CA / Pin); the override persists.
 
 ## Test
 

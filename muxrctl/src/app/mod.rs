@@ -1,8 +1,10 @@
 //! Application layer (TEA: state / message / update / action).
 //!
-//! This layer is deliberately free of ratatui and terminal I/O — it is the
-//! pure core that [`crate::tui`] drives and renders. The only external UI type
-//! it touches is `crossterm::event::KeyEvent` (carried by [`message::Message`]).
+//! This layer is deliberately free of the drawing, terminal-backend and
+//! async-runtime crates — it is the pure core that [`crate::tui`] drives and
+//! renders. It does name the ratcn runtime's own plain state and event types
+//! (`FocusState`, `ModalState`, `ToasterState`, `KeyEvent`), which carry no
+//! terminal I/O of their own.
 
 pub mod action;
 pub mod message;
@@ -10,8 +12,6 @@ pub mod state;
 pub mod update;
 
 pub use action::UpdateAction;
-pub use message::Message;
+pub use message::{Message, UiMsg};
 pub use state::AppState;
-#[allow(unused_imports)] // re-exported for later waves / external callers.
-pub use state::Screen;
 pub use update::update;

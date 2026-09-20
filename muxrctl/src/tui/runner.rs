@@ -1,29 +1,35 @@
 //! The TUI event loop.
 //!
-//! Mirrors fdemon's proven **poll + drain** runner (NOT `tokio::select!`):
+//! Mirrors fdemon's proven **poll + drain** runner (NOT `tokio::select!`), with
+//! the ratcn runtime wired in as the input front end:
 //!
-//! 1. Drain all pending [`Message`]s from the mpsc channel via `try_recv` and
+//! 1. Stamp `state.ui.now` from a process-start `Instant` and prune expired
+//!    toasts against it, so the reducer and the toaster share one clock.
+//! 2. Drain all pending [`Message`]s from the mpsc channel via `try_recv` and
 //!    feed each to [`update`], collecting [`UpdateAction`]s.
-//! 2. Apply runner-side effects: `Quit` exits the loop; async actions are
+//! 3. Apply runner-side effects: `Quit` exits the loop; async actions are
 //!    dispatched onto `tokio::task::spawn_blocking` tasks that post their
 //!    results back over a cloned `tx`.
-//! 3. `terminal.draw(...)` **unconditionally** every ~50 ms tick — ratatui's
+//! 4. `terminal.draw(...)` **unconditionally** every ~50 ms tick — ratatui's
 //!    double-buffer diff suppresses redundant terminal writes, and the steady
-//!    cadence is what live status polling rides on.
-//! 4. `crossterm::event::poll(50 ms)` → on a key press, send `Message::Key`;
-//!    on timeout, send `Message::Tick`.
+//!    cadence is what live status polling rides on. Drawing is one
+//!    [`Ratcn::render`] pass (see [`crate::tui::views::render`]).
+//! 5. `crossterm::event::poll(50 ms)` → a key press goes through
+//!    [`Ratcn::handle_event`] first: an emitted message becomes
+//!    `Message::Ui`, a consumed key becomes a `Tick`, and only a key the
+//!    component surface ignored reaches the reducer as `Message::Key`.
 //!
 //! The loop exits as soon as `AppState.should_quit` is set.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyEventKind};
+use crossterm::event::{self, Event as CtEvent, KeyEventKind};
 use ratatui::DefaultTerminal;
+use ratcn::runtime::{Event, EventResult, KeyEvent, Ratcn, TabWrap};
 use tokio::sync::mpsc;
 
-use crate::app::state::Screen;
-use crate::app::{AppState, Message, UpdateAction, update};
+use crate::app::{AppState, Message, UiMsg, UpdateAction, update};
 
 /// Poll cadence / tick interval.
 const TICK: Duration = Duration::from_millis(50);
@@ -31,27 +37,60 @@ const TICK: Duration = Duration::from_millis(50);
 /// Channel capacity for the message bus. Cloned senders feed async task results.
 const CHANNEL_CAPACITY: usize = 256;
 
+/// The runtime, wired to the app's focus and modal stack.
+///
+/// Also used by the view tests, so what they drive is the real surface the
+/// binary runs.
+pub(crate) fn build_ratcn() -> Ratcn<AppState, UiMsg> {
+    Ratcn::new()
+        .focus(|state: &AppState| &state.ui.focus, UiMsg::Focus)
+        .modals(|state: &AppState| &state.ui.modals)
+        .tab_wrap(TabWrap::Wrap)
+}
+
 /// Run the TUI to completion. Returns when the user quits.
 ///
 /// Owns the message channel: the receiver is drained here; the sender is cloned
 /// into each async [`UpdateAction`] task so results post back into the loop.
 pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
     let (tx, mut rx) = mpsc::channel::<Message>(CHANNEL_CAPACITY);
+    let mut ratcn = build_ratcn();
+    let theme = crate::tui::theme::muxr();
+    let started = Instant::now();
 
-    // Finding 3 — restore persisted advertise_trust before the first render so
-    // the operator's last-set value survives restarts.
+    // Restore persisted advertise_trust before the first render so the
+    // operator's last-set value survives restarts.
     {
         let persisted = crate::server::load_advertise_trust();
-        state.cert.advertise_trust = crate::app::state::AdvertiseTrust::from_persist_str(persisted);
+        state.cert.advertise_trust =
+            crate::app::state::cert::AdvertiseTrust::from_persist_str(persisted);
     }
 
-    // Seed the initial dashboard load: lands on Dashboard via AppState::new but the
-    // loop starts with an empty channel, so on_enter_screen(Dashboard) (which emits
-    // RefreshStatus/LoadConfig/LoadTokens/LoadCertInfo) must be triggered explicitly.
-    let _ = tx.try_send(Message::NavTo(Screen::Dashboard));
+    // Seed the dashboard: every section loads once before the first key.
+    state.server.loading = true;
+    state.config.loading = true;
+    state.tokens.loading = true;
+    state.cert.loading = true;
+    state.devices.loading = true;
+    apply_actions(
+        state,
+        vec![
+            UpdateAction::RefreshStatus,
+            UpdateAction::LoadConfig,
+            UpdateAction::LoadTokens,
+            UpdateAction::LoadCertInfo,
+            UpdateAction::LoadDevices,
+            UpdateAction::LoadCertMode,
+        ],
+        tx.clone(),
+    );
 
     while !state.should_quit {
-        // (1) Drain all pending messages and run the update cycle.
+        // (1) One clock for the reducer's toasts and the toaster's expiry.
+        state.ui.now = started.elapsed();
+        let _ = state.ui.toasts.prune_expired(state.ui.now);
+
+        // (2) Drain all pending messages and run the update cycle.
         while let Ok(message) = rx.try_recv() {
             let actions = update(state, message);
             apply_actions(state, actions, tx.clone());
@@ -61,17 +100,56 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
             break;
         }
 
-        // (3) Render unconditionally.
-        terminal.draw(|frame| crate::tui::screens::render(frame, state))?;
+        // (4) Render unconditionally.
+        terminal.draw(|frame| crate::tui::views::render(frame, &mut ratcn, state, &theme))?;
 
-        // (4) Poll terminal input; translate to a Message (or Tick on timeout).
-        let message = poll_input()?;
+        // (5) Poll terminal input; route it through ratcn first.
+        let message = next_message(&mut ratcn, state)?;
         // Best-effort send; the channel is only saturated under pathological
         // backpressure, which this loop cannot produce (one message/tick).
         let _ = tx.try_send(message);
     }
 
     Ok(())
+}
+
+/// Poll for one input event and turn it into the [`Message`] it deserves.
+///
+/// A key the declared surface emits a message for becomes [`Message::Ui`]; one
+/// it consumed internally (a focus move, a character typed into a field) is a
+/// plain tick; only a key nothing handled reaches the reducer as
+/// [`Message::Key`], which is what makes the dashboard's single-letter
+/// shortcuts safe while a text field has focus.
+fn next_message(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result<Message> {
+    let Some(event) = poll_event()? else {
+        return Ok(Message::Tick);
+    };
+    let Ok(event) = Event::try_from(event) else {
+        return Ok(Message::Tick);
+    };
+    let key: Option<KeyEvent> = match &event {
+        Event::Key(key) => Some(*key),
+        _ => None,
+    };
+    Ok(match ratcn.handle_event(event, state) {
+        EventResult::Emit(msg) => Message::Ui(msg),
+        EventResult::Consumed => Message::Tick,
+        EventResult::Ignored => key.map_or(Message::Tick, Message::Key),
+    })
+}
+
+/// Poll crossterm for input for one [`TICK`].
+///
+/// Only a key **press** is returned, so terminals that report key release /
+/// repeat (crossterm "kitty" enhanced reporting) cannot double-fire.
+fn poll_event() -> Result<Option<CtEvent>> {
+    if event::poll(TICK)?
+        && let CtEvent::Key(key) = event::read()?
+        && key.kind == KeyEventKind::Press
+    {
+        return Ok(Some(CtEvent::Key(key)));
+    }
+    Ok(None)
 }
 
 /// Apply runner-side effects from an update cycle.
@@ -229,6 +307,15 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
                 });
             }
 
+            UpdateAction::LoadCertMode => {
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg =
+                        Message::CertModeLoaded(crate::server::server_cert_mode().map(tls_mode));
+                    let _ = tx.blocking_send(msg);
+                });
+            }
+
             // ── ctl-local state persistence ───────────────────────────────────
             // Handled synchronously — the file write is tiny and non-blocking in
             // practice; no async task needed, no message posted back.
@@ -328,9 +415,9 @@ fn build_token_qr_task(
     token: String,
     read_only: bool,
     seq: u64,
-    advertise_trust: crate::app::state::AdvertiseTrust,
+    advertise_trust: crate::app::state::cert::AdvertiseTrust,
 ) -> Message {
-    use crate::app::state::AdvertiseTrust;
+    use crate::app::state::cert::AdvertiseTrust;
     use crate::pairing::payload::{PairingParams, PairingTrust};
 
     // 1. Guard: the server must be running.
@@ -561,20 +648,18 @@ fn is_concrete_advertise_host(host: &str) -> bool {
     }
 }
 
-/// Poll crossterm for input for one [`TICK`]; return the resulting message.
+/// Convert the daemon's reported cert mode into the app-layer mirror.
 ///
-/// A key **press** becomes [`Message::Key`]; the poll timeout (or any
-/// non-key/non-press event) becomes [`Message::Tick`].
-fn poll_input() -> Result<Message> {
-    if event::poll(TICK)?
-        && let Event::Key(key) = event::read()?
-        && key.kind == KeyEventKind::Press
-    {
-        // Only act on Press to avoid double-firing on terminals that report
-        // key release/repeat (crossterm "kitty" enhanced reporting).
-        return Ok(Message::Key(key));
+/// `tui/runner.rs` and `server/` are the only modules that may name `muxrd`
+/// types; this is where the conversion for `LoadCertMode` lives.
+fn tls_mode(mode: muxrd::config::CertMode) -> crate::app::state::cert::TlsMode {
+    use crate::app::state::cert::TlsMode;
+    use muxrd::config::CertMode;
+    match mode {
+        CertMode::SelfSigned => TlsMode::SelfSigned,
+        CertMode::External => TlsMode::External,
+        CertMode::H2c => TlsMode::H2c,
     }
-    Ok(Message::Tick)
 }
 
 #[cfg(test)]

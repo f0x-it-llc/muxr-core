@@ -2,15 +2,21 @@
 //!
 //! `update` is pure: it mutates [`super::state::AppState`] and returns a list
 //! of `UpdateAction`s describing side effects to perform. The runner dispatches
-//! each action — most spawn a `tokio::task::spawn_blocking` task that posts
-//! results back as a [`super::message::Message`] over a cloned `mpsc::Sender`.
+//! each action — most spawn a blocking task that posts its result back as a
+//! [`super::message::Message`] over a cloned channel sender.
 //!
 //! All spawning lives in `tui/runner.rs`; `app/` stays free of async code.
 
 use super::state::San;
 
 /// A side effect for the runner to perform after an update cycle.
+///
+/// The runner dispatches every variant today; the ones only a later card emits
+/// (cert regeneration, token and device mutations, the pairing QR, the trust
+/// override) are kept wired end to end so those cards add a reducer arm and
+/// nothing else.
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum UpdateAction {
     /// Break the event loop and restore the terminal. Handled directly by the
     /// runner via `AppState.should_quit`; carried here so the action surface is
@@ -84,7 +90,7 @@ pub enum UpdateAction {
         /// The operator-declared advertised trust override at the time the QR was
         /// requested. Snapshotted so the async task uses the value that was active
         /// when the user pressed Enter — not a later toggle.
-        advertise_trust: super::state::AdvertiseTrust,
+        advertise_trust: super::state::cert::AdvertiseTrust,
     },
 
     // ── Dashboard ─────────────────────────────────────────────────────────────
@@ -95,11 +101,19 @@ pub enum UpdateAction {
     /// overview uses this for a read-only cert summary.
     LoadCertInfo,
 
+    /// Read the daemon's reported transport identity (`cert_mode`) over the
+    /// control socket and post `Message::CertModeLoaded`.
+    ///
+    /// The runner converts `muxrd::config::CertMode` into the app-layer
+    /// [`super::state::cert::TlsMode`] mirror; `None` means the daemon is not
+    /// running, so the mode is unknown.
+    LoadCertMode,
+
     // ── ctl-local state persistence ───────────────────────────────────────────
     /// Persist the `advertise_trust` setting to the ctl state file.
     ///
     /// Handled synchronously in the runner (no async task needed for a tiny
     /// file write).  Errors are logged and swallowed — a persistence failure
     /// must never crash the TUI.
-    SaveAdvertiseTrust(super::state::AdvertiseTrust),
+    SaveAdvertiseTrust(super::state::cert::AdvertiseTrust),
 }
