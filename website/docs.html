@@ -68,6 +68,7 @@
           <li><a class="doc-nav-link" href="#muxrctl">Set up with muxrctl</a></li>
           <li><a class="doc-nav-link" href="#tokens">The CLI route</a></li>
           <li><a class="doc-nav-link" href="#lan">LAN instead of a tailnet</a></li>
+          <li><a class="doc-nav-link" href="#public">Public domain (least recommended)</a></li>
           <li><a class="doc-nav-link" href="#pair">Pair your device (QR)</a></li>
           <li><a class="doc-nav-link" href="#docker">Docker dev rig</a></li>
           <li><a class="doc-nav-link" href="#connect">Connect from the app</a></li>
@@ -120,7 +121,7 @@
 
         <section id="tailscale">
           <h2>Reach it over Tailscale — recommended</h2>
-          <p>muxrd binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. Something has to carry your phone to the server, and a <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> tailnet is the way we recommend:</p>
+          <p>muxrd binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. Something has to carry your phone to the server — in order of preference that's a tailnet (this section), your <a href="#lan">LAN</a>, or, least recommended, a <a href="#public">public domain</a> — and a <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> tailnet is the one we recommend:</p>
           <ul>
             <li>Every device in a tailnet can reach every other one by default — <strong>no port forwarding</strong>, no router configuration, nothing exposed publicly.</li>
             <li>The traffic runs over a private, encrypted network between your own devices.</li>
@@ -247,6 +248,50 @@
             <div class="callout-title">Regenerate, then restart</div>
             <p>Changing the SANs means a new certificate. Run <code>muxrd init</code> again with <code>--san &lt;your-lan-ip&gt;</code>, or regenerate from <code>muxrctl</code>'s cert dialog, then restart the daemon — and re-pair every phone, because the fingerprint they pinned no longer exists. A LAN address is also only good on that LAN: leave the network and the phone cannot reach the server, which is the problem a tailnet solves.</p>
           </div>
+        </section>
+
+        <section id="public">
+          <h2>Public domain — least recommended</h2>
+          <p>A public domain puts muxrd on the open internet: anyone who has your DNS name and a token can reach it. The certificate is publicly trusted, the app connects with <strong>Public domain (CA)</strong> trust, and the pairing QR carries <code>tm=ca</code> with no fingerprint. This is how the public demo at <a href="https://demo.muxr.app" target="_blank" rel="noopener noreferrer">demo.muxr.app</a> runs — a read-only sandbox in a hardened container — and it is the right shape only for something you would be comfortable making public. For your own machine, use the <a href="#tailscale">tailnet</a> instead.</p>
+
+          <div class="callout callout-danger">
+            <div class="callout-title">Read this before you expose muxrd</div>
+            <p>A public listener changes the threat model. Before you point a DNS name at muxrd:</p>
+            <ul>
+              <li>Every host on the internet can reach the login endpoint — the bearer token is the only barrier. Use read-only tokens for anyone you do not fully trust, and keep <code>muxrd revoke-token &lt;name&gt;</code> at hand: it is the kill switch, invalidating the token and every live session minted from it in one step.</li>
+              <li>muxrd has no per-login session isolation — everyone presenting the same token attaches to the same session and sees the same activity.</li>
+              <li>Whatever terminates TLS in front of muxrd sees your terminal traffic and bearer tokens in plaintext.</li>
+              <li>Edge proxies commonly drop idle connections after a minute or two, and an attached terminal is a long-lived stream, so a viewer parked on a silent pane can be cut off — test on a real device before handing out a QR.</li>
+            </ul>
+          </div>
+
+          <h3>Behind a TLS-terminating reverse proxy (how the demo runs)</h3>
+          <p>The proxy owns the public certificate — from Let's Encrypt or another public CA — and terminates TLS for the whole internet-facing hop. It must proxy gRPC over HTTP/2 end to end and speak plaintext HTTP/2 (h2c) to muxrd; muxrd itself listens only on a private address the proxy can reach, and that port is never published to the internet.</p>
+          <div class="code-block"><pre><code>muxrd start --bind &lt;private-address&gt;:50051 --insecure-h2c --i-know-this-is-behind-a-proxy</code></pre></div>
+          <p><code>MUXRD_H2C=1</code> and <code>MUXRD_H2C_ALLOW_PUBLIC=1</code> are the environment equivalents of the two flags. muxrd refuses a non-loopback h2c bind without that acknowledgment, because the proxy-to-muxrd hop is plaintext and the flag is the operator confirming a trusted proxy is the only thing that can reach it.</p>
+          <p>The phone dials <code>your.host:443</code> — <code>443</code> is the default port under <strong>Public domain (CA)</strong> trust. In <code>muxrctl</code> the Certificate dialog reads <strong>h2c behind a proxy · CA trust</strong>, and the pairing QR carries <code>tm=ca</code>.</p>
+          <p>If a self-signed muxrd sits behind a proxy like this instead of running h2c, set <strong>Advertised trust</strong> to <strong>CA</strong> in the Certificate dialog: “Choose CA yourself when this daemon sits behind a TLS-terminating proxy that presents its own certificate.”</p>
+
+          <h3>Serve a public certificate yourself</h3>
+          <p>Obtain a certificate for your DNS name — from Let's Encrypt or another public CA — and point muxrd at the fullchain and private key directly, with no proxy in front:</p>
+          <div class="code-block"><pre><code>muxrd init --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem</code></pre></div>
+          <div class="code-block"><pre><code>muxrd start --bind 0.0.0.0:50051 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem</code></pre></div>
+          <p><code>MUXRD_TLS_CERT</code> and <code>MUXRD_TLS_KEY</code> are the environment equivalents; both files are validated at <code>init</code> and at <code>start</code>, and the pair is mutually exclusive with h2c. Firewall the host so only <code>50051</code> is reachable.</p>
+          <p>The phone dials <code>your.host:50051</code> — type the port, because a bare host defaults to <code>443</code> under <strong>Public domain (CA)</strong>. muxrd reads the certificate files at start, so restart it after every renewal.</p>
+
+          <div class="callout callout-note">
+            <div class="callout-title">A pinned public server</div>
+            <p>A self-signed certificate works too: give it your public host as a SAN with <code>muxrd init --san your.host</code> and publish the port. The pairing QR then pins the fingerprint (<code>tm=pin</code>) instead of using CA trust, but the host is exposed in exactly the same way — this is the demo's other mode.</p>
+          </div>
+
+          <h3>Harden it like the demo</h3>
+          <ul>
+            <li>Firewall to <code>22</code>, <code>80</code> and <code>443</code> behind a proxy, or <code>50051</code> alone for a direct certificate — nothing else inbound.</li>
+            <li>Run muxrd as an unprivileged user inside a container with a read-only root filesystem, no Linux capabilities and resource limits. The demo's <a href="https://github.com/f0x-it-llc/muxr-core/tree/main/demo" target="_blank" rel="noopener noreferrer">compose files</a> are the template.</li>
+            <li>Mint read-only tokens for anyone you do not fully trust.</li>
+            <li>Keep <code>muxrd revoke-token</code> at hand.</li>
+            <li>Test the long-lived attach through your proxy on a real device before publishing a QR.</li>
+          </ul>
         </section>
 
         <section id="pair">
