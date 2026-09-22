@@ -94,9 +94,9 @@
           <h3>Pairing fails, or the QR code won't scan</h3>
           <ul>
             <li>Confirm <code>muxrd</code> is actually running — check with <code>muxrd status</code>, or start it with <code>muxrd start</code>.</li>
-            <li>Make sure your phone is on the <strong>same network</strong> as the server, or that the server is otherwise reachable from your phone (see <a href="docs.html#lan">Expose on your LAN</a>).</li>
+            <li>Make sure the phone can reach the server — over your tailnet (see <a href="docs.html#tailscale">Reach it over Tailscale</a>), or, if you chose the LAN route, on the same Wi-Fi (see <a href="docs.html#lan">LAN instead of a tailnet</a>).</li>
             <li>Check that the token hasn't been revoked — run <code>muxrd list-tokens</code> on the server to confirm it still exists.</li>
-            <li>QR codes are shown once, right when a token is minted — <code>muxrctl</code> doesn't keep the plaintext secret around afterward, so pressing <kbd class="kbd">Enter</kbd> again won't bring back the QR for a token you've already lost (see <a href="docs.html#tokens">token secrets can't be retrieved after creation</a>). If you missed the scan, revoke that token (<kbd class="kbd">d</kbd>/<kbd class="kbd">x</kbd>), mint a new one, and press <kbd class="kbd">Enter</kbd> right away to show and scan its QR.</li>
+            <li>QR codes are shown once, right when a token is minted — <code>muxrctl</code> stores only a hash of the secret, so the code cannot be shown again for a token you have already dismissed (see <a href="docs.html#tokens">token secrets can't be retrieved after creation</a>). If you missed the scan: in <code>muxrctl</code> press <kbd class="kbd">t</kbd>, choose <strong>Revoke…</strong> on that token, then <strong>Create…</strong> a new one and press <strong>Show pairing QR</strong> on the minted-secret dialog; or run the setup wizard again (<kbd class="kbd">w</kbd>) and scan at its last step.</li>
             <li>If the camera won't focus or read the code, try the <a href="docs.html#pair">manual fallback</a> — entering the server URL and token by hand on the Connect screen.</li>
           </ul>
 
@@ -109,7 +109,7 @@
 
           <h3>Connection refused, or the connection times out</h3>
           <ul>
-            <li><code>muxrd</code> binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. To reach it from a phone or tablet, start it with a LAN bind address (<code>muxrd start --bind 0.0.0.0:50051</code>) and add that address as a certificate SAN — see <a href="docs.html#lan">Expose on your LAN</a>.</li>
+            <li><code>muxrd</code> binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. To reach it from a phone or tablet, start it with a LAN bind address (<code>muxrd start --bind 0.0.0.0:50051</code>) and add that address as a certificate SAN — see <a href="docs.html#lan">LAN instead of a tailnet</a>.</li>
             <li>Confirm the server is listening on port <code>50051</code> (or whatever port you configured) and that the address you entered in the app matches it exactly.</li>
             <li>Check your firewall — both the host OS firewall and any router-level rules — allows inbound connections to that port from your phone's network.</li>
           </ul>
