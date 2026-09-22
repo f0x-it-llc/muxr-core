@@ -1,6 +1,6 @@
 # Muxr Website
 
-A static HTML website for Muxr, the Flutter mobile and tablet client for controlling remote herdr and zellij terminal-multiplexer sessions. The site provides an interactive introduction, getting-started documentation, usage guides, and the legal/support pages required for app-store submission — plus the Nerd Font catalog the app downloads from.
+A static HTML website for Muxr, the [Frust](https://frust.dev)-native mobile and tablet client for controlling remote herdr and zellij terminal-multiplexer sessions. The site provides an interactive introduction, getting-started documentation, usage guides, and the legal/support pages required for app-store submission — plus the Nerd Font catalog the app downloads from.
 
 ## Local Preview (No Docker)
 
@@ -39,8 +39,9 @@ Design: **Glyph** — a single stylesheet (`assets/css/glyph.css`) shared by eve
 - **`support.html`** — Support page: contact info, bug reporting, and an FAQ. Serves as the Support URL required by both app stores.
 - **`assets/`** — Static resources:
   - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file.
-  - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections.
+  - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections, and the phone-width "On this page" toggle/breadcrumb injected into `.doc-sidebar` (paired with glyph.css's `html.js` gating and the `--nav-h` token).
   - `img/logo.svg` — 4-square grid mark (also favicon).
+  - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures; replace by regenerating, never by editing.
 
 All six pages share the same `.site-nav` header and `.site-footer` footer (Home, Docs, Guide, Support, Privacy, Terms, GitHub).
 
@@ -64,6 +65,6 @@ The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the l
 
 - **GitHub:** [`f0x-it-llc/muxr-core`](https://github.com/f0x-it-llc/muxr-core) (open-source MIT backend)
 - **Server:** Rust gRPC backend and TUI pairing tool (`muxrctl`)
-- **App:** Closed-source Flutter mobile/tablet client
+- **App:** Closed-source [Frust](https://frust.dev)-native mobile/tablet client
 
-The backend is self-hosted and open-source; the Flutter app is closed-source.
+The backend is self-hosted and open-source; the Frust-native app is closed-source.

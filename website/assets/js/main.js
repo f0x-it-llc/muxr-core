@@ -78,6 +78,40 @@
     });
   });
 
+  // mobile "On this page" toggle bar — injected as the first child of each
+  // .doc-sidebar so ≤860px can collapse the nav list behind a sticky
+  // breadcrumb button instead of dumping it after the content (glyph.css
+  // gates the collapsed state on html.js; without this script the sidebar
+  // stays the plain static pill row it always was).
+  // Precondition: every page renders exactly one .doc-sidebar; the breadcrumb writes to that single injected toggle and the fallback id 'doc-toc-list' assumes the same — a second sidebar on one page would need per-sidebar state and unique ids.
+  var docToggle = null;
+  document.querySelectorAll('.doc-sidebar').forEach(function(sidebar){
+    var list = sidebar.querySelector('.doc-nav-list');
+    if(!list) return;
+    if(!list.id) list.id = 'doc-toc-list';
+
+    var toggle = document.createElement('button');
+    toggle.type = 'button';
+    toggle.className = 'doc-toc-toggle';
+    toggle.setAttribute('aria-expanded', 'false');
+    toggle.setAttribute('aria-controls', list.id);
+    toggle.textContent = 'On this page';
+    sidebar.insertBefore(toggle, sidebar.firstChild);
+    docToggle = toggle;
+
+    toggle.addEventListener('click', function(){
+      var open = sidebar.classList.toggle('open');
+      toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+    });
+
+    list.querySelectorAll('.doc-nav-link').forEach(function(link){
+      link.addEventListener('click', function(){
+        sidebar.classList.remove('open');
+        toggle.setAttribute('aria-expanded', 'false');
+      });
+    });
+  });
+
   // docs sidebar scrollspy
   var navLinks = Array.prototype.slice.call(document.querySelectorAll('.doc-nav-link'));
   if(navLinks.length){
@@ -90,7 +124,11 @@
         if(entry.isIntersecting){
           navLinks.forEach(function(l){ l.classList.remove('active'); });
           var link = byId[entry.target.id];
-          if(link) link.classList.add('active');
+          if(link){
+            link.classList.add('active');
+            // Doubles the mobile TOC bar as a breadcrumb of the current section.
+            if(docToggle) docToggle.textContent = 'On this page · ' + link.textContent;
+          }
         }
       });
     }, { rootMargin: '-15% 0px -70% 0px', threshold: 0 });
