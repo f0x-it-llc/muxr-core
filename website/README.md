@@ -39,7 +39,7 @@ Design: **Glyph** — a single stylesheet (`assets/css/glyph.css`) shared by eve
 - **`support.html`** — Support page: contact info, bug reporting, and an FAQ. Serves as the Support URL required by both app stores.
 - **`assets/`** — Static resources:
   - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file.
-  - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections.
+  - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections, and the phone-width "On this page" toggle/breadcrumb injected into `.doc-sidebar` (paired with glyph.css's `html.js` gating and the `--nav-h` token).
   - `img/logo.svg` — 4-square grid mark (also favicon).
   - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures; replace by regenerating, never by editing.
 

@@ -83,6 +83,7 @@
   // breadcrumb button instead of dumping it after the content (glyph.css
   // gates the collapsed state on html.js; without this script the sidebar
   // stays the plain static pill row it always was).
+  // Precondition: every page renders exactly one .doc-sidebar; the breadcrumb writes to that single injected toggle and the fallback id 'doc-toc-list' assumes the same — a second sidebar on one page would need per-sidebar state and unique ids.
   var docToggle = null;
   document.querySelectorAll('.doc-sidebar').forEach(function(sidebar){
     var list = sidebar.querySelector('.doc-nav-list');

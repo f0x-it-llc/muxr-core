@@ -114,6 +114,7 @@ strong{ color:var(--fg); font-weight:600; }
 
 @media (max-width:900px){
   .hero-inner{ grid-template-columns:1fr; gap:48px; }
+  /* phones: copy and CTA first, the screenshot follows — deliberate (reading order, LCP) */
   .hero-preview{ max-width:280px; margin:0 auto; }
 }
 
@@ -168,6 +169,8 @@ figcaption.shot-caption{ font-size:11.5px; color:var(--fg-dim); text-align:cente
 .terminal-body .term-line.show{ opacity:1; transform:translateY(0); }
 .t-dim{ color:#726a58; } .t-muted{ color:#9b917a; } .t-teal{ color:var(--cyan); } .t-green{ color:var(--success); }
 .t-orange{ color:var(--amber); } .t-purple{ color:#b79df0; } .t-yellow{ color:var(--warning); }
+/* .cursor-block is now its only consumer */
+@keyframes blink{ 50%{ opacity:0; } }
 .cursor-block{ display:inline-block; width:7px; height:14px; background:var(--amber); vertical-align:-2px; animation:blink 1.1s steps(1) infinite; }
 @media (prefers-reduced-motion:reduce){ .cursor-block{ animation:none; } }
 
@@ -274,7 +277,7 @@ figcaption.shot-caption{ font-size:11.5px; color:var(--fg-dim); text-align:cente
   .js .doc-sidebar.open .doc-nav-list{ padding:4px 0 18px; }
 }
 @media (max-width:860px) and (prefers-reduced-motion:reduce){
-  .doc-toc-toggle::after{ transition:none; }
+  .js .doc-toc-toggle::after{ transition:none; }
 }
 
 /* ============ device-figure (guide illustrative pairs) ============ */
