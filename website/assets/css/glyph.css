@@ -20,6 +20,7 @@
   --ease-out: cubic-bezier(0.16,1,0.3,1);
   --ease-spring: cubic-bezier(0.34,1.35,0.64,1);
   --container: 1120px;
+  --nav-h: 71px; /* measured .site-nav height — mobile sticky elements anchor below it */
 }
 
 *,*::before,*::after{ box-sizing:border-box; margin:0; padding:0; }
@@ -33,6 +34,9 @@ body::before{
   background:repeating-linear-gradient(to bottom, rgba(255,255,255,0.012) 0px, rgba(255,255,255,0.012) 1px, transparent 1px, transparent 2px);
   mix-blend-mode:overlay;
 }
+/* Touch devices never hover a cursor over the scanline overlay and pay its
+   compositing cost on every frame for nothing — drop it there. */
+@media (hover:none) and (pointer:coarse){ body::before{ display:none; } }
 ::selection{ background:var(--amber-faint); color:var(--amber); }
 a{ color:inherit; text-decoration:none; }
 img,svg{ display:block; max-width:100%; }
@@ -110,7 +114,7 @@ strong{ color:var(--fg); font-weight:600; }
 
 @media (max-width:900px){
   .hero-inner{ grid-template-columns:1fr; gap:48px; }
-  .hero-preview{ order:-1; max-width:320px; margin:0 auto; }
+  .hero-preview{ max-width:280px; margin:0 auto; }
 }
 
 /* ============ device / phone preview ============
@@ -217,6 +221,23 @@ strong{ color:var(--fg); font-weight:600; }
 .pm-new-btn{ border:1px dashed var(--border-bright); border-radius:var(--radius-md); padding:10px; text-align:center; font-size:9.5px; color:var(--fg-muted); }
 .pm-new-btn b{ color:var(--amber); font-weight:600; }
 
+/* ============ .shot (real-device screenshot figure) ============
+   Replaces the pm-*/phone-frame mocks above wherever wave 2 drops in a real
+   iPhone screenshot; same frame geometry as .phone-frame/.phone-frame.sm so
+   it slots into the same hero/device-figure placements. The pm-*/phone-frame
+   CSS above stays until wave 2 removes its last caller.
+   ================================================ */
+figure.shot{ margin:0; max-width:300px; }
+.shot.shot-sm{ max-width:250px; }
+.shot-frame{ background:var(--bg-void); border:1.5px solid var(--border-bright); border-radius:34px; overflow:hidden; box-shadow:0 0 0 1px #000, 0 40px 90px rgba(0,0,0,0.55); }
+.shot-sm .shot-frame{ border-radius:28px; }
+.shot-frame img{ display:block; width:100%; height:auto; }
+figcaption.shot-caption{ font-size:11.5px; color:var(--fg-dim); text-align:center; margin-top:10px; }
+
+/* placement — mirrors the mock it replaces in each spot */
+.hero-preview .shot{ margin:0 auto; }
+.device-figure .shot{ position:sticky; top:100px; }
+
 /* ============ feature grid ============ */
 .feature-grid{ display:grid; grid-template-columns:repeat(4,1fr); gap:18px; }
 .feature-card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-lg); padding:24px 22px; transition:opacity .5s var(--ease-out), transform .5s var(--ease-out); }
@@ -263,12 +284,19 @@ strong{ color:var(--fg); font-weight:600; }
 .doc-lead{ font-size:14px; color:var(--fg-muted); max-width:600px; line-height:1.75; font-weight:300; }
 
 .doc-layout{ max-width:var(--container); margin:0 auto; padding:44px 28px 100px; display:grid; grid-template-columns:220px 1fr; gap:56px; align-items:start; }
+/* Grid tracks default to a min-content floor — a long `white-space:pre` line
+   in a .code-block otherwise widens the 1fr column instead of scrolling
+   inside it, overflowing the whole layout horizontally. */
+.doc-layout > *{ min-width:0; }
 .doc-sidebar{ position:sticky; top:88px; }
 .doc-sidebar-title{ font-size:10px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.1em; margin-bottom:12px; }
 .doc-nav-list{ list-style:none; padding:0; display:flex; flex-direction:column; gap:2px; border-left:1px solid var(--border); }
 .doc-nav-link{ display:block; font-size:12.5px; color:var(--fg-dim); padding:7px 0 7px 14px; border-left:2px solid transparent; margin-left:-1px; transition:color .15s, border-color .15s; }
 .doc-nav-link:hover{ color:var(--fg-muted); }
 .doc-nav-link.active{ color:var(--amber); border-left-color:var(--amber); }
+/* main.js-injected mobile TOC toggle — hidden on desktop unconditionally;
+   shown only under html.js at ≤860px (see the media query below). */
+.doc-toc-toggle{ display:none; }
 
 .doc-content section{ margin-bottom:52px; scroll-margin-top:88px; }
 .doc-content h2{ font-size:22px; margin-bottom:16px; padding-top:4px; }
@@ -282,7 +310,7 @@ strong{ color:var(--fg); font-weight:600; }
 .doc-content a{ color:var(--amber); border-bottom:1px solid var(--amber-border); }
 .doc-content a:hover{ color:#ffc247; }
 
-.code-block{ position:relative; background:var(--bg-void); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:14px 56px 14px 16px; margin:14px 0 18px; overflow-x:auto; }
+.code-block{ position:relative; background:var(--bg-void); border:1px solid var(--border-bright); border-radius:var(--radius-md); padding:14px 56px 14px 16px; margin:14px 0 18px; overflow-x:auto; overscroll-behavior-x:contain; }
 .code-block pre{ margin:0; }
 .code-block code{ background:none; border:none; padding:0; font-size:12.5px; color:var(--amber); line-height:1.7; white-space:pre; }
 
@@ -311,10 +339,48 @@ strong{ color:var(--fg); font-weight:600; }
 
 @media (max-width:860px){
   .doc-layout{ grid-template-columns:1fr; }
-  .doc-sidebar{ position:static; order:2; border-top:1px solid var(--border); padding-top:24px; margin-top:12px; }
+  /* DOM order already puts <aside class="doc-sidebar"> before .doc-content;
+     order:-1 keeps it first even if that ever changes. Without JS this
+     renders exactly like before: a static wrapped pill row above the
+     content, not sticky, nothing hidden. */
+  .doc-sidebar{ position:static; order:-1; border-top:none; padding-top:0; margin-top:0; margin-bottom:24px; }
   .doc-nav-list{ flex-direction:row; flex-wrap:wrap; border-left:none; gap:6px; }
   .doc-nav-link{ border-left:none; border:1px solid var(--border-bright); border-radius:var(--radius-full); padding:6px 12px; margin-left:0; }
   .doc-nav-link.active{ background:var(--amber-faint); border-color:var(--amber-border); }
+
+  /* Headings would otherwise land under the sticky nav + sticky TOC bar. */
+  .doc-content section{ scroll-margin-top:128px; }
+
+  /* JS-enhanced: main.js injects .doc-toc-toggle as the first child of
+     .doc-sidebar and toggles .doc-sidebar.open. Collapsed by default, it
+     turns the pill row into a sticky "On this page · <active section>"
+     breadcrumb bar directly under the site nav. */
+  .js .doc-sidebar{
+    position:sticky; top:var(--nav-h); z-index:150;
+    margin-bottom:24px;
+    background:rgba(10,12,17,0.86); backdrop-filter:blur(10px);
+    border-bottom:1px solid var(--border);
+  }
+  .js .doc-sidebar-title{ display:none; }
+  .js .doc-toc-toggle{
+    display:flex; align-items:center; justify-content:space-between; gap:12px; width:100%;
+    background:none; border:none; color:var(--fg-muted); font-family:var(--font-mono);
+    font-size:11.5px; text-transform:uppercase; letter-spacing:0.08em; text-align:left;
+    padding:16px 0; cursor:pointer;
+  }
+  /* CSS-drawn chevron (not a font glyph) so it never depends on a webfont
+     that may still be loading or unavailable. */
+  .js .doc-toc-toggle::after{
+    content:''; flex-shrink:0; width:6px; height:6px;
+    border-right:1.5px solid var(--fg-dim); border-bottom:1.5px solid var(--fg-dim);
+    transform:rotate(45deg); transition:transform .15s var(--ease-out);
+  }
+  .js .doc-sidebar.open .doc-toc-toggle::after{ transform:rotate(225deg); }
+  .js .doc-sidebar:not(.open) .doc-nav-list{ display:none; }
+  .js .doc-sidebar.open .doc-nav-list{ padding:4px 0 18px; }
+}
+@media (max-width:860px) and (prefers-reduced-motion:reduce){
+  .doc-toc-toggle::after{ transition:none; }
 }
 
 /* ============ device-figure (guide illustrative pairs) ============ */
@@ -323,6 +389,27 @@ strong{ color:var(--fg); font-weight:600; }
 @media (max-width:860px){
   .device-figure{ grid-template-columns:1fr; }
   .device-figure .device{ position:static; order:-1; max-width:230px; margin:0 auto 20px; }
+  .device-figure .shot{ position:static; order:-1; max-width:230px; margin:0 auto 20px; }
+}
+
+/* ============ phone-first tightening (≤760 / ≤560) ============ */
+@media (max-width:760px){
+  .section{ padding:56px 0; }
+  .section-head{ margin-bottom:32px; }
+}
+
+@media (max-width:560px){
+  .container, .nav-inner, .section-divider, .doc-layout, .footer-inner{ padding-left:20px; padding-right:20px; }
+  .doc-header{ padding:40px 20px 24px; }
+  .doc-content h2{ font-size:20px; }
+  .hero{ padding:40px 0 24px; }
+
+  .data-table{ font-size:12px; }
+  .data-table th, .data-table td{ padding:8px; }
+  .data-table td{ word-break:break-word; }
+
+  .code-block{ padding:12px 48px 12px 12px; }
+  .code-block code{ font-size:12px; }
 }
 
 /* ============ footer ============ */
