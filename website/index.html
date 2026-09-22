@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Muxr — your terminal multiplexer, from your phone or tablet</title>
-  <meta name="description" content="Muxr is a Flutter client that attaches to your remote herdr and zellij terminal-multiplexer sessions over TLS-secured gRPC. Self-hosted, open-source backend, QR device pairing, full session/tab/pane control.">
+  <meta name="description" content="Muxr is a Frust-native client that attaches to your remote herdr and zellij terminal-multiplexer sessions over TLS-secured gRPC. Self-hosted, open-source backend, QR device pairing, full session/tab/pane control.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -58,7 +58,7 @@
             <span class="eyebrow">self-hosted · open-source backend</span>
             <h1>Mu<span>xr</span></h1>
             <p class="hero-tagline">Attach to your remote herdr and zellij sessions from your phone or tablet.</p>
-            <p class="hero-sub">A Flutter client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
+            <p class="hero-sub">A <a href="https://frust.dev" target="_blank" rel="noopener noreferrer">Frust</a>-native client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
 
             <div class="ascii-box">┌──────────────────────────────┐
 │  muxr · remote attach        │
@@ -76,64 +76,7 @@
             </div>
           </div>
 
-          <!-- Hero device preview — a miniature of the app's real Terminal screen:
-               app bar, connection row, tab strip, terminal card. Example data only. -->
-          <div class="hero-preview">
-            <div class="device">
-              <div class="phone-frame" aria-hidden="true">
-                <div class="phone-notch"></div>
-                <div class="status-bar"><span>9:41</span><span class="icons">●●●▮</span></div>
-                <div class="screen-body pm-screen-term">
-
-                  <div class="pm-topbar">
-                    <div class="pm-brand"><span class="pm-brand-mark"><span></span><span></span><span></span><span></span></span>muxr</div>
-                    <div class="pm-topbar-title">192.168.0.42</div>
-                    <span class="pm-topbar-icon">
-                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-                        <circle cx="12" cy="12" r="3.2"/>
-                        <path d="M12 2.6v2.6M12 18.8v2.6M21.4 12h-2.6M5.2 12H2.6M18.6 5.4l-1.8 1.8M7.2 16.8l-1.8 1.8M18.6 18.6l-1.8-1.8M7.2 7.2 5.4 5.4"/>
-                      </svg>
-                    </span>
-                  </div>
-
-                  <div class="pm-conn-row">
-                    <span class="pm-dot-ok"></span>
-                    <span class="addr">192.168.0.42:50051</span>
-                    <span class="meta">zellij 0.45.1</span>
-                    <span class="pm-badge-ok">TLS ✓</span>
-                  </div>
-
-                  <div class="pm-tabs">
-                    <span class="pm-tab"><span class="idx">1</span>btop</span>
-                    <span class="pm-tab"><span class="idx">2</span>api</span>
-                    <span class="pm-tab active"><span class="idx">3</span>devbox</span>
-                  </div>
-
-                  <div class="pm-term-wrap">
-                    <div class="pm-term-card">
-                      <div class="pm-term-statusrow">
-                        <div class="pm-pane-title">ed@devbox: ~</div>
-                        <span class="pm-expand">
-                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-                            <path d="M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3"/>
-                          </svg>
-                        </span>
-                      </div>
-                      <div class="pm-term-body">
-                        <span class="pm-line"><span class="p">ed@devbox:~$</span> zellij attach dev</span>
-                        <span class="pm-line"><span class="out">attached · session "dev" · 3 panes</span></span>
-                        <span class="pm-line"><span class="out">tls ok · cert fingerprint pinned</span></span>
-                        <span class="pm-line"><span class="cm"># full control, from your pocket</span></span>
-                        <span class="pm-line"><span class="p">ed@devbox:~$</span> <span class="pm-cur"></span></span>
-                      </div>
-                    </div>
-                  </div>
-
-                </div>
-                <div class="home-indicator"><div class="home-bar"></div></div>
-              </div>
-            </div>
-          </div>
+          <div class="hero-preview"><figure class="shot"><div class="shot-frame"><img src="assets/img/screenshots/zellij-layout.webp" width="640" height="1394" alt="Muxr on an iPhone showing a zellij session with a file tree, a shell and a floating log pane" loading="eager" fetchpriority="high" decoding="async"></div><figcaption class="shot-caption">your zellij layout, as you left it</figcaption></figure></div>
         </div>
       </div>
     </section>
@@ -229,14 +172,14 @@
             <div class="flow-step-num">01</div>
             <div class="flow-step-body">
               <div class="flow-step-title">Run the server</div>
-              <div class="flow-step-desc">Build or Docker-run <code>muxrd</code> next to your herdr or zellij install — it auto-detects whichever is present. It generates a self-signed TLS cert and binds <code>127.0.0.1:50051</code> by default — add a SAN to expose it on your LAN.</div>
+              <div class="flow-step-desc">Build or Docker-run <code>muxrd</code> next to your herdr or zellij install — it auto-detects whichever is present. It binds <code>127.0.0.1:50051</code> by default — put the machine on your tailnet and bind its Tailscale address in the setup wizard.</div>
             </div>
           </div>
           <div class="flow-step">
             <div class="flow-step-num">02</div>
             <div class="flow-step-body">
               <div class="flow-step-title">Pair with a QR code</div>
-              <div class="flow-step-desc">Open the <code>muxrctl</code> setup TUI, create a token, and scan the QR. It encodes the host, port, and token; for a self-signed server it also pins the cert fingerprint, and for a CA-signed server it uses system trust — no further prompts.</div>
+              <div class="flow-step-desc">Open the <code>muxrctl</code> setup wizard, mint a token, and scan the QR it shows. The code encodes the host, port and token; for a self-signed server it also pins the certificate fingerprint, and for a CA-signed server it uses system trust — no further prompts.</div>
             </div>
           </div>
           <div class="flow-step">
@@ -274,7 +217,7 @@
 <span class="term-line"><span class="t-dim">$</span> muxrd create-token <span class="t-purple">--name</span> mobile</span>
 <span class="term-line"><span class="t-green">✓</span> token created&nbsp; <span class="t-yellow">3f9a2c1b-7e44-4d02-9c6a-1b8e5f0d2a77</span>&nbsp; <span class="t-muted">read-write</span></span>
 <span class="term-line">&nbsp;</span>
-<span class="term-line"><span class="t-dim">$</span> muxrctl <span class="t-muted"># launch the setup TUI → Tokens → Enter for QR</span></span>
+<span class="term-line"><span class="t-dim">$</span> muxrctl <span class="t-muted"># dashboard → w wizard → scan the QR</span></span>
 <span class="term-line"><span class="t-teal">●</span> client <span class="t-green">attached</span>&nbsp; <span class="t-purple">phone · iPhone</span>&nbsp; <span class="t-muted">3 sessions, 7 panes</span><span class="cursor-block"></span></span></div>
         </div>
       </div>

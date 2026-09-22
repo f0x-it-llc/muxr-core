@@ -117,115 +117,9 @@ strong{ color:var(--fg); font-weight:600; }
   .hero-preview{ max-width:280px; margin:0 auto; }
 }
 
-/* ============ device / phone preview ============
-   Miniature ports of the real Muxr app screens: same structure, spacing idiom
-   and colour roles as the app (app bar → connection row → tab strip →
-   terminal card / list), scaled to the 280px (hero) and 230px (.sm, guide)
-   frames. All `pm-` classes below belong to these mocks only — the desktop
-   `.terminal-block` showcase is a separate component.
-   ================================================ */
-.device{ display:flex; justify-content:center; }
-.phone-frame{ width:280px; background:var(--bg-void); border-radius:34px; border:1.5px solid var(--border-bright); overflow:hidden; position:relative; box-shadow:0 0 0 1px #000, 0 40px 90px rgba(0,0,0,0.55); flex-shrink:0; }
-.phone-frame.sm{ width:230px; border-radius:28px; }
-.phone-notch{ position:absolute; top:9px; left:50%; transform:translateX(-50%); width:88px; height:22px; background:var(--bg-void); border-radius:14px; z-index:100; }
-.status-bar{ height:40px; padding:10px 18px 4px; display:flex; align-items:flex-end; justify-content:space-between; font-size:10px; font-weight:600; position:relative; z-index:10; color:var(--fg); }
-.status-bar .icons{ color:var(--fg-muted); font-size:8px; letter-spacing:1px; }
-.screen-body{ min-height:340px; background:var(--bg-base); position:relative; display:flex; flex-direction:column; overflow:hidden; }
-.phone-frame.sm .screen-body{ min-height:300px; }
-/* the terminal screen sits on the darkest surface, everything else on --bg-base */
-.screen-body.pm-screen-term{ background:var(--bg-void); }
-.home-indicator{ display:flex; justify-content:center; padding:10px 0 8px; background:var(--bg-base); }
-.screen-body.pm-screen-term + .home-indicator{ background:var(--bg-void); }
-.home-bar{ width:100px; height:4px; border-radius:2px; background:var(--fg-faintest); }
-
-/* ---- app bar: brand mark + muxr + server address + settings ---- */
-.pm-topbar{ height:44px; flex-shrink:0; display:flex; align-items:center; gap:8px; padding:0 8px 0 13px; background:var(--bg-surface); border-bottom:1px solid var(--border); }
-.phone-frame.sm .pm-topbar{ height:40px; padding:0 6px 0 11px; }
-.pm-brand{ display:flex; align-items:center; gap:6px; font-family:var(--font-display); font-weight:700; font-size:11.5px; color:var(--amber); flex-shrink:0; }
-.pm-brand-mark{ width:13px; height:13px; display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:1.5px; }
-.pm-brand-mark span{ background:var(--amber); border-radius:1px; }
-.pm-topbar-title{ flex:1; min-width:0; text-align:center; font-size:10px; color:var(--fg-muted); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pm-topbar-icon{ width:26px; height:26px; flex-shrink:0; display:flex; align-items:center; justify-content:center; border-radius:var(--radius-sm); color:var(--fg-muted); }
-.pm-topbar-icon svg{ width:14px; height:14px; }
-
-/* ---- connection row: status dot + address + backend/latency meta ---- */
-.pm-conn-row{ display:flex; align-items:center; gap:7px; flex-shrink:0; padding:9px 13px; border-bottom:1px solid var(--border); }
-.pm-dot-ok{ width:6px; height:6px; border-radius:50%; background:var(--success); box-shadow:0 0 5px var(--success); flex-shrink:0; }
-.pm-conn-row .addr{ flex:1; min-width:0; font-size:10px; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pm-conn-row .meta{ font-size:8.5px; color:var(--fg-dim); white-space:nowrap; }
-.pm-badge-ok{ flex-shrink:0; font-size:8px; color:var(--success); background:var(--success-faint); border:1px solid var(--success-border); padding:2px 6px; border-radius:var(--radius-full); white-space:nowrap; }
-
-/* ---- tab strip: numbered index pill + tab name, amber underline on active ---- */
-.pm-tabs{ display:flex; align-items:stretch; gap:13px; flex-shrink:0; height:30px; padding:0 13px; border-bottom:1px solid var(--border); font-size:9.5px; color:var(--fg-dim); overflow:hidden; }
-.pm-tab{ display:flex; align-items:center; gap:4px; white-space:nowrap; border-bottom:2px solid transparent; }
-.pm-tab.active{ color:var(--amber); border-bottom-color:var(--amber); }
-.pm-tab .idx{ font-size:8px; color:var(--fg-faintest); }
-.pm-tab.active .idx{ color:var(--amber-dim); }
-
-/* ---- terminal card: pane title row + output body ---- */
-.pm-term-wrap{ flex:1; min-height:0; padding:11px; display:flex; flex-direction:column; }
-.pm-term-card{ flex:1; min-height:0; display:flex; flex-direction:column; background:var(--term-body); border:1px solid var(--term-border); border-radius:var(--radius-lg); overflow:hidden; box-shadow:0 14px 34px rgba(0,0,0,0.4); }
-.pm-term-statusrow{ display:flex; align-items:center; justify-content:space-between; gap:8px; flex-shrink:0; padding:9px 9px 9px 13px; background:var(--term-header); }
-.pm-pane-title{ font-family:var(--font-display); font-weight:700; font-size:11px; color:var(--amber); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pm-expand{ width:23px; height:23px; flex-shrink:0; border-radius:50%; background:rgba(255,238,210,0.06); border:1px solid var(--term-border); display:flex; align-items:center; justify-content:center; color:var(--fg-muted); }
-.pm-expand svg{ width:11px; height:11px; }
-.pm-term-body{ flex:1; padding:12px 13px; font-size:10px; line-height:1.95; overflow:hidden; }
-.pm-line{ display:block; color:var(--fg); white-space:pre-wrap; word-break:break-word; }
-.pm-line .p{ color:var(--amber); }
-.pm-line .out{ color:var(--term-out); }
-.pm-line .cm{ color:var(--term-comment); font-style:italic; }
-.pm-cur{ display:inline-block; width:5px; height:10px; background:var(--amber); vertical-align:-1px; animation:blink 1.1s steps(1) infinite; }
-@keyframes blink{ 50%{ opacity:0; } }
-@media (prefers-reduced-motion:reduce){ .pm-cur{ animation:none; } }
-
-/* ---- connect screen ---- */
-.pm-connect{ padding:16px 14px; display:flex; flex-direction:column; gap:11px; }
-.pm-mark{ width:38px; height:38px; margin:0 auto; padding:7px; border:1px solid var(--border-bright); border-radius:var(--radius-sm); display:grid; grid-template-columns:1fr 1fr; grid-template-rows:1fr 1fr; gap:3px; }
-.pm-mark span{ border-radius:2px; }
-.pm-mark span:nth-child(1), .pm-mark span:nth-child(4){ background:var(--amber-faint); border:1px solid var(--amber-border); }
-.pm-mark span:nth-child(2), .pm-mark span:nth-child(3){ background:var(--amber); }
-.pm-h2{ text-align:center; font-size:11.5px; font-weight:600; color:var(--fg); }
-.pm-field{ display:flex; flex-direction:column; gap:4px; }
-.pm-field label{ font-size:7.5px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; }
-.pm-field .v{ background:var(--bg-surface); border:1px solid var(--border-bright); border-radius:var(--radius-sm); padding:8px 9px; font-size:9.5px; color:var(--fg); }
-.pm-toggle-row{ display:flex; align-items:center; justify-content:space-between; gap:8px; font-size:9.5px; color:var(--fg-muted); }
-.pm-toggle{ width:28px; height:16px; flex-shrink:0; border-radius:var(--radius-full); background:var(--bg-overlay); border:1px solid var(--border-bright); position:relative; }
-.pm-toggle::after{ content:''; position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%; background:var(--fg-dim); }
-.pm-toggle.on{ background:var(--amber-faint); border-color:var(--amber-border); }
-.pm-toggle.on::after{ left:14px; background:var(--amber); }
-.pm-btn{ background:var(--amber); color:#241a04; border-radius:var(--radius-sm); padding:9px; text-align:center; font-size:10px; font-weight:600; letter-spacing:0.03em; }
-.pm-hdr{ display:flex; align-items:center; gap:7px; font-size:7.5px; color:var(--fg-dim); text-transform:uppercase; letter-spacing:0.08em; }
-.pm-hdr::after{ content:''; flex:1; height:1px; background:var(--border); }
-.pm-saved-row{ display:flex; align-items:center; gap:7px; }
-.pm-saved-row .addr{ display:block; font-size:9.5px; color:var(--fg); }
-.pm-saved-row .meta{ display:block; font-size:8px; color:var(--fg-dim); }
-.pm-fab{ position:absolute; right:12px; bottom:12px; width:32px; height:32px; border-radius:var(--radius-md); background:var(--amber); color:#241a04; display:flex; align-items:center; justify-content:center; box-shadow:0 6px 16px var(--amber-glow); }
-.pm-fab svg{ width:15px; height:15px; }
-
-/* ---- sessions screen ---- */
-.pm-scroll{ flex:1; min-height:0; overflow:hidden; }
-.pm-sess-list{ padding:11px 10px; display:flex; flex-direction:column; gap:8px; }
-.pm-sess-card{ background:var(--bg-surface); border:1px solid var(--border-bright); border-left:2px solid transparent; border-radius:var(--radius-md); padding:10px; }
-.pm-sess-card.running{ border-left-color:var(--success); }
-.pm-sess-card.idle{ opacity:0.55; }
-.pm-sess-top{ display:flex; align-items:center; gap:7px; margin-bottom:7px; }
-.pm-sess-avatar{ width:20px; height:20px; flex-shrink:0; border-radius:var(--radius-xs); background:var(--bg-raised); color:var(--fg-muted); display:flex; align-items:center; justify-content:center; font-size:9px; font-weight:600; }
-.pm-sess-card.running .pm-sess-avatar{ background:var(--success-faint); color:var(--success); }
-.pm-sess-name{ flex:1; min-width:0; font-size:10.5px; color:var(--fg); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pm-chip{ flex-shrink:0; font-size:7.5px; padding:2px 6px; border-radius:var(--radius-full); white-space:nowrap; }
-.pm-chip.run{ background:var(--success-faint); color:var(--success); }
-.pm-chip.neutral{ background:var(--bg-raised); color:var(--fg-dim); border:1px solid var(--border-bright); }
-.pm-sess-meta{ display:flex; gap:9px; margin-bottom:7px; font-size:8.5px; color:var(--fg-dim); }
-.pm-pane-pills{ display:flex; gap:5px; }
-.pm-pane-pill{ flex:1; min-width:0; background:var(--bg-base); border:1px solid var(--border); border-radius:var(--radius-xs); padding:6px 7px; font-size:8.5px; color:var(--fg-dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-.pm-new-btn{ border:1px dashed var(--border-bright); border-radius:var(--radius-md); padding:10px; text-align:center; font-size:9.5px; color:var(--fg-muted); }
-.pm-new-btn b{ color:var(--amber); font-weight:600; }
-
 /* ============ .shot (real-device screenshot figure) ============
-   Replaces the pm-*/phone-frame mocks above wherever wave 2 drops in a real
-   iPhone screenshot; same frame geometry as .phone-frame/.phone-frame.sm so
-   it slots into the same hero/device-figure placements. The pm-*/phone-frame
-   CSS above stays until wave 2 removes its last caller.
+   Real iPhone screenshot frame used in the hero and every guide device-figure;
+   same frame geometry the old phone-mock CSS used before it was replaced.
    ================================================ */
 figure.shot{ margin:0; max-width:300px; }
 .shot.shot-sm{ max-width:250px; }
@@ -385,10 +279,8 @@ figcaption.shot-caption{ font-size:11.5px; color:var(--fg-dim); text-align:cente
 
 /* ============ device-figure (guide illustrative pairs) ============ */
 .device-figure{ display:grid; grid-template-columns:1fr 260px; gap:40px; align-items:start; margin-top:8px; }
-.device-figure .device{ position:sticky; top:100px; }
 @media (max-width:860px){
   .device-figure{ grid-template-columns:1fr; }
-  .device-figure .device{ position:static; order:-1; max-width:230px; margin:0 auto 20px; }
   .device-figure .shot{ position:static; order:-1; max-width:230px; margin:0 auto 20px; }
 }
 
