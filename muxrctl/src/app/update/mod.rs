@@ -223,7 +223,11 @@ fn clear_loading(state: &mut AppState) {
 /// Translate a key the ratcn runtime left unhandled.
 ///
 /// With a dialog open the modal layer owns the keyboard (Esc is the dialog's
-/// own `on_dismiss`), so only `Ctrl-C` is honoured here.
+/// own `on_dismiss`), so only `Ctrl-C` is honoured here. A dialog's single-letter
+/// shortcuts (n/s/x/r/y/h/g/d) are answered by the `DialogShortcuts` wrapper in
+/// `tui/components/shortcuts.rs` from the table in `app::shortcuts`, never by this
+/// reducer, because the modal floor turns every key a dialog ignored into a
+/// consumed one before the runner could deliver it here.
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
     // Ctrl-C always quits.
     if key.modifiers.ctrl && key.code == KeyCode::Char('c') {
