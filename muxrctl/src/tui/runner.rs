@@ -14,17 +14,22 @@
 //!    double-buffer diff suppresses redundant terminal writes, and the steady
 //!    cadence is what live status polling rides on. Drawing is one
 //!    [`Ratcn::render`] pass (see [`crate::tui::views::render`]).
-//! 5. `crossterm::event::poll(50 ms)` → a key press goes through
-//!    [`Ratcn::handle_event`] first: an emitted message becomes
-//!    `Message::Ui`, a consumed key becomes a `Tick`, and only a key the
-//!    component surface ignored reaches the reducer as `Message::Key`.
+//! 5. Drain input for the tick: block up to 50 ms for the first crossterm
+//!    event, then read whatever else is already queued (bounded, so a flood
+//!    cannot stall the render). Key presses and mouse events are kept, and a
+//!    run of consecutive pointer moves collapses to the last one. Each event
+//!    goes through [`Ratcn::handle_event`] first — keys and the mouse alike
+//!    (ratcn hit-tests, focuses and synthesises clicks): an emitted message
+//!    becomes `Message::Ui`, a consumed event becomes a `Tick`, and only a key
+//!    the component surface ignored reaches the reducer as `Message::Key`.
+//!    An idle tick still yields exactly one `Message::Tick`.
 //!
 //! The loop exits as soon as `AppState.should_quit` is set.
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
-use crossterm::event::{self, Event as CtEvent, KeyEventKind};
+use crossterm::event::{self, Event as CtEvent, KeyEventKind, MouseEventKind};
 use ratatui::DefaultTerminal;
 use ratcn::runtime::{Event, EventResult, KeyEvent, Ratcn, TabWrap};
 use tokio::sync::mpsc;
@@ -36,6 +41,9 @@ const TICK: Duration = Duration::from_millis(50);
 
 /// Channel capacity for the message bus. Cloned senders feed async task results.
 const CHANNEL_CAPACITY: usize = 256;
+
+/// Most input events drained in one tick (see [`poll_events`]).
+const MAX_EVENTS_PER_TICK: usize = 256;
 
 /// The runtime, wired to the app's focus and modal stack.
 ///
@@ -103,53 +111,96 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
         // (4) Render unconditionally.
         terminal.draw(|frame| crate::tui::views::render(frame, &mut ratcn, state, &theme))?;
 
-        // (5) Poll terminal input; route it through ratcn first.
-        let message = next_message(&mut ratcn, state)?;
-        // Best-effort send; the channel is only saturated under pathological
-        // backpressure, which this loop cannot produce (one message/tick).
-        let _ = tx.try_send(message);
+        // (5) Drain terminal input; route it through ratcn first.
+        for message in next_messages(&mut ratcn, state)? {
+            // Best-effort send; the channel is only saturated under pathological
+            // backpressure, which the per-tick drain bound keeps out of reach.
+            let _ = tx.try_send(message);
+        }
     }
 
     Ok(())
 }
 
-/// Poll for one input event and turn it into the [`Message`] it deserves.
+/// Drain this tick's input and turn it into the [`Message`]s it deserves.
 ///
 /// A key the declared surface emits a message for becomes [`Message::Ui`]; one
 /// it consumed internally (a focus move, a character typed into a field) is a
 /// plain tick; only a key nothing handled reaches the reducer as
 /// [`Message::Key`], which is what makes the dashboard's single-letter
-/// shortcuts safe while a text field has focus.
-fn next_message(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result<Message> {
-    let Some(event) = poll_event()? else {
-        return Ok(Message::Tick);
-    };
-    let Ok(event) = Event::try_from(event) else {
-        return Ok(Message::Tick);
-    };
-    let key: Option<KeyEvent> = match &event {
-        Event::Key(key) => Some(*key),
-        _ => None,
-    };
-    Ok(match ratcn.handle_event(event, state) {
-        EventResult::Emit(msg) => Message::Ui(msg),
-        EventResult::Consumed => Message::Tick,
-        EventResult::Ignored => key.map_or(Message::Tick, Message::Key),
-    })
+/// shortcuts safe while a text field has focus. Mouse events take the same
+/// route. A tick with no input yields exactly one [`Message::Tick`]: the
+/// reducer's periodic work rides on that heartbeat.
+fn next_messages(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result<Vec<Message>> {
+    let events = poll_events()?;
+    if events.is_empty() {
+        return Ok(vec![Message::Tick]);
+    }
+    let mut messages = Vec::with_capacity(events.len());
+    for event in events {
+        // `Unsupported` conversions yield nothing: only the idle tick is a
+        // heartbeat, an ignored event must not add one.
+        let Ok(event) = Event::try_from(event) else {
+            continue;
+        };
+        let key: Option<KeyEvent> = match &event {
+            Event::Key(key) => Some(*key),
+            _ => None,
+        };
+        messages.push(match ratcn.handle_event(event, state) {
+            EventResult::Emit(msg) => Message::Ui(msg),
+            EventResult::Consumed => Message::Tick,
+            EventResult::Ignored => key.map_or(Message::Tick, Message::Key),
+        });
+    }
+    if messages.is_empty() {
+        messages.push(Message::Tick);
+    }
+    Ok(messages)
 }
 
-/// Poll crossterm for input for one [`TICK`].
+/// Read the input for one [`TICK`]: block for the first event, then take what
+/// is already queued.
 ///
-/// Only a key **press** is returned, so terminals that report key release /
-/// repeat (crossterm "kitty" enhanced reporting) cannot double-fire.
-fn poll_event() -> Result<Option<CtEvent>> {
-    if event::poll(TICK)?
-        && let CtEvent::Key(key) = event::read()?
-        && key.kind == KeyEventKind::Press
-    {
-        return Ok(Some(CtEvent::Key(key)));
+/// The drain is bounded by [`MAX_EVENTS_PER_TICK`] so a flood (a trackpad
+/// sweeping the pointer over the window emits hundreds of moves) cannot
+/// starve the render. Paste, resize and focus events are dropped; routing
+/// paste is deliberately out of scope here.
+fn poll_events() -> Result<Vec<CtEvent>> {
+    let mut raw = Vec::new();
+    if event::poll(TICK)? {
+        raw.push(event::read()?);
+        while raw.len() < MAX_EVENTS_PER_TICK && event::poll(Duration::ZERO)? {
+            raw.push(event::read()?);
+        }
     }
-    Ok(None)
+    Ok(coalesce_moves(raw.into_iter().filter(keep_event).collect()))
+}
+
+/// Whether an event is routed at all: key **presses** only (so terminals that
+/// report key release / repeat via crossterm "kitty" enhanced reporting cannot
+/// double-fire) and every mouse event.
+fn keep_event(event: &CtEvent) -> bool {
+    match event {
+        CtEvent::Key(key) => key.kind == KeyEventKind::Press,
+        CtEvent::Mouse(_) => true,
+        _ => false,
+    }
+}
+
+/// Collapse each run of consecutive pointer moves to its last event. Hover
+/// only needs the latest position; nothing else is merged or reordered, so a
+/// click's Down/Up keep their order relative to the moves around them.
+fn coalesce_moves(events: Vec<CtEvent>) -> Vec<CtEvent> {
+    let is_move = |e: &CtEvent| matches!(e, CtEvent::Mouse(m) if m.kind == MouseEventKind::Moved);
+    let mut out: Vec<CtEvent> = Vec::with_capacity(events.len());
+    for event in events {
+        if is_move(&event) && out.last().is_some_and(is_move) {
+            out.pop();
+        }
+        out.push(event);
+    }
+    out
 }
 
 /// Apply runner-side effects from an update cycle.
@@ -666,6 +717,78 @@ fn tls_mode(mode: muxrd::config::CertMode) -> crate::app::state::cert::TlsMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod input {
+        use super::super::{coalesce_moves, keep_event};
+        use crossterm::event::{
+            Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
+            MouseEvent, MouseEventKind,
+        };
+
+        fn mouse(kind: MouseEventKind, column: u16, row: u16) -> CtEvent {
+            CtEvent::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: KeyModifiers::NONE,
+            })
+        }
+
+        fn key(kind: KeyEventKind) -> CtEvent {
+            CtEvent::Key(KeyEvent::new_with_kind(
+                KeyCode::Char('a'),
+                KeyModifiers::NONE,
+                kind,
+            ))
+        }
+
+        #[test]
+        fn a_run_of_moves_before_a_key_collapses_to_the_last() {
+            let events = vec![
+                mouse(MouseEventKind::Moved, 1, 1),
+                mouse(MouseEventKind::Moved, 2, 2),
+                mouse(MouseEventKind::Moved, 3, 3),
+                key(KeyEventKind::Press),
+            ];
+            assert_eq!(
+                coalesce_moves(events),
+                vec![mouse(MouseEventKind::Moved, 3, 3), key(KeyEventKind::Press)]
+            );
+        }
+
+        #[test]
+        fn moves_around_a_press_keep_their_order() {
+            let down = MouseEventKind::Down(MouseButton::Left);
+            let up = MouseEventKind::Up(MouseButton::Left);
+            let events = vec![
+                mouse(MouseEventKind::Moved, 1, 1),
+                mouse(down, 1, 1),
+                mouse(MouseEventKind::Moved, 2, 2),
+                mouse(MouseEventKind::Moved, 3, 3),
+                mouse(up, 3, 3),
+            ];
+            assert_eq!(
+                coalesce_moves(events),
+                vec![
+                    mouse(MouseEventKind::Moved, 1, 1),
+                    mouse(down, 1, 1),
+                    mouse(MouseEventKind::Moved, 3, 3),
+                    mouse(up, 3, 3),
+                ]
+            );
+        }
+
+        #[test]
+        fn only_presses_and_mouse_events_are_kept() {
+            assert!(keep_event(&key(KeyEventKind::Press)));
+            assert!(!keep_event(&key(KeyEventKind::Release)));
+            assert!(!keep_event(&key(KeyEventKind::Repeat)));
+            assert!(keep_event(&mouse(MouseEventKind::Moved, 0, 0)));
+            assert!(!keep_event(&CtEvent::FocusGained));
+            assert!(!keep_event(&CtEvent::Resize(80, 24)));
+            assert!(!keep_event(&CtEvent::Paste("x".into())));
+        }
+    }
 
     #[test]
     fn concrete_host_keeps_configured_bind_ip() {

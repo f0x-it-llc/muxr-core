@@ -106,7 +106,10 @@ mod tests {
     use crate::tui::runner::build_ratcn;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratcn::runtime::{Event, EventResult, FocusState, KeyCode, KeyEvent};
+    use ratcn::runtime::{
+        Event, EventResult, FocusState, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
+        MouseKind,
+    };
 
     /// The real loop in miniature: one `Ratcn`, one `AppState`, and the runner's
     /// own key routing — ratcn first, the reducer only for what it ignored.
@@ -156,6 +159,46 @@ mod tests {
             };
             let _ = update(&mut self.state, message);
             self.draw();
+        }
+
+        /// Feed one pointer event through the same Emit/Consumed/Ignored mapping
+        /// as [`Self::key`] (an ignored pointer event is a plain tick).
+        fn mouse(&mut self, kind: MouseKind, column: u16, row: u16) {
+            let event = Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: Modifiers::NONE,
+            });
+            let message = match self.ratcn.handle_event(event, &self.state) {
+                EventResult::Emit(msg) => Message::Ui(msg),
+                EventResult::Consumed | EventResult::Ignored => Message::Tick,
+            };
+            let _ = update(&mut self.state, message);
+            self.draw();
+        }
+
+        /// A left click: ratcn synthesises the `Click` on the `Up`, as in its
+        /// own pointer tests.
+        fn click(&mut self, column: u16, row: u16) {
+            self.mouse(MouseKind::Down(MouseButton::Left), column, row);
+            self.mouse(MouseKind::Up(MouseButton::Left), column, row);
+        }
+
+        /// The cell of the first character of `label` on `row_marker`'s row
+        /// (the row containing both), so a section title with the same word is
+        /// not matched. Columns count cells, not bytes.
+        fn locate(&self, row_marker: &str, label: &str) -> (u16, u16) {
+            let screen = self.screen();
+            for (y, line) in screen.lines().enumerate() {
+                if line.contains(row_marker)
+                    && let Some(byte) = line.find(label)
+                {
+                    let x = line[..byte].chars().count();
+                    return (x as u16, y as u16);
+                }
+            }
+            panic!("{label:?} not found on a row with {row_marker:?}:\n{screen}");
         }
 
         fn type_str(&mut self, text: &str) {
@@ -326,5 +369,54 @@ mod tests {
         harness.key(KeyCode::Esc);
         harness.key(KeyCode::Char('q'));
         assert!(harness.state.should_quit);
+    }
+
+    const BUTTON_ROW: &str = "Setup wizard";
+
+    #[test]
+    fn clicking_the_tokens_button_opens_the_tokens_dialog() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Tokens");
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+    }
+
+    #[test]
+    fn clicking_create_in_the_tokens_dialog_opens_the_create_form() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        let screen = harness.screen();
+        let (x, y) = screen
+            .lines()
+            .enumerate()
+            .find_map(|(y, line)| {
+                line.find("Create…")
+                    .map(|b| (line[..b].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("Create… not painted:\n{screen}"));
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenCreate));
+    }
+
+    #[test]
+    fn a_click_under_an_open_dialog_does_not_reach_the_dashboard() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Devices");
+        harness.key(KeyCode::Char('t'));
+        let before: Vec<_> = harness.state.ui.modals.ids().cloned().collect();
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        let after: Vec<_> = harness.state.ui.modals.ids().cloned().collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn hovering_a_button_changes_no_state() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Tokens");
+        harness.mouse(MouseKind::Moved, x, y);
+        assert_eq!(harness.state.top_dialog(), None);
+        assert!(!harness.state.should_quit);
     }
 }
