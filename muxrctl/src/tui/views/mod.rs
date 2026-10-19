@@ -141,13 +141,29 @@ mod tests {
     use crate::app::state::DialogId;
     use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
     use crate::app::{Message, update};
-    use crate::tui::runner::build_ratcn;
+    use crate::tui::runner::{EventSource, InputPump, build_ratcn, route_event};
+    use crossterm::event::Event as CtEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratcn::runtime::{
         Event, EventResult, FocusState, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
         MouseKind,
     };
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    /// A scripted terminal: everything queued is ready at once.
+    struct Script(VecDeque<CtEvent>);
+
+    impl EventSource for Script {
+        fn poll(&mut self, _timeout: Duration) -> anyhow::Result<bool> {
+            Ok(!self.0.is_empty())
+        }
+
+        fn read(&mut self) -> anyhow::Result<CtEvent> {
+            Ok(self.0.pop_front().expect("polled ready"))
+        }
+    }
 
     /// The real loop in miniature: one `Ratcn`, one `AppState`, and the runner's
     /// own key routing — ratcn first, the reducer only for what it ignored.
@@ -197,6 +213,27 @@ mod tests {
             };
             let _ = update(&mut self.state, message);
             self.draw();
+        }
+
+        /// Feed `events` as one terminal burst, iterating exactly as `run()`
+        /// does: fill the pump, route ONE event with the current state, reduce,
+        /// redraw, repeat until the queue is empty. Returns how many `Tick`s
+        /// the routing produced (the heartbeat is the clock's job, not the
+        /// burst's, so this must be zero).
+        fn burst(&mut self, events: Vec<CtEvent>) -> usize {
+            let mut source = Script(events.into());
+            let mut pump = InputPump::new(Instant::now());
+            let mut ticks = 0;
+            loop {
+                pump.fill(&mut source).expect("fill");
+                let Some(event) = pump.next() else { break };
+                if let Some(message) = route_event(&mut self.ratcn, &self.state, event) {
+                    ticks += usize::from(matches!(message, Message::Tick));
+                    let _ = update(&mut self.state, message);
+                }
+                self.draw();
+            }
+            ticks
         }
 
         /// Feed one pointer event through the same Emit/Consumed/Ignored mapping
@@ -443,6 +480,71 @@ mod tests {
         harness.key(KeyCode::Esc);
         harness.key(KeyCode::Char('q'));
         assert!(harness.state.should_quit);
+    }
+
+    fn ct_key(c: char) -> CtEvent {
+        CtEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    #[test]
+    fn a_burst_of_characters_all_land_in_the_focused_field() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.burst(vec![ct_key('1'), ct_key('9'), ct_key('2')]);
+        assert_eq!(harness.state.config.host, "192");
+
+        harness.burst("168.1.10xyz".chars().map(ct_key).collect());
+        assert_eq!(harness.state.config.host, "192168.1.10xyz");
+    }
+
+    #[test]
+    fn type_ahead_survives_a_surface_change_inside_one_burst() {
+        let mut harness = Harness::new();
+        harness.tokens_dialog_with(&["phone"]);
+        harness.burst(vec![ct_key('x'), ct_key('y')]);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert!(harness.state.tokens.loading, "the revoke path did not run");
+    }
+
+    #[test]
+    fn a_paste_is_one_atomic_edit_into_the_focused_field() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.burst(vec![CtEvent::Paste("10.0.0.5".into())]);
+        assert_eq!(harness.state.config.host, "10.0.0.5");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Config));
+        assert!(!harness.state.should_quit);
+    }
+
+    #[test]
+    fn a_paste_cannot_fire_a_shortcut() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        harness.burst(vec![CtEvent::Paste("n".into())]);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert_eq!(harness.state.ui.modals.ids().len(), 1);
+    }
+
+    #[test]
+    fn a_flood_of_moves_then_a_key_opens_the_dialog_without_ticks() {
+        let mut harness = Harness::new();
+        let mut events: Vec<CtEvent> = (0..300u16)
+            .map(|i| {
+                CtEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Moved,
+                    column: i % 80,
+                    row: i % 24,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                })
+            })
+            .collect();
+        events.push(ct_key('t'));
+        let ticks = harness.burst(events);
+        assert_eq!(ticks, 0);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
     }
 
     const BUTTON_ROW: &str = "Setup wizard";

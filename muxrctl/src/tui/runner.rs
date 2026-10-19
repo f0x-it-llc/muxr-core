@@ -10,26 +10,33 @@
 //! 3. Apply runner-side effects: `Quit` exits the loop; async actions are
 //!    dispatched onto `tokio::task::spawn_blocking` tasks that post their
 //!    results back over a cloned `tx`.
-//! 4. `terminal.draw(...)` **unconditionally** every ~50 ms tick — ratatui's
-//!    double-buffer diff suppresses redundant terminal writes, and the steady
-//!    cadence is what live status polling rides on. Drawing is one
+//! 4. `terminal.draw(...)` **unconditionally** every iteration — ratatui's
+//!    double-buffer diff suppresses redundant terminal writes. Drawing is one
 //!    [`Ratcn::render`] pass (see [`crate::tui::views::render`]).
-//! 5. Drain input for the tick: block up to 50 ms for the first crossterm
-//!    event, then read whatever else is already queued (bounded, so a flood
-//!    cannot stall the render). Key presses and mouse events are kept, and a
-//!    run of consecutive pointer moves collapses to the last one. Each event
-//!    goes through [`Ratcn::handle_event`] first — keys and the mouse alike
-//!    (ratcn hit-tests, focuses and synthesises clicks): an emitted message
-//!    becomes `Message::Ui`, a consumed event becomes nothing, and only a key
-//!    the component surface ignored reaches the reducer as `Message::Key`.
-//!    The heartbeat is exactly one `Message::Tick` per drain, added when the
-//!    drain produced no `Ui`/`Key` message (see [`messages_for`]).
+//! 5. Route **at most one** input event per iteration from a persistent
+//!    pending queue ([`InputPump`]). It goes through [`Ratcn::handle_event`]
+//!    with the current state: an emitted message becomes `Message::Ui`, a
+//!    consumed event becomes nothing, and only a key the component surface
+//!    ignored reaches the reducer as `Message::Key`. Key presses, mouse events
+//!    and bracketed pastes are kept; a run of consecutive pointer moves
+//!    collapses to the last one. Why one per frame: routing a whole drain
+//!    against one `&AppState` made N typed characters each edit the same stale
+//!    field value (a paste left only its last character) and let later events
+//!    hit a surface the earlier ones had already changed; reducing and
+//!    redrawing between events keeps every event seeing what the previous one
+//!    produced. With a non-empty queue the loop does not block, so a burst
+//!    costs fast iterations, not one tick each.
+//! 6. The heartbeat is a wall-clock `Message::Tick`, one per [`TICK`] of
+//!    elapsed time whatever the input rate (the reducer's pollers count Ticks
+//!    as 50 ms each).
 //!
 //! The loop exits as soon as `AppState.should_quit` is set.
 
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
+use std::collections::VecDeque;
+
 use crossterm::event::{self, Event as CtEvent, KeyEventKind, MouseEventKind};
 use ratatui::DefaultTerminal;
 use ratcn::runtime::{Event, EventResult, KeyEvent, Ratcn, TabWrap};
@@ -43,7 +50,7 @@ const TICK: Duration = Duration::from_millis(50);
 /// Channel capacity for the message bus. Cloned senders feed async task results.
 const CHANNEL_CAPACITY: usize = 256;
 
-/// Most input events drained in one tick (see [`poll_events`]).
+/// Most input events read in one [`InputPump::fill`].
 const MAX_EVENTS_PER_TICK: usize = 256;
 
 /// The runtime, wired to the app's focus and modal stack.
@@ -66,6 +73,8 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
     let mut ratcn = build_ratcn();
     let theme = crate::tui::theme::muxr();
     let started = Instant::now();
+    let mut pump = InputPump::new(started);
+    let mut source = CrosstermSource;
 
     // Restore persisted advertise_trust before the first render so the
     // operator's last-set value survives restarts.
@@ -109,103 +118,167 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
             break;
         }
 
-        // (4) Render unconditionally.
+        // (3) Render unconditionally.
         terminal.draw(|frame| crate::tui::views::render(frame, &mut ratcn, state, &theme))?;
 
-        // (5) Drain terminal input; route it through ratcn first.
-        for message in next_messages(&mut ratcn, state)? {
+        // (4) Route at most one event with the current state; the next
+        // iteration reduces and redraws before the following one is routed.
+        pump.fill(&mut source)?;
+        if let Some(event) = pump.next()
+            && let Some(message) = route_event(&mut ratcn, state, event)
+        {
             // Best-effort send; the channel is only saturated under pathological
-            // backpressure, which the per-tick drain bound keeps out of reach.
+            // backpressure, which the per-fill read bound keeps out of reach.
             let _ = tx.try_send(message);
+        }
+
+        // (5) Wall-clock heartbeat.
+        if pump.heartbeat_due(Instant::now()) {
+            let _ = tx.try_send(Message::Tick);
         }
     }
 
     Ok(())
 }
 
-/// Drain this tick's input and turn it into the [`Message`]s it deserves.
+/// Route one terminal event through the component surface with `state` and map
+/// the outcome to the message it deserves.
+///
+/// Events ratcn cannot represent yield nothing.
+pub(crate) fn route_event(
+    ratcn: &mut Ratcn<AppState, UiMsg>,
+    state: &AppState,
+    event: CtEvent,
+) -> Option<Message> {
+    let event = Event::try_from(event).ok()?;
+    let key: Option<KeyEvent> = match &event {
+        Event::Key(key) => Some(*key),
+        _ => None,
+    };
+    message_for(ratcn.handle_event(event, state), key)
+}
+
+/// Map one routed event's outcome (with its key, when it was one) to a message.
 ///
 /// A key the declared surface emits a message for becomes [`Message::Ui`]; one
 /// it consumed internally (a focus move, a character typed into a field) adds
 /// nothing; only a key nothing handled reaches the reducer as
 /// [`Message::Key`], which is what makes the dashboard's single-letter
-/// shortcuts safe while a text field has focus. Mouse events take the same
-/// route. See [`messages_for`] for the heartbeat rule.
-fn next_messages(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result<Vec<Message>> {
-    let mut results = Vec::new();
-    for event in poll_events()? {
-        // `Unsupported` conversions yield nothing.
-        let Ok(event) = Event::try_from(event) else {
-            continue;
-        };
-        let key: Option<KeyEvent> = match &event {
-            Event::Key(key) => Some(*key),
-            _ => None,
-        };
-        results.push((ratcn.handle_event(event, state), key));
+/// shortcuts safe while a text field has focus. The heartbeat is not produced
+/// here: see [`InputPump::heartbeat_due`].
+pub(crate) fn message_for(result: EventResult<UiMsg>, key: Option<KeyEvent>) -> Option<Message> {
+    match result {
+        EventResult::Emit(msg) => Some(Message::Ui(msg)),
+        EventResult::Consumed => None,
+        EventResult::Ignored => key.map(Message::Key),
     }
-    Ok(messages_for(results))
 }
 
-/// Map each routed event's outcome (with its key, when it was one) to messages.
-///
-/// The reducer's periodic work (status poll every 20th tick, the QR and wizard
-/// polls) counts `Message::Tick`s as if each were 50 ms, so the heartbeat must
-/// be one per drain, not one per event: a click's Down and Up or a drag's
-/// moves would otherwise advance those counters faster than wall time. A
-/// consumed event therefore yields nothing, and a `Tick` is appended only when
-/// the drain produced no `Ui`/`Key` message at all (idle, or all consumed). A
-/// drain that did produce one appends none; the next idle poll, at most one
-/// [`TICK`] away, supplies the heartbeat.
-fn messages_for(results: Vec<(EventResult<UiMsg>, Option<KeyEvent>)>) -> Vec<Message> {
-    let mut messages: Vec<Message> = results
-        .into_iter()
-        .filter_map(|(result, key)| match result {
-            EventResult::Emit(msg) => Some(Message::Ui(msg)),
-            EventResult::Consumed => None,
-            EventResult::Ignored => key.map(Message::Key),
-        })
-        .collect();
-    if messages.is_empty() {
-        messages.push(Message::Tick);
-    }
-    messages
+/// Where terminal events come from; the seam that lets tests script input.
+pub(crate) trait EventSource {
+    /// Whether an event is ready within `timeout`.
+    fn poll(&mut self, timeout: Duration) -> Result<bool>;
+    /// Read the ready event.
+    fn read(&mut self) -> Result<CtEvent>;
 }
 
-/// Read the input for one [`TICK`]: block for the first event, then take what
-/// is already queued.
+/// The real source: crossterm's global event queue.
+struct CrosstermSource;
+
+impl EventSource for CrosstermSource {
+    fn poll(&mut self, timeout: Duration) -> Result<bool> {
+        Ok(event::poll(timeout)?)
+    }
+
+    fn read(&mut self) -> Result<CtEvent> {
+        Ok(event::read()?)
+    }
+}
+
+/// Input held across loop iterations: events read but not yet routed, and the
+/// time of the last heartbeat.
 ///
-/// The drain is bounded by [`MAX_EVENTS_PER_TICK`] so a flood (a trackpad
-/// sweeping the pointer over the window emits hundreds of moves) cannot
-/// starve the render. Paste, resize and focus events are dropped; routing
-/// paste is deliberately out of scope here.
-fn poll_events() -> Result<Vec<CtEvent>> {
-    let mut raw = Vec::new();
-    if event::poll(TICK)? {
-        raw.push(event::read()?);
-        while raw.len() < MAX_EVENTS_PER_TICK && event::poll(Duration::ZERO)? {
-            raw.push(event::read()?);
+/// Persisting the queue is what lets the loop route one event per frame; a
+/// drain-and-route-all design reintroduces stale-state edits.
+pub(crate) struct InputPump {
+    pending: VecDeque<CtEvent>,
+    last_tick: Instant,
+}
+
+impl InputPump {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self {
+            pending: VecDeque::new(),
+            last_tick: now,
         }
     }
-    Ok(coalesce_moves(raw.into_iter().filter(keep_event).collect()))
+
+    /// Refill the queue, only when it is empty.
+    ///
+    /// Waits at most until the next heartbeat is due (so an idle loop wakes
+    /// exactly on it), then reads whatever else is already queued, bounded by
+    /// [`MAX_EVENTS_PER_TICK`] so a flood (a trackpad sweeping the pointer over
+    /// the window emits hundreds of moves) cannot starve the render. Resize and
+    /// focus events are dropped.
+    pub(crate) fn fill(&mut self, source: &mut impl EventSource) -> Result<()> {
+        if !self.pending.is_empty() {
+            return Ok(());
+        }
+        let remaining = TICK.saturating_sub(self.last_tick.elapsed());
+        if !source.poll(remaining)? {
+            return Ok(());
+        }
+        let mut raw = vec![source.read()?];
+        while raw.len() < MAX_EVENTS_PER_TICK && source.poll(Duration::ZERO)? {
+            raw.push(source.read()?);
+        }
+        self.pending
+            .extend(coalesce_moves(raw.into_iter().filter(keep_event).collect()));
+        Ok(())
+    }
+
+    /// Pop the next event to route. A pointer move directly followed by another
+    /// is superseded and never routed; hover only needs the latest position.
+    pub(crate) fn next(&mut self) -> Option<CtEvent> {
+        let mut event = self.pending.pop_front()?;
+        while is_move(&event) && self.pending.front().is_some_and(is_move) {
+            event = self.pending.pop_front()?;
+        }
+        Some(event)
+    }
+
+    /// Whether a heartbeat is due at `now`; if so it is consumed. One per
+    /// [`TICK`] of wall time at most, and a long stall yields one, not a
+    /// backlog.
+    pub(crate) fn heartbeat_due(&mut self, now: Instant) -> bool {
+        if now.saturating_duration_since(self.last_tick) >= TICK {
+            self.last_tick = now;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 /// Whether an event is routed at all: key **presses** only (so terminals that
 /// report key release / repeat via crossterm "kitty" enhanced reporting cannot
-/// double-fire) and every mouse event.
+/// double-fire), every mouse event, and bracketed pastes (one atomic edit).
 fn keep_event(event: &CtEvent) -> bool {
     match event {
         CtEvent::Key(key) => key.kind == KeyEventKind::Press,
-        CtEvent::Mouse(_) => true,
+        CtEvent::Mouse(_) | CtEvent::Paste(_) => true,
         _ => false,
     }
+}
+
+fn is_move(event: &CtEvent) -> bool {
+    matches!(event, CtEvent::Mouse(m) if m.kind == MouseEventKind::Moved)
 }
 
 /// Collapse each run of consecutive pointer moves to its last event. Hover
 /// only needs the latest position; nothing else is merged or reordered, so a
 /// click's Down/Up keep their order relative to the moves around them.
 fn coalesce_moves(events: Vec<CtEvent>) -> Vec<CtEvent> {
-    let is_move = |e: &CtEvent| matches!(e, CtEvent::Mouse(m) if m.kind == MouseEventKind::Moved);
     let mut out: Vec<CtEvent> = Vec::with_capacity(events.len());
     for event in events {
         if is_move(&event) && out.last().is_some_and(is_move) {
@@ -732,49 +805,90 @@ mod tests {
     use super::*;
 
     mod heartbeat {
-        use super::super::messages_for;
-        use crate::app::state::DialogId;
-        use crate::app::{Message, UiMsg};
-        use ratcn::runtime::{EventResult, KeyCode, KeyEvent};
+        use super::super::{EventSource, InputPump, MAX_EVENTS_PER_TICK, TICK};
+        use anyhow::Result;
+        use crossterm::event::{Event as CtEvent, KeyCode, KeyEvent, KeyModifiers};
+        use std::collections::VecDeque;
+        use std::time::{Duration, Instant};
 
-        fn ticks(messages: &[Message]) -> usize {
-            messages
-                .iter()
-                .filter(|m| matches!(m, Message::Tick))
-                .count()
+        struct Scripted(VecDeque<CtEvent>);
+
+        impl EventSource for Scripted {
+            fn poll(&mut self, _timeout: Duration) -> Result<bool> {
+                Ok(!self.0.is_empty())
+            }
+            fn read(&mut self) -> Result<CtEvent> {
+                Ok(self.0.pop_front().expect("polled ready"))
+            }
+        }
+
+        fn press(c: char) -> CtEvent {
+            CtEvent::Key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE))
         }
 
         #[test]
-        fn an_idle_drain_is_one_tick() {
-            assert_eq!(ticks(&messages_for(Vec::new())), 1);
+        fn one_tick_per_tick_interval_of_wall_time() {
+            let t0 = Instant::now();
+            let mut pump = InputPump::new(t0 - TICK);
+            assert!(pump.heartbeat_due(t0));
+            assert!(!pump.heartbeat_due(t0 + Duration::from_millis(10)));
+            assert!(pump.heartbeat_due(t0 + Duration::from_millis(50)));
         }
 
         #[test]
-        fn a_drain_of_consumed_events_is_exactly_one_tick() {
-            let consumed = (0..5).map(|_| (EventResult::Consumed, None)).collect();
-            let messages = messages_for(consumed);
-            assert_eq!(messages.len(), 1);
-            assert_eq!(ticks(&messages), 1);
+        fn a_long_stall_yields_a_single_tick() {
+            let t0 = Instant::now();
+            let mut pump = InputPump::new(t0);
+            let later = t0 + Duration::from_millis(300);
+            assert!(pump.heartbeat_due(later));
+            assert!(!pump.heartbeat_due(later));
         }
 
         #[test]
-        fn a_drain_with_a_ui_or_key_message_adds_no_tick() {
+        fn nothing_ready_yields_no_event() {
+            let mut pump = InputPump::new(Instant::now());
+            pump.fill(&mut Scripted(VecDeque::new())).unwrap();
+            assert!(pump.next().is_none());
+        }
+
+        #[test]
+        fn fill_stops_at_the_bound_and_leaves_the_rest() {
+            let mut source = Scripted((0..MAX_EVENTS_PER_TICK + 10).map(|_| press('a')).collect());
+            let mut pump = InputPump::new(Instant::now());
+            pump.fill(&mut source).unwrap();
+            assert_eq!(source.0.len(), 10);
+            assert_eq!(pump.pending.len(), MAX_EVENTS_PER_TICK);
+            // A non-empty queue is not refilled.
+            pump.fill(&mut source).unwrap();
+            assert_eq!(source.0.len(), 10);
+            while pump.next().is_some() {}
+            pump.fill(&mut source).unwrap();
+            assert!(source.0.is_empty());
+            assert_eq!(pump.pending.len(), 10);
+        }
+
+        #[test]
+        fn message_for_maps_each_outcome() {
+            use super::super::message_for;
+            use crate::app::state::DialogId;
+            use crate::app::{Message, UiMsg};
+            use ratcn::runtime::{EventResult, KeyCode, KeyEvent};
             let key = KeyEvent::new(KeyCode::Char('q'));
-            let messages = messages_for(vec![
-                (EventResult::Consumed, None),
-                (EventResult::Emit(UiMsg::Open(DialogId::Tokens)), None),
-                (EventResult::Ignored, Some(key)),
-                (EventResult::Ignored, None),
-            ]);
-            assert_eq!(messages.len(), 2);
-            assert_eq!(ticks(&messages), 0);
-            assert!(matches!(messages[0], Message::Ui(_)));
-            assert!(matches!(messages[1], Message::Key(_)));
+            assert!(matches!(
+                message_for(EventResult::Emit(UiMsg::Open(DialogId::Tokens)), None),
+                Some(Message::Ui(_))
+            ));
+            assert!(message_for(EventResult::Consumed, Some(key)).is_none());
+            assert!(matches!(
+                message_for(EventResult::Ignored, Some(key)),
+                Some(Message::Key(_))
+            ));
+            assert!(message_for(EventResult::Ignored, None).is_none());
         }
     }
 
     mod input {
-        use super::super::{coalesce_moves, keep_event};
+        use super::super::{InputPump, coalesce_moves, keep_event};
         use crossterm::event::{
             Event as CtEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton,
             MouseEvent, MouseEventKind,
@@ -841,7 +955,21 @@ mod tests {
             assert!(keep_event(&mouse(MouseEventKind::Moved, 0, 0)));
             assert!(!keep_event(&CtEvent::FocusGained));
             assert!(!keep_event(&CtEvent::Resize(80, 24)));
-            assert!(!keep_event(&CtEvent::Paste("x".into())));
+            assert!(keep_event(&CtEvent::Paste("x".into())));
+        }
+
+        #[test]
+        fn next_drops_a_superseded_move_but_routes_one_before_a_press() {
+            let down = MouseEventKind::Down(MouseButton::Left);
+            let mut pump = InputPump::new(std::time::Instant::now());
+            pump.pending.extend([
+                mouse(MouseEventKind::Moved, 1, 1),
+                mouse(MouseEventKind::Moved, 2, 2),
+                mouse(down, 2, 2),
+            ]);
+            assert_eq!(pump.next(), Some(mouse(MouseEventKind::Moved, 2, 2)));
+            assert_eq!(pump.next(), Some(mouse(down, 2, 2)));
+            assert_eq!(pump.next(), None);
         }
     }
 
