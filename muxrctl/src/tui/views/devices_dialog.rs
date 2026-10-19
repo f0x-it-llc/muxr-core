@@ -17,6 +17,8 @@ use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::devices::{DEVICES_EXPLAIN, DevicesMsg, humanize_registered_at};
 use crate::server::devices::DeviceRecord;
+use crate::tui::components::DialogShortcuts;
+use crate::tui::components::action::{action, destructive};
 
 /// Rows the device list gets, whatever it holds.
 const LIST_ROWS: u16 = 6;
@@ -43,23 +45,31 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(CONTENT_ROWS, content)
         .action(
             "dev_remove",
-            Button::new("Remove…")
-                .destructive()
-                .disabled(remove_disabled)
-                .on_press(|| UiMsg::Devices(DevicesMsg::RemoveRequested)),
+            destructive(
+                Button::new("Remove…")
+                    .destructive()
+                    .disabled(remove_disabled)
+                    .on_press(|| UiMsg::Devices(DevicesMsg::RemoveRequested)),
+            ),
         )
         .action(
             "dev_refresh",
-            Button::new("Refresh")
-                .ghost()
-                .on_press(|| UiMsg::Devices(DevicesMsg::Refresh)),
+            action(
+                Button::new("Refresh")
+                    .ghost()
+                    .on_press(|| UiMsg::Devices(DevicesMsg::Refresh)),
+            ),
         )
         .action(
             "dev_close",
-            Button::new("Close").on_press(|| UiMsg::Devices(DevicesMsg::Close)),
+            action(Button::new("Close").on_press(|| UiMsg::Devices(DevicesMsg::Close))),
         )
         .on_dismiss(|| UiMsg::Devices(DevicesMsg::Close));
-    ctx.modal(DialogId::Devices.id(), dialog, area);
+    ctx.modal(
+        DialogId::Devices.id(),
+        DialogShortcuts::new(DialogId::Devices, dialog),
+        area,
+    );
 }
 
 /// The dialog's content strip: relay status, the count, the list, and the
@@ -165,18 +175,26 @@ pub fn declare_remove_confirm(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .description("It stops receiving push notifications until the app registers again.")
         .action(
             "device_remove_cancel",
-            Button::new("Cancel")
-                .secondary()
-                .on_press(|| UiMsg::Devices(DevicesMsg::RemoveCancelled)),
+            action(
+                Button::new("Cancel")
+                    .secondary()
+                    .on_press(|| UiMsg::Devices(DevicesMsg::RemoveCancelled)),
+            ),
         )
         .action(
             "device_remove_confirm",
-            Button::new("Remove")
-                .destructive()
-                .on_press(|| UiMsg::Devices(DevicesMsg::RemoveConfirmed)),
+            destructive(
+                Button::new("Remove")
+                    .destructive()
+                    .on_press(|| UiMsg::Devices(DevicesMsg::RemoveConfirmed)),
+            ),
         )
         .on_dismiss(|| UiMsg::Devices(DevicesMsg::RemoveCancelled));
-    ctx.modal(DialogId::DeviceRemoveConfirm.id(), dialog, area);
+    ctx.modal(
+        DialogId::DeviceRemoveConfirm.id(),
+        DialogShortcuts::new(DialogId::DeviceRemoveConfirm, dialog),
+        area,
+    );
 }
 
 #[cfg(test)]

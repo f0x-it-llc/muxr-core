@@ -20,9 +20,10 @@
 //!    run of consecutive pointer moves collapses to the last one. Each event
 //!    goes through [`Ratcn::handle_event`] first — keys and the mouse alike
 //!    (ratcn hit-tests, focuses and synthesises clicks): an emitted message
-//!    becomes `Message::Ui`, a consumed event becomes a `Tick`, and only a key
+//!    becomes `Message::Ui`, a consumed event becomes nothing, and only a key
 //!    the component surface ignored reaches the reducer as `Message::Key`.
-//!    An idle tick still yields exactly one `Message::Tick`.
+//!    The heartbeat is exactly one `Message::Tick` per drain, added when the
+//!    drain produced no `Ui`/`Key` message (see [`messages_for`]).
 //!
 //! The loop exits as soon as `AppState.should_quit` is set.
 
@@ -125,21 +126,15 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
 /// Drain this tick's input and turn it into the [`Message`]s it deserves.
 ///
 /// A key the declared surface emits a message for becomes [`Message::Ui`]; one
-/// it consumed internally (a focus move, a character typed into a field) is a
-/// plain tick; only a key nothing handled reaches the reducer as
+/// it consumed internally (a focus move, a character typed into a field) adds
+/// nothing; only a key nothing handled reaches the reducer as
 /// [`Message::Key`], which is what makes the dashboard's single-letter
 /// shortcuts safe while a text field has focus. Mouse events take the same
-/// route. A tick with no input yields exactly one [`Message::Tick`]: the
-/// reducer's periodic work rides on that heartbeat.
+/// route. See [`messages_for`] for the heartbeat rule.
 fn next_messages(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result<Vec<Message>> {
-    let events = poll_events()?;
-    if events.is_empty() {
-        return Ok(vec![Message::Tick]);
-    }
-    let mut messages = Vec::with_capacity(events.len());
-    for event in events {
-        // `Unsupported` conversions yield nothing: only the idle tick is a
-        // heartbeat, an ignored event must not add one.
+    let mut results = Vec::new();
+    for event in poll_events()? {
+        // `Unsupported` conversions yield nothing.
         let Ok(event) = Event::try_from(event) else {
             continue;
         };
@@ -147,16 +142,34 @@ fn next_messages(ratcn: &mut Ratcn<AppState, UiMsg>, state: &AppState) -> Result
             Event::Key(key) => Some(*key),
             _ => None,
         };
-        messages.push(match ratcn.handle_event(event, state) {
-            EventResult::Emit(msg) => Message::Ui(msg),
-            EventResult::Consumed => Message::Tick,
-            EventResult::Ignored => key.map_or(Message::Tick, Message::Key),
-        });
+        results.push((ratcn.handle_event(event, state), key));
     }
+    Ok(messages_for(results))
+}
+
+/// Map each routed event's outcome (with its key, when it was one) to messages.
+///
+/// The reducer's periodic work (status poll every 20th tick, the QR and wizard
+/// polls) counts `Message::Tick`s as if each were 50 ms, so the heartbeat must
+/// be one per drain, not one per event: a click's Down and Up or a drag's
+/// moves would otherwise advance those counters faster than wall time. A
+/// consumed event therefore yields nothing, and a `Tick` is appended only when
+/// the drain produced no `Ui`/`Key` message at all (idle, or all consumed). A
+/// drain that did produce one appends none; the next idle poll, at most one
+/// [`TICK`] away, supplies the heartbeat.
+fn messages_for(results: Vec<(EventResult<UiMsg>, Option<KeyEvent>)>) -> Vec<Message> {
+    let mut messages: Vec<Message> = results
+        .into_iter()
+        .filter_map(|(result, key)| match result {
+            EventResult::Emit(msg) => Some(Message::Ui(msg)),
+            EventResult::Consumed => None,
+            EventResult::Ignored => key.map(Message::Key),
+        })
+        .collect();
     if messages.is_empty() {
         messages.push(Message::Tick);
     }
-    Ok(messages)
+    messages
 }
 
 /// Read the input for one [`TICK`]: block for the first event, then take what
@@ -717,6 +730,48 @@ fn tls_mode(mode: muxrd::config::CertMode) -> crate::app::state::cert::TlsMode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    mod heartbeat {
+        use super::super::messages_for;
+        use crate::app::state::DialogId;
+        use crate::app::{Message, UiMsg};
+        use ratcn::runtime::{EventResult, KeyCode, KeyEvent};
+
+        fn ticks(messages: &[Message]) -> usize {
+            messages
+                .iter()
+                .filter(|m| matches!(m, Message::Tick))
+                .count()
+        }
+
+        #[test]
+        fn an_idle_drain_is_one_tick() {
+            assert_eq!(ticks(&messages_for(Vec::new())), 1);
+        }
+
+        #[test]
+        fn a_drain_of_consumed_events_is_exactly_one_tick() {
+            let consumed = (0..5).map(|_| (EventResult::Consumed, None)).collect();
+            let messages = messages_for(consumed);
+            assert_eq!(messages.len(), 1);
+            assert_eq!(ticks(&messages), 1);
+        }
+
+        #[test]
+        fn a_drain_with_a_ui_or_key_message_adds_no_tick() {
+            let key = KeyEvent::new(KeyCode::Char('q'));
+            let messages = messages_for(vec![
+                (EventResult::Consumed, None),
+                (EventResult::Emit(UiMsg::Open(DialogId::Tokens)), None),
+                (EventResult::Ignored, Some(key)),
+                (EventResult::Ignored, None),
+            ]);
+            assert_eq!(messages.len(), 2);
+            assert_eq!(ticks(&messages), 0);
+            assert!(matches!(messages[0], Message::Ui(_)));
+            assert!(matches!(messages[1], Message::Key(_)));
+        }
+    }
 
     mod input {
         use super::super::{coalesce_moves, keep_event};
