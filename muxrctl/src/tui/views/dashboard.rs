@@ -1,6 +1,7 @@
 //! The dashboard — muxrctl's only screen.
 //!
-//! Five bordered sections stacked over a button row and a key-hint footer.
+//! Five bordered sections stacked over a button row and a reserved footer row
+//! (the key hints, painted by [`super::render`]).
 //! Everything else the control panel does is a dialog declared on top of this
 //! (see [`super::render`]).
 //!
@@ -28,6 +29,7 @@ use crate::app::UiMsg;
 use crate::app::state::AppState;
 use crate::app::state::server::ServerMsg;
 use crate::app::state::{DialogId, ServerInfo};
+use crate::tui::components::action::{action, destructive};
 
 /// Rows each section body occupies, borders included.
 const DAEMON_ROWS: u16 = 8;
@@ -47,7 +49,7 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
             Constraint::Length(SECTION_ROWS), // Devices
             Constraint::Min(0),               // slack
             Constraint::Length(1),            // button row
-            Constraint::Length(1),            // key hints
+            Constraint::Length(1),            // key hints (painted by `render`)
         ])
         .split(area);
 
@@ -75,7 +77,8 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
     section(ctx, "Devices", devices_lines(state, &theme), rows[5]);
 
     buttons(ctx, rows[7]);
-    ctx.paint_widget(Paragraph::new(hints(&theme)), rows[8]);
+    // rows[8] is the key-hint footer; `super::render` paints it after the ratcn
+    // pass so a modal's backdrop dim cannot wash it out.
 }
 
 /// Paint one bordered section with `title` and `lines` inside it.
@@ -104,42 +107,54 @@ fn section(
 fn buttons(ctx: &mut DeclareCtx<'_, AppState, UiMsg>, area: Rect) {
     let running = ctx.state().server.is_running();
     let server_button = if running {
-        Button::new("Stop")
-            .destructive()
-            .on_press(|| UiMsg::Server(ServerMsg::StopRequested))
+        destructive(
+            Button::new("Stop")
+                .destructive()
+                .on_press(|| UiMsg::Server(ServerMsg::StopRequested)),
+        )
     } else {
-        Button::new("Start").on_press(|| UiMsg::Server(ServerMsg::Start))
+        action(Button::new("Start").on_press(|| UiMsg::Server(ServerMsg::Start)))
     };
     let rest = [
         (
             "btn_config",
-            Button::new("Configure")
-                .secondary()
-                .on_press(|| UiMsg::Open(DialogId::Config)),
+            action(
+                Button::new("Configure")
+                    .secondary()
+                    .on_press(|| UiMsg::Open(DialogId::Config)),
+            ),
         ),
         (
             "btn_cert",
-            Button::new("Certificate")
-                .secondary()
-                .on_press(|| UiMsg::Open(DialogId::Cert)),
+            action(
+                Button::new("Certificate")
+                    .secondary()
+                    .on_press(|| UiMsg::Open(DialogId::Cert)),
+            ),
         ),
         (
             "btn_tokens",
-            Button::new("Tokens")
-                .secondary()
-                .on_press(|| UiMsg::Open(DialogId::Tokens)),
+            action(
+                Button::new("Tokens")
+                    .secondary()
+                    .on_press(|| UiMsg::Open(DialogId::Tokens)),
+            ),
         ),
         (
             "btn_devices",
-            Button::new("Devices")
-                .secondary()
-                .on_press(|| UiMsg::Open(DialogId::Devices)),
+            action(
+                Button::new("Devices")
+                    .secondary()
+                    .on_press(|| UiMsg::Open(DialogId::Devices)),
+            ),
         ),
         (
             "btn_wizard",
-            Button::new("Setup wizard")
-                .secondary()
-                .on_press(|| UiMsg::Open(DialogId::Wizard)),
+            action(
+                Button::new("Setup wizard")
+                    .secondary()
+                    .on_press(|| UiMsg::Open(DialogId::Wizard)),
+            ),
         ),
     ];
 
@@ -297,30 +312,6 @@ fn field(
             Style::default().fg(theme.muted_foreground),
         ),
         Span::styled(value.into(), Style::default().fg(value_color)),
-    ])
-}
-
-/// The footer's key hints.
-fn hints(theme: &Theme) -> Line<'static> {
-    let accent = Style::default().fg(theme.primary);
-    let muted = Style::default().fg(theme.muted_foreground);
-    Line::from(vec![
-        Span::styled("s", accent),
-        Span::styled(" start/stop  ", muted),
-        Span::styled("c", accent),
-        Span::styled(" config  ", muted),
-        Span::styled("e", accent),
-        Span::styled(" cert  ", muted),
-        Span::styled("t", accent),
-        Span::styled(" tokens  ", muted),
-        Span::styled("d", accent),
-        Span::styled(" devices  ", muted),
-        Span::styled("w", accent),
-        Span::styled(" wizard  ", muted),
-        Span::styled("r", accent),
-        Span::styled(" refresh  ", muted),
-        Span::styled("q", accent),
-        Span::styled(" quit", muted),
     ])
 }
 

@@ -16,6 +16,8 @@ use crate::app::UiMsg;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::config::{BIND_EXPLAIN, ConfigMsg};
+use crate::tui::components::DialogShortcuts;
+use crate::tui::components::action::action;
 
 use crate::tui::components::TextInput;
 
@@ -33,16 +35,22 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(CONTENT_ROWS, content)
         .action(
             "cfg_save",
-            Button::new("Save").on_press(|| UiMsg::Config(ConfigMsg::Save)),
+            action(Button::new("Save").on_press(|| UiMsg::Config(ConfigMsg::Save))),
         )
         .action(
             "cfg_cancel",
-            Button::new("Cancel")
-                .secondary()
-                .on_press(|| UiMsg::Config(ConfigMsg::Cancel)),
+            action(
+                Button::new("Cancel")
+                    .secondary()
+                    .on_press(|| UiMsg::Config(ConfigMsg::Cancel)),
+            ),
         )
         .on_dismiss(|| UiMsg::Config(ConfigMsg::Cancel));
-    ctx.modal(DialogId::Config.id(), dialog, area);
+    ctx.modal(
+        DialogId::Config.id(),
+        DialogShortcuts::new(DialogId::Config, dialog),
+        area,
+    );
 }
 
 /// The dialog's content strip: two fields, the IP picker, the explainer, the error.

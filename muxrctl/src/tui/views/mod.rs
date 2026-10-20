@@ -3,12 +3,14 @@
 //! [`render`] is the single entry point the runner draws through. It paints the
 //! background, runs one ratcn declaration pass (the dashboard plus exactly the
 //! dialogs [`crate::app::state::UiState::modals`] says are open, in stack
-//! order), and finally paints the toast stack *outside* that pass so the modal
-//! backdrop never dims it.
+//! order), and finally paints the toast stack and the key-hint footer
+//! *outside* that pass so the modal backdrop never dims them.
 
 use ratatui::Frame;
+use ratatui::layout::Rect;
 use ratatui::style::Style;
-use ratatui::widgets::Block;
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Paragraph};
 use ratcn::runtime::{DeclareCtx, Ratcn};
 use ratcn::{Theme, ToastPosition, ToasterWidget};
 
@@ -70,6 +72,42 @@ pub fn render(
             .position(ToastPosition::TopRight),
         area,
     );
+
+    // The footer is painted post-pass for the same reason: `dim_background`
+    // would otherwise grey out the very hints the open dialog needs.
+    paint_footer(frame, state, theme, area);
+}
+
+/// The key-hint footer on the frame's last row, built from the same table the
+/// shortcuts read. `Qr` and `Wizard` paint nothing here: their layers own the
+/// bottom row and carry their own strips.
+fn paint_footer(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
+    let pairs = crate::app::shortcuts::hint(state.top_dialog());
+    if pairs.is_empty() || area.height == 0 {
+        return;
+    }
+    let key_style = Style::default().fg(theme.primary);
+    let label_style = Style::default().fg(theme.muted_foreground);
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    let mut left = usize::from(area.width);
+    for (i, (key, label)) in pairs.into_iter().enumerate() {
+        // Each piece is cut to what is left, so a narrow terminal loses the
+        // tail of the line rather than wrapping or bleeding past the frame.
+        for (text, style) in [
+            (if i == 0 { "" } else { "  " }, label_style),
+            (key, key_style),
+            (" ", label_style),
+            (label, label_style),
+        ] {
+            let text = ratcn::text_width::truncate_to_width(text, left);
+            left -= ratcn::text_width::display_width(text);
+            if !text.is_empty() {
+                spans.push(Span::styled(text.to_string(), style));
+            }
+        }
+    }
+    let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
+    frame.render_widget(Paragraph::new(Line::from(spans)), row);
 }
 
 /// Declare the dialog an open modal id names.
@@ -101,12 +139,31 @@ fn declare_dialog(ctx: &mut DeclareCtx<'_, AppState, UiMsg>, id: Option<DialogId
 mod tests {
     use super::*;
     use crate::app::state::DialogId;
-    use crate::app::state::tokens::{QrOverlay, QrOverlayPhase};
+    use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
     use crate::app::{Message, update};
-    use crate::tui::runner::build_ratcn;
+    use crate::tui::runner::{EventSource, InputPump, build_ratcn, route_event};
+    use crossterm::event::Event as CtEvent;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
-    use ratcn::runtime::{Event, EventResult, FocusState, KeyCode, KeyEvent};
+    use ratcn::runtime::{
+        Event, EventResult, FocusState, KeyCode, KeyEvent, Modifiers, MouseButton, MouseEvent,
+        MouseKind,
+    };
+    use std::collections::VecDeque;
+    use std::time::{Duration, Instant};
+
+    /// A scripted terminal: everything queued is ready at once.
+    struct Script(VecDeque<CtEvent>);
+
+    impl EventSource for Script {
+        fn poll(&mut self, _timeout: Duration) -> anyhow::Result<bool> {
+            Ok(!self.0.is_empty())
+        }
+
+        fn read(&mut self) -> anyhow::Result<CtEvent> {
+            Ok(self.0.pop_front().expect("polled ready"))
+        }
+    }
 
     /// The real loop in miniature: one `Ratcn`, one `AppState`, and the runner's
     /// own key routing — ratcn first, the reducer only for what it ignored.
@@ -156,6 +213,103 @@ mod tests {
             };
             let _ = update(&mut self.state, message);
             self.draw();
+        }
+
+        /// Feed `events` as one terminal burst, iterating exactly as `run()`
+        /// does: fill the pump, route ONE event with the current state, reduce,
+        /// redraw, repeat until the queue is empty. Returns how many `Tick`s
+        /// the routing produced (the heartbeat is the clock's job, not the
+        /// burst's, so this must be zero).
+        fn burst(&mut self, events: Vec<CtEvent>) -> usize {
+            let mut source = Script(events.into());
+            let mut pump = InputPump::new(Instant::now());
+            let mut ticks = 0;
+            loop {
+                pump.fill(&mut source).expect("fill");
+                let Some(event) = pump.next() else { break };
+                if let Some(message) = route_event(&mut self.ratcn, &self.state, event) {
+                    ticks += usize::from(matches!(message, Message::Tick));
+                    let _ = update(&mut self.state, message);
+                }
+                self.draw();
+            }
+            ticks
+        }
+
+        /// Feed one pointer event through the same Emit/Consumed/Ignored mapping
+        /// as [`Self::key`] (an ignored pointer event is a plain tick).
+        fn mouse(&mut self, kind: MouseKind, column: u16, row: u16) {
+            let event = Event::Mouse(MouseEvent {
+                kind,
+                column,
+                row,
+                modifiers: Modifiers::NONE,
+            });
+            let message = match self.ratcn.handle_event(event, &self.state) {
+                EventResult::Emit(msg) => Message::Ui(msg),
+                EventResult::Consumed | EventResult::Ignored => Message::Tick,
+            };
+            let _ = update(&mut self.state, message);
+            self.draw();
+        }
+
+        /// A left click: ratcn synthesises the `Click` on the `Up`, as in its
+        /// own pointer tests.
+        fn click(&mut self, column: u16, row: u16) {
+            self.mouse(MouseKind::Down(MouseButton::Left), column, row);
+            self.mouse(MouseKind::Up(MouseButton::Left), column, row);
+        }
+
+        /// The cell of the first character of `label` on `row_marker`'s row
+        /// (the row containing both), so a section title with the same word is
+        /// not matched. Columns count cells, not bytes.
+        fn locate(&self, row_marker: &str, label: &str) -> (u16, u16) {
+            let screen = self.screen();
+            for (y, line) in screen.lines().enumerate() {
+                if line.contains(row_marker)
+                    && let Some(byte) = line.find(label)
+                {
+                    let x = line[..byte].chars().count();
+                    return (x as u16, y as u16);
+                }
+            }
+            panic!("{label:?} not found on a row with {row_marker:?}:\n{screen}");
+        }
+
+        /// Apply a message the way the runner would after an async task answered.
+        fn feed(&mut self, message: Message) {
+            let _ = update(&mut self.state, message);
+            self.draw();
+        }
+
+        /// Open the Tokens dialog with `names` loaded and the first one focused
+        /// (the async load never answers in the harness).
+        fn tokens_dialog_with(&mut self, names: &[&str]) {
+            self.key(KeyCode::Char('t'));
+            let records = names
+                .iter()
+                .map(|name| crate::server::tokens::TokenRecord {
+                    name: (*name).to_string(),
+                    created_at: "2026-01-01".to_string(),
+                    read_only: false,
+                })
+                .collect();
+            self.feed(Message::TokensLoaded(records));
+            if let Some(first) = names.first() {
+                self.feed(Message::Ui(UiMsg::Tokens(TokensMsg::Focused(
+                    (*first).to_string(),
+                ))));
+            }
+        }
+
+        /// The background colour of the first cell of `label` on the screen.
+        fn bg_of(&self, label: &str) -> ratatui::style::Color {
+            let (x, y) = self.locate(label, label);
+            self.terminal.backend().buffer()[(x, y)].bg
+        }
+
+        fn last_row(&self) -> String {
+            self.screen().lines().last().unwrap_or_default().to_string()
         }
 
         fn type_str(&mut self, text: &str) {
@@ -326,5 +480,232 @@ mod tests {
         harness.key(KeyCode::Esc);
         harness.key(KeyCode::Char('q'));
         assert!(harness.state.should_quit);
+    }
+
+    fn ct_key(c: char) -> CtEvent {
+        CtEvent::Key(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        ))
+    }
+
+    #[test]
+    fn a_burst_of_characters_all_land_in_the_focused_field() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.burst(vec![ct_key('1'), ct_key('9'), ct_key('2')]);
+        assert_eq!(harness.state.config.host, "192");
+
+        harness.burst("168.1.10xyz".chars().map(ct_key).collect());
+        assert_eq!(harness.state.config.host, "192168.1.10xyz");
+    }
+
+    #[test]
+    fn type_ahead_survives_a_surface_change_inside_one_burst() {
+        let mut harness = Harness::new();
+        harness.tokens_dialog_with(&["phone"]);
+        harness.burst(vec![ct_key('x'), ct_key('y')]);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert!(harness.state.tokens.loading, "the revoke path did not run");
+    }
+
+    #[test]
+    fn a_paste_is_one_atomic_edit_into_the_focused_field() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.burst(vec![CtEvent::Paste("10.0.0.5".into())]);
+        assert_eq!(harness.state.config.host, "10.0.0.5");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Config));
+        assert!(!harness.state.should_quit);
+    }
+
+    #[test]
+    fn a_paste_cannot_fire_a_shortcut() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        harness.burst(vec![CtEvent::Paste("n".into())]);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert_eq!(harness.state.ui.modals.ids().len(), 1);
+    }
+
+    #[test]
+    fn a_flood_of_moves_then_a_key_opens_the_dialog_without_ticks() {
+        let mut harness = Harness::new();
+        let mut events: Vec<CtEvent> = (0..300u16)
+            .map(|i| {
+                CtEvent::Mouse(crossterm::event::MouseEvent {
+                    kind: crossterm::event::MouseEventKind::Moved,
+                    column: i % 80,
+                    row: i % 24,
+                    modifiers: crossterm::event::KeyModifiers::NONE,
+                })
+            })
+            .collect();
+        events.push(ct_key('t'));
+        let ticks = harness.burst(events);
+        assert_eq!(ticks, 0);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+    }
+
+    const BUTTON_ROW: &str = "Setup wizard";
+
+    #[test]
+    fn clicking_the_tokens_button_opens_the_tokens_dialog() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Tokens");
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+    }
+
+    #[test]
+    fn clicking_create_in_the_tokens_dialog_opens_the_create_form() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        let screen = harness.screen();
+        let (x, y) = screen
+            .lines()
+            .enumerate()
+            .find_map(|(y, line)| {
+                line.find("Create…")
+                    .map(|b| (line[..b].chars().count() as u16, y as u16))
+            })
+            .unwrap_or_else(|| panic!("Create… not painted:\n{screen}"));
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenCreate));
+    }
+
+    #[test]
+    fn a_click_under_an_open_dialog_does_not_reach_the_dashboard() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Devices");
+        harness.key(KeyCode::Char('t'));
+        let before: Vec<_> = harness.state.ui.modals.ids().cloned().collect();
+        harness.click(x, y);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        let after: Vec<_> = harness.state.ui.modals.ids().cloned().collect();
+        assert_eq!(after, before);
+    }
+
+    #[test]
+    fn hovering_a_button_changes_no_state() {
+        let mut harness = Harness::new();
+        let (x, y) = harness.locate(BUTTON_ROW, "Tokens");
+        harness.mouse(MouseKind::Moved, x, y);
+        assert_eq!(harness.state.top_dialog(), None);
+        assert!(!harness.state.should_quit);
+    }
+
+    #[test]
+    fn n_in_the_tokens_dialog_opens_the_create_form() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        harness.key(KeyCode::Char('n'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenCreate));
+    }
+
+    #[test]
+    fn letters_typed_into_the_token_name_are_text_not_shortcuts() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        harness.key(KeyCode::Char('n'));
+        harness.type_str("phone");
+        assert_eq!(harness.state.tokens.form_name, "phone");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenCreate));
+    }
+
+    #[test]
+    fn x_then_y_revokes_the_focused_token() {
+        let mut harness = Harness::new();
+        harness.tokens_dialog_with(&["phone"]);
+        harness.key(KeyCode::Char('x'));
+        assert_eq!(
+            harness.state.top_dialog(),
+            Some(DialogId::TokenRevokeConfirm)
+        );
+        harness.key(KeyCode::Char('y'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert!(harness.state.tokens.loading, "the revoke path did not run");
+    }
+
+    #[test]
+    fn s_without_a_held_secret_does_nothing() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        harness.key(KeyCode::Char('s'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+        assert_eq!(harness.state.ui.modals.ids().len(), 1);
+    }
+
+    #[test]
+    fn x_without_a_focused_row_does_nothing() {
+        let mut harness = Harness::new();
+        harness.tokens_dialog_with(&[]);
+        harness.key(KeyCode::Char('x'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Tokens));
+    }
+
+    #[test]
+    fn the_footer_names_the_dialog_keys() {
+        let mut harness = Harness::new();
+        let dashboard = harness.last_row();
+        assert!(dashboard.contains("t tokens") && dashboard.contains("q quit"));
+
+        harness.key(KeyCode::Char('t'));
+        let row = harness.last_row();
+        assert!(row.contains("n create"), "{row:?}");
+        assert!(row.contains("Tab moves"), "{row:?}");
+
+        harness.key(KeyCode::Esc);
+        let row = harness.last_row();
+        assert!(
+            row.contains("t tokens") && row.contains("q quit"),
+            "{row:?}"
+        );
+    }
+
+    #[test]
+    fn the_footer_is_cut_to_a_narrow_frame() {
+        let mut harness = Harness::sized(20, 24);
+        harness.key(KeyCode::Char('t'));
+        assert!(harness.last_row().starts_with("Tab moves"));
+    }
+
+    #[test]
+    fn y_confirms_the_stop_dialog() {
+        let mut harness = Harness::new();
+        harness.state.server.status = Some(crate::app::state::ServerInfo {
+            version: "0".into(),
+            bind_addr: "0.0.0.0:50051".into(),
+            pid: 1,
+            uptime_secs: 1,
+            client_count: 0,
+            notify_relay_url: None,
+            push_device_count: 0,
+        });
+        harness.draw();
+        harness.key(KeyCode::Char('s'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::StopServer));
+        harness.key(KeyCode::Char('y'));
+        assert_eq!(harness.state.top_dialog(), None);
+        assert!(harness.state.server.loading, "the stop path did not run");
+    }
+
+    #[test]
+    fn the_focused_action_is_the_only_teal_one() {
+        use crate::tui::theme::palette;
+        let mut harness = Harness::new();
+        harness.tokens_dialog_with(&["phone"]);
+        // The list holds the focus: no action is lit.
+        assert_ne!(harness.bg_of("Create…"), palette::TEAL);
+        assert_ne!(harness.bg_of("Close"), palette::TEAL);
+
+        harness.key(KeyCode::Tab);
+        assert_eq!(harness.bg_of("Create…"), palette::TEAL);
+        assert_ne!(harness.bg_of("Close"), palette::TEAL);
+
+        harness.key(KeyCode::BackTab);
+        assert_ne!(harness.bg_of("Create…"), palette::TEAL);
+        assert_ne!(harness.bg_of("Close"), palette::TEAL);
     }
 }

@@ -26,6 +26,8 @@ use crate::app::state::cert::{
 };
 use crate::app::state::{AppState, DialogId};
 use crate::app::update::cert::{current_sans, planned_sans};
+use crate::tui::components::DialogShortcuts;
+use crate::tui::components::action::{action, destructive};
 
 /// Outer width of all three dialogs, border and padding included.
 const OUTER_WIDTH: u16 = 78;
@@ -92,26 +94,36 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(rows, content)
         .action(
             "cert_help",
-            Button::new("Help")
-                .secondary()
-                .on_press(|| UiMsg::Cert(CertMsg::OpenHelp)),
+            action(
+                Button::new("Help")
+                    .secondary()
+                    .on_press(|| UiMsg::Cert(CertMsg::OpenHelp)),
+            ),
         )
         .action(
             "cert_regen",
-            Button::new("Regenerate…")
-                .destructive()
-                .disabled(busy)
-                .on_press(|| UiMsg::Cert(CertMsg::RegenerateRequested)),
+            destructive(
+                Button::new("Regenerate…")
+                    .destructive()
+                    .disabled(busy)
+                    .on_press(|| UiMsg::Cert(CertMsg::RegenerateRequested)),
+            ),
         )
         .action(
             "cert_refresh",
-            Button::new("Refresh")
-                .ghost()
-                .on_press(|| UiMsg::Cert(CertMsg::Refresh)),
+            action(
+                Button::new("Refresh")
+                    .ghost()
+                    .on_press(|| UiMsg::Cert(CertMsg::Refresh)),
+            ),
         )
-        .action("cert_close", Button::new("Close").on_press(close))
+        .action("cert_close", action(Button::new("Close").on_press(close)))
         .on_dismiss(close);
-    ctx.modal(DialogId::Cert.id(), dialog, area);
+    ctx.modal(
+        DialogId::Cert.id(),
+        DialogShortcuts::new(DialogId::Cert, dialog),
+        area,
+    );
 }
 
 /// The overview's content strip.
@@ -334,10 +346,14 @@ pub fn declare_help(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         })
         .action(
             "cert_help_close",
-            Button::new("Close").on_press(|| UiMsg::Cert(CertMsg::CloseHelp)),
+            action(Button::new("Close").on_press(|| UiMsg::Cert(CertMsg::CloseHelp))),
         )
         .on_dismiss(|| UiMsg::Cert(CertMsg::CloseHelp));
-    ctx.modal(DialogId::CertHelp.id(), dialog, area);
+    ctx.modal(
+        DialogId::CertHelp.id(),
+        DialogShortcuts::new(DialogId::CertHelp, dialog),
+        area,
+    );
 }
 
 /// The four explanation blocks, wrapped to `width`, headings included.
@@ -383,18 +399,26 @@ pub fn declare_regen_confirm(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .description(description)
         .action(
             "cert_regen_cancel",
-            Button::new("Cancel")
-                .secondary()
-                .on_press(|| UiMsg::Cert(CertMsg::RegenerateCancelled)),
+            action(
+                Button::new("Cancel")
+                    .secondary()
+                    .on_press(|| UiMsg::Cert(CertMsg::RegenerateCancelled)),
+            ),
         )
         .action(
             "cert_regen_confirm",
-            Button::new("Regenerate")
-                .destructive()
-                .on_press(|| UiMsg::Cert(CertMsg::RegenerateConfirmed)),
+            destructive(
+                Button::new("Regenerate")
+                    .destructive()
+                    .on_press(|| UiMsg::Cert(CertMsg::RegenerateConfirmed)),
+            ),
         )
         .on_dismiss(|| UiMsg::Cert(CertMsg::RegenerateCancelled));
-    ctx.modal(DialogId::CertRegenConfirm.id(), dialog, area);
+    ctx.modal(
+        DialogId::CertRegenConfirm.id(),
+        DialogShortcuts::new(DialogId::CertRegenConfirm, dialog),
+        area,
+    );
 }
 
 // ── Shared helpers ────────────────────────────────────────────────────────────

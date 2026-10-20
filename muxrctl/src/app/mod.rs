@@ -8,6 +8,7 @@
 
 pub mod action;
 pub mod message;
+pub mod shortcuts;
 pub mod state;
 pub mod update;
 

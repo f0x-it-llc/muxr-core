@@ -21,7 +21,9 @@ use crate::app::state::tokens::{
     TOKEN_EXPLAIN_EXPIRY, TOKEN_EXPLAIN_NAME, TOKEN_EXPLAIN_READ_ONLY, TOKEN_EXPLAIN_SECRET,
     TokenExpiryChoice, TokensMsg,
 };
+use crate::tui::components::DialogShortcuts;
 use crate::tui::components::TextInput;
+use crate::tui::components::action::{action, destructive};
 
 /// Outer width every token dialog is laid out against, matching the Config
 /// dialog so the stack does not jump as dialogs open on top of each other.
@@ -60,34 +62,44 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(LIST_CONTENT_ROWS, list_content)
         .action(
             "tok_create",
-            Button::new("Create…").on_press(|| tokens(TokensMsg::CreateRequested)),
+            action(Button::new("Create…").on_press(|| tokens(TokensMsg::CreateRequested))),
         )
         .action(
             "tok_qr",
-            Button::new("Show QR")
-                .disabled(!has_secret)
-                .on_press(|| tokens(TokensMsg::ShowQrForMinted)),
+            action(
+                Button::new("Show QR")
+                    .disabled(!has_secret)
+                    .on_press(|| tokens(TokensMsg::ShowQrForMinted)),
+            ),
         )
         .action(
             "tok_revoke",
-            Button::new("Revoke…")
-                .destructive()
-                .disabled(!has_focus || loading)
-                .on_press(|| tokens(TokensMsg::RevokeRequested)),
+            destructive(
+                Button::new("Revoke…")
+                    .destructive()
+                    .disabled(!has_focus || loading)
+                    .on_press(|| tokens(TokensMsg::RevokeRequested)),
+            ),
         )
         .action(
             "tok_refresh",
-            Button::new("Refresh")
-                .ghost()
-                .disabled(loading)
-                .on_press(|| tokens(TokensMsg::Refresh)),
+            action(
+                Button::new("Refresh")
+                    .ghost()
+                    .disabled(loading)
+                    .on_press(|| tokens(TokensMsg::Refresh)),
+            ),
         )
         .action(
             "tok_close",
-            Button::new("Close").on_press(|| tokens(TokensMsg::Close)),
+            action(Button::new("Close").on_press(|| tokens(TokensMsg::Close))),
         )
         .on_dismiss(|| tokens(TokensMsg::Close));
-    ctx.modal(DialogId::Tokens.id(), dialog, area);
+    ctx.modal(
+        DialogId::Tokens.id(),
+        DialogShortcuts::new(DialogId::Tokens, dialog),
+        area,
+    );
 }
 
 /// The Tokens dialog's content strip: the list and the pairing hint.
@@ -171,18 +183,26 @@ pub fn declare_create(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(CREATE_CONTENT_ROWS, create_content)
         .action(
             "tok_create_ok",
-            Button::new("Create")
-                .disabled(loading)
-                .on_press(|| tokens(TokensMsg::CreateSubmit)),
+            action(
+                Button::new("Create")
+                    .disabled(loading)
+                    .on_press(|| tokens(TokensMsg::CreateSubmit)),
+            ),
         )
         .action(
             "tok_create_cancel",
-            Button::new("Cancel")
-                .secondary()
-                .on_press(|| tokens(TokensMsg::CreateCancel)),
+            action(
+                Button::new("Cancel")
+                    .secondary()
+                    .on_press(|| tokens(TokensMsg::CreateCancel)),
+            ),
         )
         .on_dismiss(|| tokens(TokensMsg::CreateCancel));
-    ctx.modal(DialogId::TokenCreate.id(), dialog, area);
+    ctx.modal(
+        DialogId::TokenCreate.id(),
+        DialogShortcuts::new(DialogId::TokenCreate, dialog),
+        area,
+    );
 }
 
 /// The create form's content strip: three controls, each with its explanation.
@@ -260,16 +280,22 @@ pub fn declare_minted(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .content(MINTED_CONTENT_ROWS, minted_content)
         .action(
             "tok_minted_qr",
-            Button::new("Show pairing QR").on_press(|| tokens(TokensMsg::MintedShowQr)),
+            action(Button::new("Show pairing QR").on_press(|| tokens(TokensMsg::MintedShowQr))),
         )
         .action(
             "tok_minted_done",
-            Button::new("Done")
-                .secondary()
-                .on_press(|| tokens(TokensMsg::MintedDone)),
+            action(
+                Button::new("Done")
+                    .secondary()
+                    .on_press(|| tokens(TokensMsg::MintedDone)),
+            ),
         )
         .on_dismiss(|| tokens(TokensMsg::MintedDone));
-    ctx.modal(DialogId::TokenMinted.id(), dialog, area);
+    ctx.modal(
+        DialogId::TokenMinted.id(),
+        DialogShortcuts::new(DialogId::TokenMinted, dialog),
+        area,
+    );
 }
 
 /// The minted-secret body: name, the plaintext, the read-only badge, the warning.
@@ -341,18 +367,26 @@ pub fn declare_revoke_confirm(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .description("Any phone using it is disconnected and must pair again.")
         .action(
             "tok_revoke_cancel",
-            Button::new("Cancel")
-                .secondary()
-                .on_press(|| tokens(TokensMsg::RevokeCancelled)),
+            action(
+                Button::new("Cancel")
+                    .secondary()
+                    .on_press(|| tokens(TokensMsg::RevokeCancelled)),
+            ),
         )
         .action(
             "tok_revoke_ok",
-            Button::new("Revoke")
-                .destructive()
-                .on_press(|| tokens(TokensMsg::RevokeConfirmed)),
+            destructive(
+                Button::new("Revoke")
+                    .destructive()
+                    .on_press(|| tokens(TokensMsg::RevokeConfirmed)),
+            ),
         )
         .on_dismiss(|| tokens(TokensMsg::RevokeCancelled));
-    ctx.modal(DialogId::TokenRevokeConfirm.id(), dialog, area);
+    ctx.modal(
+        DialogId::TokenRevokeConfirm.id(),
+        DialogShortcuts::new(DialogId::TokenRevokeConfirm, dialog),
+        area,
+    );
 }
 
 // ── Shared bits ───────────────────────────────────────────────────────────────
