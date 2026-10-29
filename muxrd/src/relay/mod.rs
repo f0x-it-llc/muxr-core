@@ -133,9 +133,19 @@ mod types;
 
 // Re-export public surface (used by grpc.rs as `crate::relay::<Name>`).
 pub use types::{
-    ControlEntry, ControlRegistry, FloatingHint, RelayControl, RelayViewState, ServerFrameStream,
-    ViewStateEntry, ViewStateRegistry,
+    AttachKey, AttachLease, AttachRegistry, ControlEntry, ControlRegistry, FloatingHint,
+    MAX_CLIENT_INSTANCE_ID_LEN, RelayControl, RelayViewState, ServerFrameStream, ViewStateEntry,
+    ViewStateRegistry,
 };
+
+// ─── Process-wide attach eviction registry ────────────────────────────────────
+
+/// The one [`AttachRegistry`] every `AttachTerminal` relay in this process
+/// registers with (`AttachReq.client_instance_id` eviction). Process-wide on
+/// purpose: a re-attach arrives on a NEW HTTP/2 connection, so the registry
+/// must outlive and span every connection.
+static ATTACH_REGISTRY: std::sync::LazyLock<AttachRegistry> =
+    std::sync::LazyLock::new(AttachRegistry::new);
 
 // ─── Unguessable per-connection id ────────────────────────────────────────────
 
@@ -286,6 +296,32 @@ pub async fn attach_relay(
         "relay [{session_name}]: minted connection_id={connection_id} \
          (read_only={read_only})"
     );
+
+    // ── 3a. Attach eviction (AttachReq.client_instance_id). ─────────────────
+    // Registered only now, after the backend attach succeeded: a failed
+    // re-attach must not tear down the live one it was meant to replace. A
+    // relay already holding the same (token identity, instance id) key is
+    // signalled to stop and tears itself down on its own task — this attach
+    // does not wait for it. No token / an empty or over-long id yields an
+    // inert lease: nothing evicted, never evictable (today's behavior).
+    let attach_key = AttachKey::new(token.as_deref(), &attach.client_instance_id);
+    let (attach_lease, evicted) = ATTACH_REGISTRY.register(attach_key, &connection_id);
+    if let (Some(key), Some(evicted)) = (attach_lease.key(), evicted) {
+        // FS3 / (g): instance id and connection ids redacted to 8 chars at info;
+        // full values at debug only.
+        log::info!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={}… — \
+             evicting previous connection_id={}…",
+            key.redacted_instance_id(),
+            &connection_id[..8],
+            &evicted[..evicted.len().min(8)]
+        );
+        log::debug!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={connection_id} \
+             — evicting previous connection_id={evicted}",
+            key.debug_instance_id()
+        );
+    }
 
     // ── 3. Outbound: bounded channel + std reader thread ────────────────────
     let (tx, rx) = mpsc::channel::<Result<ServerFrame, Status>>(RENDER_CHANNEL_BOUND);
@@ -465,6 +501,7 @@ pub async fn attach_relay(
         clients,
         query_tx,
         view_state,
+        attach_lease,
     ));
 
     // ── 5. Outbound stream from the channel receiver ────────────────────────

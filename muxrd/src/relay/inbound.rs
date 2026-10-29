@@ -12,8 +12,8 @@ use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
 use super::reader::ShutdownGuard;
 use super::types::{
-    ControlRegistry, FLOAT_QUERY_TIMEOUT, InFlightQuery, MAX_INPUT_FRAME_BYTES, QueryReply,
-    QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL, ViewStateRegistry,
+    AttachLease, ControlRegistry, FLOAT_QUERY_TIMEOUT, InFlightQuery, MAX_INPUT_FRAME_BYTES,
+    QueryReply, QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL, ViewStateRegistry,
 };
 
 // ─── inbound_loop ─────────────────────────────────────────────────────────────
@@ -41,6 +41,11 @@ use super::types::{
 /// - **Major H (token re-validation):** the bearer token is re-checked every
 ///   [`TOKEN_RECHECK_INTERVAL`]; on revocation/expiry/error the loop breaks,
 ///   dropping the guard and tearing the whole attach down.
+///
+/// It also leaves the loop — through the same teardown as a client-closed
+/// stream — when a later attach with the same token and `client_instance_id`
+/// evicts this one ([`AttachLease::evicted`]); an attach with no instance id
+/// holds an inert lease and is never evicted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn inbound_loop(
     mut inbound: Streaming<ClientFrame>,
@@ -75,6 +80,10 @@ pub(crate) async fn inbound_loop(
     query_tx: QueryTx,
     // B-FOCUS: per-connection relay view state registry.
     view_state: ViewStateRegistry,
+    // Attach eviction (`AttachReq.client_instance_id`): resolves `evicted()`
+    // when a successor attach supersedes this one. Dropped with this task,
+    // which deregisters the key only if it still points at this relay.
+    attach_lease: AttachLease,
 ) {
     // The guard lives for the body of this task; on any exit path its Drop
     // signals + joins the reader thread.
@@ -98,6 +107,22 @@ pub(crate) async fn inbound_loop(
 
     loop {
         tokio::select! {
+            // ── Attach eviction: a newer attach of this client view took over ─
+            // Leave the loop exactly as a client-closed stream does: registry
+            // cleanup below, then the guard's drop stops + joins the reader,
+            // which ends the outbound stream and detaches the backend client.
+            _ = attach_lease.evicted() => {
+                if let Some(key) = attach_lease.key() {
+                    log::info!(
+                        "relay inbound [{session}]: connection_id={}… evicted by a newer \
+                         attach of instance {} — tearing down stream",
+                        &connection_id[..connection_id.len().min(8)],
+                        key.redacted_instance_id()
+                    );
+                }
+                break;
+            }
+
             // ── Major H: periodic bearer re-validation ───────────────────────
             _ = recheck.tick() => {
                 if !revalidate_token(token.as_deref(), &session).await {
@@ -421,6 +446,9 @@ pub(crate) async fn inbound_loop(
              registry entries already absent (no-op)"
         );
     }
+    // Attach eviction: release this relay's key only if it still holds it — an
+    // evicted relay's successor keeps its slot (`AttachRegistry::deregister`).
+    drop(attach_lease);
     // _guard drops here → reader thread shutdown.
 }
 

@@ -14,6 +14,9 @@
 //!   - `SanEntry::parse`: IP and DNS parsing
 //!   - `SanEntry::from_env`: env var parsing
 //!   - TLS cert generation includes extra SANs (generation only, no disk I/O)
+//!   - attach eviction registry (`AttachReq.client_instance_id`): who evicts
+//!     whom, and that a torn-down relay never removes its successor's slot
+//!   - `TokenIdentity`: stable per token, distinct across tokens, redacted
 
 // ─── validate_session_name ────────────────────────────────────────────────────
 
@@ -403,6 +406,252 @@ fn sidecar_does_not_cover_new_san() {
     let requested = [SanEntry::Ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 5)))];
     let all_covered = requested.iter().all(|r| stored.contains(r));
     assert!(!all_covered, "empty sidecar should not cover new SAN");
+}
+
+// ─── Attach eviction (AttachReq.client_instance_id) ─────────────────────────────
+
+mod attach_eviction {
+    use std::time::Duration;
+
+    use futures::FutureExt;
+    use muxrd::auth::TokenIdentity;
+    use muxrd::client_count::SessionClients;
+    use muxrd::relay::{AttachKey, AttachLease, AttachRegistry, MAX_CLIENT_INSTANCE_ID_LEN};
+
+    const TOKEN_A: &str = "token-alpha-secret";
+    const TOKEN_B: &str = "token-bravo-secret";
+    const SESSION: &str = "zellij:dev";
+
+    fn key(token: &str, instance: &str) -> Option<AttachKey> {
+        AttachKey::new(Some(token), instance)
+    }
+
+    /// Register `connection_id` and assert the registration evicted nobody.
+    fn register_fresh(
+        registry: &AttachRegistry,
+        key: Option<AttachKey>,
+        connection_id: &str,
+    ) -> AttachLease {
+        let (lease, evicted) = registry.register(key, connection_id);
+        assert_eq!(evicted, None, "{connection_id} must not evict anyone");
+        lease
+    }
+
+    /// Whether `lease` has been evicted, checked through the same future the
+    /// relay's inbound loop awaits.
+    fn evicted_now(lease: &AttachLease) -> bool {
+        lease.evicted().now_or_never().is_some()
+    }
+
+    /// A stand-in relay: holds the session's client guard and its lease, and
+    /// ends — dropping both, as the inbound task does — when evicted.
+    fn spawn_relay(clients: &SessionClients, lease: AttachLease) -> tokio::task::JoinHandle<()> {
+        let guard = clients.attach(SESSION);
+        tokio::spawn(async move {
+            lease.evicted().await;
+            drop(lease);
+            drop(guard);
+        })
+    }
+
+    /// (a) Same token + same non-empty id, second attach while the first is
+    /// live: the first is torn down (its client count released), the second
+    /// stays live and holds the key.
+    #[tokio::test]
+    async fn same_token_same_instance_evicts_the_previous_attach() {
+        let registry = AttachRegistry::new();
+        let clients = SessionClients::new();
+
+        let first = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-first");
+        let first_task = spawn_relay(&clients, first);
+        assert_eq!(clients.count(SESSION), 1);
+
+        let (second, evicted) = registry.register(key(TOKEN_A, "view-1"), "conn-second");
+        assert_eq!(evicted.as_deref(), Some("conn-first"));
+        let second_guard = clients.attach(SESSION);
+
+        // The evicted relay tears itself down without the new attach waiting.
+        tokio::time::timeout(Duration::from_secs(5), first_task)
+            .await
+            .expect("the evicted relay must stop")
+            .expect("relay task must not panic");
+        assert_eq!(
+            clients.count(SESSION),
+            1,
+            "only the successor stays counted against the session"
+        );
+
+        assert!(!second.is_evicted());
+        assert!(!evicted_now(&second), "the successor stays live");
+        assert_eq!(
+            registry.holder(&key(TOKEN_A, "view-1").unwrap()).as_deref(),
+            Some("conn-second")
+        );
+        drop(second_guard);
+    }
+
+    /// (a) The signal is latched: a relay busy elsewhere when evicted still
+    /// observes it on its next poll, and keeps observing it.
+    #[test]
+    fn eviction_signal_is_not_lost_when_the_relay_is_not_waiting() {
+        let registry = AttachRegistry::new();
+        let first = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-first");
+        let (_second, _) = registry.register(key(TOKEN_A, "view-1"), "conn-second");
+        assert!(first.is_evicted());
+        assert!(evicted_now(&first));
+        assert!(
+            evicted_now(&first),
+            "re-polling after eviction resolves again"
+        );
+    }
+
+    /// (b) Same id, different tokens: both stay live.
+    #[test]
+    fn same_instance_under_different_tokens_both_stay_live() {
+        let registry = AttachRegistry::new();
+        let a = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-a");
+        let b = register_fresh(&registry, key(TOKEN_B, "view-1"), "conn-b");
+        assert!(!evicted_now(&a) && !evicted_now(&b));
+        assert_eq!(registry.len(), 2);
+    }
+
+    /// (c) Different ids, same token: both stay live.
+    #[test]
+    fn different_instances_under_one_token_both_stay_live() {
+        let registry = AttachRegistry::new();
+        let one = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-1");
+        let two = register_fresh(&registry, key(TOKEN_A, "view-2"), "conn-2");
+        assert!(!evicted_now(&one) && !evicted_now(&two));
+        assert_eq!(registry.len(), 2);
+    }
+
+    /// (d) Empty id: never evicts and is never evicted — no key, nothing
+    /// registered, an inert lease.
+    #[test]
+    fn empty_instance_id_never_evicts_and_is_never_evicted() {
+        assert!(AttachKey::new(Some(TOKEN_A), "").is_none());
+
+        let registry = AttachRegistry::new();
+        let keyed = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-keyed");
+        let first = register_fresh(&registry, key(TOKEN_A, ""), "conn-empty-1");
+        let second = register_fresh(&registry, key(TOKEN_A, ""), "conn-empty-2");
+
+        assert!(first.key().is_none() && second.key().is_none());
+        assert!(!evicted_now(&first) && !evicted_now(&second) && !evicted_now(&keyed));
+        assert_eq!(registry.len(), 1, "only the keyed attach is registered");
+
+        // Dropping an inert lease touches nothing.
+        drop(first);
+        assert_eq!(
+            registry.holder(&key(TOKEN_A, "view-1").unwrap()).as_deref(),
+            Some("conn-keyed")
+        );
+    }
+
+    /// (d) The other inert cases: no authenticated token, or an over-long id.
+    #[test]
+    fn missing_token_or_over_long_id_is_inert() {
+        assert!(AttachKey::new(None, "view-1").is_none());
+        let at_limit = "x".repeat(MAX_CLIENT_INSTANCE_ID_LEN);
+        assert!(AttachKey::new(Some(TOKEN_A), &at_limit).is_some());
+        let over = "x".repeat(MAX_CLIENT_INSTANCE_ID_LEN + 1);
+        assert!(AttachKey::new(Some(TOKEN_A), &over).is_none());
+    }
+
+    /// (e) Read-only and read-write tokens are both supported: eviction is
+    /// scoped by token, not tier — a read-only token's re-attach evicts its own
+    /// previous attach, and never a read-write token's attach with the same id.
+    #[test]
+    fn read_only_and_read_write_tokens_both_evict_within_their_own_token() {
+        const RO_TOKEN: &str = "token-read-only";
+        const RW_TOKEN: &str = "token-read-write";
+        let registry = AttachRegistry::new();
+
+        let rw = register_fresh(&registry, key(RW_TOKEN, "view-1"), "conn-rw-1");
+        let ro = register_fresh(&registry, key(RO_TOKEN, "view-1"), "conn-ro-1");
+
+        let (ro_again, evicted) = registry.register(key(RO_TOKEN, "view-1"), "conn-ro-2");
+        assert_eq!(evicted.as_deref(), Some("conn-ro-1"));
+        assert!(
+            evicted_now(&ro),
+            "the read-only token's old attach is evicted"
+        );
+        assert!(
+            !evicted_now(&rw),
+            "the read-write token's attach is untouched"
+        );
+
+        let (_rw_again, evicted) = registry.register(key(RW_TOKEN, "view-1"), "conn-rw-2");
+        assert_eq!(evicted.as_deref(), Some("conn-rw-1"));
+        assert!(evicted_now(&rw));
+        assert!(!evicted_now(&ro_again));
+    }
+
+    /// (f) Teardown of an evicted relay does not delete the successor's entry;
+    /// the successor's own teardown then frees the key.
+    #[test]
+    fn evicted_teardown_keeps_the_successors_entry() {
+        let registry = AttachRegistry::new();
+        let k = key(TOKEN_A, "view-1").unwrap();
+
+        let first = register_fresh(&registry, Some(k.clone()), "conn-first");
+        let (second, _) = registry.register(Some(k.clone()), "conn-second");
+
+        drop(first); // the evicted relay finishes tearing down AFTER the swap
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-second"));
+        assert!(
+            !registry.deregister(&k, "conn-first"),
+            "a stale id removes nothing"
+        );
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-second"));
+
+        drop(second);
+        assert_eq!(registry.holder(&k), None);
+        assert!(registry.is_empty());
+    }
+
+    /// A chain of re-attaches always leaves exactly the newest one holding the
+    /// key, however late the older ones finish tearing down.
+    #[test]
+    fn repeated_reattaches_leave_only_the_newest_holder() {
+        let registry = AttachRegistry::new();
+        let k = key(TOKEN_A, "view-1").unwrap();
+        let mut leases = Vec::new();
+        for n in 0..4 {
+            let (lease, evicted) = registry.register(Some(k.clone()), &format!("conn-{n}"));
+            assert_eq!(evicted, (n > 0).then(|| format!("conn-{}", n - 1)));
+            leases.push(lease);
+        }
+        let newest = leases.pop().unwrap();
+        assert!(leases.iter().all(evicted_now));
+        drop(leases);
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-3"));
+        assert!(!evicted_now(&newest));
+    }
+
+    /// (g) Logs and `Debug` output carry at most the first 8 characters of
+    /// the instance id, and never the token.
+    #[test]
+    fn instance_id_and_token_are_redacted() {
+        let k = key(TOKEN_A, "0123456789abcdef-instance").unwrap();
+        assert_eq!(k.redacted_instance_id(), "01234567…");
+        let debug = format!("{k:?}");
+        assert!(debug.contains("01234567…"), "{debug}");
+        assert!(!debug.contains("89abcdef"), "{debug}");
+        assert!(!debug.contains(TOKEN_A), "{debug}");
+
+        // Character-based, so a non-ASCII id cannot split a code point.
+        let wide = key(TOKEN_A, "ééééééééé").unwrap();
+        assert_eq!(wide.redacted_instance_id(), "éééééééé…");
+    }
+
+    #[test]
+    fn token_identity_is_stable_distinct_and_redacted() {
+        assert_eq!(TokenIdentity::of(TOKEN_A), TokenIdentity::of(TOKEN_A));
+        assert_ne!(TokenIdentity::of(TOKEN_A), TokenIdentity::of(TOKEN_B));
+        let debug = format!("{:?}", TokenIdentity::of(TOKEN_A));
+        assert_eq!(debug, "TokenIdentity(<redacted>)");
+    }
 }
 
 // ─── Helper ────────────────────────────────────────────────────────────────────

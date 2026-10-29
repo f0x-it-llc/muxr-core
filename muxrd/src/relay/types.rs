@@ -186,6 +186,257 @@ pub type ViewStateRegistry = Arc<dashmap::DashMap<String, ViewStateEntry>>;
 /// misroute bug: last attach for a session overwrote all previous entries).
 pub type ControlRegistry = Arc<dashmap::DashMap<String, ControlEntry>>;
 
+// ─── Attach eviction (AttachReq.client_instance_id) ──────────────────────────
+
+/// Upper bound on an accepted `AttachReq.client_instance_id`. Longer ids are
+/// ignored — treated as unset, so the attach neither evicts nor is evictable —
+/// rather than rejected, the same "a hint never fails the attach" rule the
+/// resume hint follows. 128 bytes comfortably fits any UUID-style id.
+pub const MAX_CLIENT_INSTANCE_ID_LEN: usize = 128;
+
+/// Key of one evictable attach: the identity of the bearer token that
+/// authenticated it plus the client's opaque `client_instance_id`.
+///
+/// The token half is a [`TokenIdentity`](crate::auth::TokenIdentity) digest,
+/// never the raw secret. Its `Debug` output is redacted (the instance id is
+/// client-supplied and the token half is token-derived), so a key can sit in a
+/// log statement without leaking either.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct AttachKey {
+    token: crate::auth::TokenIdentity,
+    instance_id: String,
+}
+
+impl AttachKey {
+    /// The eviction key for an attach, or `None` when the attach takes no part
+    /// in eviction: no authenticated token, an empty `client_instance_id`, or
+    /// one longer than [`MAX_CLIENT_INSTANCE_ID_LEN`]. `None` is today's
+    /// behavior — such an attach never evicts and is never evicted.
+    pub fn new(token: Option<&str>, client_instance_id: &str) -> Option<Self> {
+        let token = token?;
+        if client_instance_id.is_empty() || client_instance_id.len() > MAX_CLIENT_INSTANCE_ID_LEN {
+            return None;
+        }
+        Some(Self {
+            token: crate::auth::TokenIdentity::of(token),
+            instance_id: client_instance_id.to_owned(),
+        })
+    }
+
+    /// The instance id redacted for info/warn logs: its first 8 characters
+    /// (control characters escaped) and an ellipsis — the same 8-character
+    /// rule `connection_id` follows. The full id is for debug logs only.
+    pub fn redacted_instance_id(&self) -> String {
+        redact_instance_id(&self.instance_id)
+    }
+
+    /// The full instance id, escaped, for debug logs only.
+    pub(crate) fn debug_instance_id(&self) -> String {
+        self.instance_id.escape_debug().to_string()
+    }
+}
+
+impl std::fmt::Debug for AttachKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "AttachKey(token=<redacted>, instance_id={})",
+            self.redacted_instance_id()
+        )
+    }
+}
+
+/// First 8 characters of a client instance id, control characters escaped,
+/// plus an ellipsis. Character-based (not a byte slice) because the id is an
+/// arbitrary client string and may not be ASCII.
+pub(crate) fn redact_instance_id(id: &str) -> String {
+    let head: String = id.chars().take(8).collect();
+    format!("{}…", head.escape_debug())
+}
+
+/// The registry's record of the relay currently holding a key.
+#[derive(Debug)]
+struct AttachSlot {
+    /// `connection_id` of the holding relay — what deregistration compares,
+    /// so a torn-down relay can never remove its successor's slot.
+    connection_id: String,
+    /// The holding relay's eviction signal.
+    signal: Arc<EvictSignal>,
+}
+
+/// One-shot "you have been superseded" signal shared between the registry and
+/// one relay's inbound task.
+#[derive(Debug, Default)]
+struct EvictSignal {
+    /// Set once, on eviction; never cleared.
+    fired: std::sync::atomic::AtomicBool,
+    /// Wakes the inbound task's `select!`. `notify_one` stores a permit when
+    /// the task is not parked on it at that instant, so a signal sent while the
+    /// task is busy in another arm is not lost.
+    notify: tokio::sync::Notify,
+}
+
+impl EvictSignal {
+    fn fire(&self) {
+        self.fired.store(true, std::sync::atomic::Ordering::Release);
+        self.notify.notify_one();
+    }
+
+    fn is_fired(&self) -> bool {
+        self.fired.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+/// Process-wide registry of evictable attaches (`AttachReq.client_instance_id`).
+///
+/// Maps `(token identity, client_instance_id)` → the relay currently holding
+/// that key. When a new attach registers a key that is already held, the old
+/// holder's [`AttachLease`] is signalled: its inbound task leaves its loop
+/// through the same teardown a client-closed stream takes (registry cleanup,
+/// then the `ShutdownGuard` drop that stops and joins the reader thread, which
+/// ends the outbound stream and detaches the backend client). Registration
+/// itself never waits for that teardown.
+///
+/// Cheap to clone; clones share one map.
+#[derive(Clone, Debug, Default)]
+pub struct AttachRegistry {
+    slots: Arc<dashmap::DashMap<AttachKey, AttachSlot>>,
+}
+
+impl AttachRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Register the relay `connection_id` under `key`.
+    ///
+    /// With `Some(key)`: any relay already holding `key` is signalled to stop,
+    /// and its `connection_id` is returned alongside the new lease. The swap is
+    /// atomic per key, so of two racing attaches exactly one ends up holding it
+    /// and the other is signalled. With `None` (no token, empty or over-long
+    /// id): nothing is registered or signalled, and the lease is never evicted.
+    pub fn register(
+        &self,
+        key: Option<AttachKey>,
+        connection_id: &str,
+    ) -> (AttachLease, Option<String>) {
+        let Some(key) = key else {
+            return (
+                AttachLease {
+                    registry: self.clone(),
+                    key: None,
+                    connection_id: connection_id.to_owned(),
+                    signal: None,
+                },
+                None,
+            );
+        };
+        let signal = Arc::new(EvictSignal::default());
+        let previous = self.slots.insert(
+            key.clone(),
+            AttachSlot {
+                connection_id: connection_id.to_owned(),
+                signal: signal.clone(),
+            },
+        );
+        let evicted = previous.map(|old| {
+            old.signal.fire();
+            old.connection_id
+        });
+        (
+            AttachLease {
+                registry: self.clone(),
+                key: Some(key),
+                connection_id: connection_id.to_owned(),
+                signal: Some(signal),
+            },
+            evicted,
+        )
+    }
+
+    /// Remove `key`'s slot only if it still belongs to `connection_id`.
+    /// Returns whether a slot was removed: `false` when the key is absent or
+    /// has since been taken over by a successor, whose slot is left untouched.
+    pub fn deregister(&self, key: &AttachKey, connection_id: &str) -> bool {
+        self.slots
+            .remove_if(key, |_, slot| slot.connection_id == connection_id)
+            .is_some()
+    }
+
+    /// `connection_id` of the relay currently holding `key`, if any.
+    pub fn holder(&self, key: &AttachKey) -> Option<String> {
+        self.slots.get(key).map(|slot| slot.connection_id.clone())
+    }
+
+    /// Number of keys currently held.
+    pub fn len(&self) -> usize {
+        self.slots.len()
+    }
+
+    /// Whether no key is currently held.
+    pub fn is_empty(&self) -> bool {
+        self.slots.is_empty()
+    }
+}
+
+/// One relay's hold on its [`AttachRegistry`] key, owned by its inbound task.
+///
+/// [`evicted`](Self::evicted) resolves once a later attach with the same key
+/// has superseded this relay; dropping the lease deregisters the key only if
+/// this relay still holds it. A lease created without a key (an attach with no
+/// `client_instance_id`) is inert: never evicted, nothing to deregister.
+#[derive(Debug)]
+pub struct AttachLease {
+    registry: AttachRegistry,
+    key: Option<AttachKey>,
+    connection_id: String,
+    signal: Option<Arc<EvictSignal>>,
+}
+
+impl AttachLease {
+    /// Resolve once this relay has been evicted; pending forever for an inert
+    /// lease. Cancel-safe: dropping the future (another `select!` arm won)
+    /// loses no signal, so it can be re-created on every loop iteration.
+    pub async fn evicted(&self) {
+        let Some(signal) = &self.signal else {
+            return std::future::pending().await;
+        };
+        loop {
+            let notified = signal.notify.notified();
+            if signal.is_fired() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Whether this relay has been evicted (non-blocking).
+    pub fn is_evicted(&self) -> bool {
+        self.signal.as_ref().is_some_and(|s| s.is_fired())
+    }
+
+    /// The key this lease holds, or `None` for an inert lease.
+    pub fn key(&self) -> Option<&AttachKey> {
+        self.key.as_ref()
+    }
+}
+
+impl Drop for AttachLease {
+    fn drop(&mut self) {
+        if let Some(key) = &self.key
+            && !self.registry.deregister(key, &self.connection_id)
+        {
+            // A successor took the key over (this relay was evicted, or lost
+            // a registration race): its slot stays.
+            log::debug!(
+                "relay attach registry: connection_id={} left instance id {} to its successor",
+                self.connection_id,
+                key.debug_instance_id()
+            );
+        }
+    }
+}
+
 // ─── Internal types ───────────────────────────────────────────────────────────
 
 /// Reply channel handed to `get_layout` for a single layout query (FX-QUERY).
