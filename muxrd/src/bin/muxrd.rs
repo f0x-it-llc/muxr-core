@@ -23,7 +23,7 @@
 //! fresh in the detached child via [`serve`] → `Runtime::new()`.
 
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use std::sync::Arc;
 
@@ -43,6 +43,21 @@ use tonic::transport::{Identity, Server, ServerTlsConfig};
 
 /// Pidfile name inside the data dir.
 const PIDFILE_NAME: &str = "muxrd.pid";
+
+/// HTTP/2 PING interval. Parity with the app's keep-alive interval (10 s), so a
+/// vanished client is detected on the same cadence from both ends. Behind an
+/// h2c edge proxy this only reaps the proxy's connection, not the phone's.
+const HTTP2_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// HTTP/2 PING acknowledgement deadline. Parity with the app's keep-alive
+/// timeout (20 s). Behind an h2c edge proxy this only reaps the proxy's
+/// connection, not the phone's.
+const HTTP2_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// OS-level TCP keepalive idle time, so a silently vanished peer is reaped even
+/// when no HTTP/2 PING is in flight. Behind an h2c edge proxy this only reaps
+/// the proxy's connection, not the phone's.
+const TCP_KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// `main` is intentionally NOT `#[tokio::main]`: daemonization forks before the
 /// runtime exists, so the runtime must be built inside the (post-fork) child.
@@ -836,7 +851,14 @@ async fn serve(
     // ── Build the server builder, applying TLS only when not h2c ────────────
     // BearerAuthLayer wraps the router at the HTTP level so it sees the full
     // URI path — it can distinguish Login/GetVersion from AttachTerminal.
-    let mut builder = Server::builder();
+    // Keepalive is set on every transport (TLS and h2c) so a vanished client's
+    // AttachTerminal stream, relay thread and zellij client are reaped instead of
+    // held until a write fails. No request timeout or max_connection_age is set:
+    // AttachTerminal streams are long-lived by design.
+    let mut builder = Server::builder()
+        .http2_keepalive_interval(Some(HTTP2_KEEPALIVE_INTERVAL))
+        .http2_keepalive_timeout(Some(HTTP2_KEEPALIVE_TIMEOUT))
+        .tcp_keepalive(Some(TCP_KEEPALIVE));
     if let Some(tls) = maybe_tls {
         builder = builder.tls_config(tls).context("failed to configure TLS")?;
     }
@@ -1082,6 +1104,17 @@ fn probe_bind_available(addr: std::net::SocketAddr) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── transport keepalive parity ──────────────────────────────────────────
+
+    /// Pins the server keepalive values to the app's parity values. A drift on
+    /// either side must fail here rather than silently desynchronise detection.
+    #[test]
+    fn transport_keepalive_matches_app_parity_values() {
+        assert_eq!(HTTP2_KEEPALIVE_INTERVAL, Duration::from_secs(10));
+        assert_eq!(HTTP2_KEEPALIVE_TIMEOUT, Duration::from_secs(20));
+        assert_eq!(TCP_KEEPALIVE, Duration::from_secs(60));
+    }
 
     // ── start-path staleness decision ───────────────────────────────────────
 
