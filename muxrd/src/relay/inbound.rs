@@ -12,9 +12,13 @@ use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
 use super::reader::ShutdownGuard;
 use super::types::{
-    ControlRegistry, FLOAT_QUERY_TIMEOUT, InFlightQuery, MAX_INPUT_FRAME_BYTES, QueryReply,
-    QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL, ViewStateRegistry,
+    AttachLease, ControlRegistry, FLOAT_QUERY_TIMEOUT, InFlightQuery, MAX_INPUT_FRAME_BYTES,
+    QueryReply, QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL, ViewStateRegistry,
 };
+
+/// How often the inbound loop checks whether the reader thread has exited.
+/// Bounds how long a relay whose response side already ended lingers.
+const READER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(250);
 
 // ─── inbound_loop ─────────────────────────────────────────────────────────────
 
@@ -41,6 +45,11 @@ use super::types::{
 /// - **Major H (token re-validation):** the bearer token is re-checked every
 ///   [`TOKEN_RECHECK_INTERVAL`]; on revocation/expiry/error the loop breaks,
 ///   dropping the guard and tearing the whole attach down.
+///
+/// It also leaves the loop — through the same teardown as a client-closed
+/// stream — when a later attach with the same token and `client_instance_id`
+/// evicts this one ([`AttachLease::evicted`]); an attach with no instance id
+/// holds an inert lease and is never evicted.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn inbound_loop(
     mut inbound: Streaming<ClientFrame>,
@@ -75,6 +84,10 @@ pub(crate) async fn inbound_loop(
     query_tx: QueryTx,
     // B-FOCUS: per-connection relay view state registry.
     view_state: ViewStateRegistry,
+    // Attach eviction (`AttachReq.client_instance_id`): resolves `evicted()`
+    // when a successor attach supersedes this one. Dropped with this task,
+    // which deregisters the key only if it still points at this relay.
+    attach_lease: AttachLease,
 ) {
     // The guard lives for the body of this task; on any exit path its Drop
     // signals + joins the reader thread.
@@ -96,8 +109,44 @@ pub(crate) async fn inbound_loop(
     recheck.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     recheck.tick().await;
 
+    // Reader-exit watch: the reader thread ends the response side on its own
+    // (backend stream closed, session Exit, outbound receiver dropped) while
+    // the client may keep its request side open. Nothing else here would
+    // notice, so poll the thread handle and tear down like a closed stream.
+    let mut reader_watch = tokio::time::interval(READER_EXIT_POLL);
+    reader_watch.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
     loop {
         tokio::select! {
+            // ── Reader ended: the response stream is already over ────────────
+            // Same teardown as a client-closed stream: registry cleanup below,
+            // then the guard's drop joins the (already finished) thread, which
+            // returns immediately.
+            _ = reader_watch.tick() => {
+                if _guard.reader_finished() {
+                    log::info!(
+                        "relay inbound [{session}]: reader thread exited — tearing down stream"
+                    );
+                    break;
+                }
+            }
+
+            // ── Attach eviction: a newer attach of this client view took over ─
+            // Leave the loop exactly as a client-closed stream does: registry
+            // cleanup below, then the guard's drop stops + joins the reader,
+            // which ends the outbound stream and detaches the backend client.
+            _ = attach_lease.evicted() => {
+                if let Some(key) = attach_lease.key() {
+                    log::info!(
+                        "relay inbound [{session}]: connection_id={}… evicted by a newer \
+                         attach of instance {} — tearing down stream",
+                        &connection_id[..connection_id.len().min(8)],
+                        key.redacted_instance_id()
+                    );
+                }
+                break;
+            }
+
             // ── Major H: periodic bearer re-validation ───────────────────────
             _ = recheck.tick() => {
                 if !revalidate_token(token.as_deref(), &session).await {
@@ -421,6 +470,9 @@ pub(crate) async fn inbound_loop(
              registry entries already absent (no-op)"
         );
     }
+    // Attach eviction: release this relay's key only if it still holds it — an
+    // evicted relay's successor keeps its slot (`AttachRegistry::deregister`).
+    drop(attach_lease);
     // _guard drops here → reader thread shutdown.
 }
 
@@ -1272,5 +1324,345 @@ mod tests {
         let (returned, res) = run_sender_op(Box::new(fake), |s| s.go_to_tab(1)).await;
         assert!(returned.is_none(), "a panicked op must lose the sender");
         assert!(res.is_err(), "a panicked op must surface an error");
+    }
+
+    // ─── Reader-end teardown (real inbound_loop, real reader thread) ─────────
+    //
+    // `inbound_loop` is driven for real: a `Streaming<ClientFrame>` over a body
+    // that never yields (a client that keeps its request side open and silent),
+    // a real `render_loop` thread over a scripted receiver, and the real
+    // `ShutdownGuard`. Only the multiplexer ends are fakes.
+
+    use super::super::reader::render_loop;
+    use crate::multiplexer::{
+        ActionAck, DualHandle, MuxReceiver, MuxServerMsg, ResizeDir, ResizeKind, ScrollDir,
+    };
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    /// A request body that stays open forever and never carries a frame.
+    struct SilentBody;
+
+    impl http_body::Body for SilentBody {
+        type Data = bytes::Bytes;
+        type Error = tonic::Status;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Pending
+        }
+    }
+
+    /// A request body that ends immediately: the client closed its side.
+    struct ClosedBody;
+
+    impl http_body::Body for ClosedBody {
+        type Data = bytes::Bytes;
+        type Error = tonic::Status;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<Self::Data>, Self::Error>>> {
+            std::task::Poll::Ready(None)
+        }
+    }
+
+    /// Yields the script, then parks for `park` and reports a closed stream.
+    struct ScriptedRx {
+        msgs: std::collections::VecDeque<MuxServerMsg>,
+        park: Duration,
+    }
+
+    impl MuxReceiver for ScriptedRx {
+        fn recv(&mut self) -> Option<MuxServerMsg> {
+            match self.msgs.pop_front() {
+                Some(m) => Some(m),
+                None => {
+                    std::thread::sleep(self.park);
+                    None
+                }
+            }
+        }
+    }
+
+    #[derive(Debug)]
+    struct NoBackend;
+
+    impl MuxBackend for NoBackend {
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_pane(&self, _: &str, _: bool, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn resize_pane(
+            &self,
+            _: &str,
+            _: PaneRef,
+            _: ResizeKind,
+            _: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn new_tab(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "none".to_owned()
+        }
+    }
+
+    type Outbound = mpsc::Receiver<Result<crate::proto::ServerFrame, tonic::Status>>;
+
+    /// Everything a test needs to watch one relay's teardown from outside.
+    struct Rig {
+        task: tokio::task::JoinHandle<()>,
+        clients: crate::client_count::SessionClients,
+        control: ControlRegistry,
+        view_state: ViewStateRegistry,
+        attach_registry: super::super::AttachRegistry,
+        key: super::super::AttachKey,
+        outbound: Outbound,
+    }
+
+    /// Spawn a real `inbound_loop` + reader thread. The reader runs `script`,
+    /// then parks `park` and sees its stream close.
+    fn spawn_rig(script: Vec<MuxServerMsg>, park: Duration, client_ends: bool) -> Rig {
+        let clients = crate::client_count::SessionClients::new();
+        let client_guard = clients.attach("s");
+        let control: ControlRegistry = Arc::new(dashmap::DashMap::new());
+        let view_state: ViewStateRegistry = Arc::new(dashmap::DashMap::new());
+        let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<RelayControl>();
+        control.insert(
+            "conn-1".into(),
+            super::super::ControlEntry {
+                session: "s".into(),
+                sender: ctrl_tx.clone(),
+                read_only: false,
+            },
+        );
+
+        let attach_registry = super::super::AttachRegistry::new();
+        let key = super::super::AttachKey::new(Some("tok"), "instance-1").expect("key");
+        let (lease, _) = attach_registry.register(
+            Some(key.clone()),
+            "conn-1",
+            super::super::next_attach_arrival(),
+        );
+
+        let (tx, outbound) = mpsc::channel(8);
+        let stop = Arc::new(AtomicBool::new(false));
+        let (query_tx, query_rx) = std::sync::mpsc::channel::<InFlightQuery>();
+        let receiver: Box<dyn MuxReceiver> = Box::new(ScriptedRx {
+            msgs: script.into(),
+            park,
+        });
+        let reader_stop = stop.clone();
+        let reader =
+            std::thread::spawn(move || render_loop(receiver, tx, reader_stop, "s", query_rx));
+        let guard = ShutdownGuard {
+            stop,
+            nudge: Box::new(FakeSender::plain()),
+            reader: Some(reader),
+            rows: 24,
+            cols: 80,
+            read_only: false,
+            session: "s".into(),
+        };
+
+        let decoder = tonic_prost::ProstDecoder::<ClientFrame>::new(Default::default());
+        let inbound = if client_ends {
+            Streaming::<ClientFrame>::new_request(decoder, ClosedBody, None, None)
+        } else {
+            Streaming::<ClientFrame>::new_request(decoder, SilentBody, None, None)
+        };
+        let task = tokio::spawn(inbound_loop(
+            inbound,
+            Box::new(FakeSender::plain()),
+            Arc::new(NoBackend),
+            guard,
+            "s".into(),
+            "conn-1".into(),
+            false,
+            (24, 80),
+            // No token: the periodic re-validation is not what this exercises.
+            None,
+            client_guard,
+            ctrl_rx,
+            control.clone(),
+            clients.clone(),
+            query_tx,
+            view_state.clone(),
+            lease,
+        ));
+        Rig {
+            task,
+            clients,
+            control,
+            view_state,
+            attach_registry,
+            key,
+            outbound,
+        }
+    }
+
+    /// The reader ends (backend stream closed) while the client keeps its
+    /// request side open: the inbound task must tear the relay down rather than
+    /// idle until the client or the transport gives up.
+    #[tokio::test]
+    async fn reader_end_with_open_client_stream_tears_the_relay_down() {
+        let rig = spawn_rig(vec![], Duration::from_millis(50), false);
+        assert_eq!(rig.clients.count("s"), 1);
+
+        let done = tokio::time::timeout(Duration::from_secs(3), rig.task).await;
+        assert!(
+            done.is_ok(),
+            "inbound task still running 3s after the reader thread exited: \
+             client count={}, control entries={}, view-state entries={}, \
+             attach key held={:?}",
+            rig.clients.count("s"),
+            rig.control.len(),
+            rig.view_state.len(),
+            rig.attach_registry.holder(&rig.key)
+        );
+        assert_eq!(rig.clients.count("s"), 0);
+        assert!(rig.control.is_empty() && rig.view_state.is_empty());
+        assert!(rig.attach_registry.holder(&rig.key).is_none());
+        drop(rig.outbound);
+    }
+
+    /// Wait for the task to finish, then assert every teardown effect landed.
+    async fn assert_torn_down(rig: Rig, what: &str) {
+        let done = tokio::time::timeout(Duration::from_secs(3), rig.task).await;
+        assert!(done.is_ok(), "{what}: inbound task did not finish");
+        assert!(
+            done.unwrap().is_ok(),
+            "{what}: inbound task must finish without panicking"
+        );
+        assert_eq!(rig.clients.count("s"), 0, "{what}: client count");
+        assert!(rig.control.is_empty(), "{what}: control entry removed");
+        assert!(
+            rig.attach_registry.holder(&rig.key).is_none(),
+            "{what}: attach key released"
+        );
+        drop(rig.outbound);
+    }
+
+    /// Reader exits on a session `Exit` event (the frame is delivered first).
+    #[tokio::test]
+    async fn session_exit_tears_the_relay_down() {
+        let script = vec![MuxServerMsg::Event(crate::multiplexer::MuxEvent::Exit {
+            reason: "bye".into(),
+        })];
+        let rig = spawn_rig(script, Duration::from_millis(0), false);
+        assert_torn_down(rig, "session exit").await;
+    }
+
+    /// Reader exits because the response receiver was dropped (failed send).
+    #[tokio::test]
+    async fn outbound_dropped_tears_the_relay_down() {
+        let mut rig = spawn_rig(
+            vec![MuxServerMsg::Render(b"x".to_vec())],
+            Duration::from_millis(0),
+            false,
+        );
+        rig.outbound.close();
+        // Drain whatever was queued so the next send observes the closed channel.
+        while rig.outbound.try_recv().is_ok() {}
+        assert_torn_down(rig, "outbound dropped").await;
+    }
+
+    /// Client ends its request side while the reader is still alive: the
+    /// pre-existing path still tears down, and the reader thread is joined.
+    #[tokio::test]
+    async fn client_end_tears_the_relay_down() {
+        let rig = spawn_rig(vec![], Duration::from_millis(500), true);
+        assert_torn_down(rig, "client end").await;
+    }
+
+    /// A newer attach of the same key evicts this relay while its reader runs:
+    /// teardown runs once, and the successor keeps its slot.
+    #[tokio::test]
+    async fn eviction_tears_the_relay_down_and_successor_keeps_slot() {
+        let rig = spawn_rig(vec![], Duration::from_millis(500), false);
+        let (successor, evicted) = rig.attach_registry.register(
+            Some(rig.key.clone()),
+            "conn-2",
+            super::super::next_attach_arrival(),
+        );
+        assert_eq!(evicted.as_deref(), Some("conn-1"));
+
+        let done = tokio::time::timeout(Duration::from_secs(3), rig.task).await;
+        assert!(done.is_ok(), "evicted inbound task did not finish");
+        assert_eq!(rig.clients.count("s"), 0);
+        assert_eq!(
+            rig.attach_registry.holder(&rig.key).as_deref(),
+            Some("conn-2"),
+            "the successor must keep the key"
+        );
+        drop(successor);
+        drop(rig.outbound);
     }
 }

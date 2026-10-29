@@ -336,6 +336,31 @@ message AttachReq {
   // Registry-mapped pane id, as emitted by GetLayout's `PaneMsg.id`.
   // Unset (0) = no pane hint.
   uint32 resume_pane_id  = 6;
+
+  // ─── Client instance id (additive; attach eviction) ────────────────────────
+  // An opaque id the CLIENT chooses for one client view — e.g. one terminal
+  // screen in the app — and keeps stable across every re-attach of that view
+  // (a network change, a resume from background). The server never interprets
+  // it; it only compares it for equality.
+  //
+  // When an attach arrives with a non-empty id and an earlier attach that is
+  // still live carries the SAME id under the SAME authenticated bearer token,
+  // the earlier attach is torn down (its stream ends and its backend client
+  // detaches) and the new one takes its place, so a stale connection the
+  // server cannot yet see as dead no longer lingers as an extra client. The
+  // new attach never waits for that teardown.
+  //
+  // Eviction is scoped to the authenticated token: the same id sent under a
+  // different token never touches another token's attach, and two different
+  // ids under one token never evict each other. Read-only and read-write
+  // tokens behave the same way. Unset ("") = no eviction either way — the
+  // attach neither evicts nor can be evicted, exactly today's behavior. An id
+  // longer than 128 bytes is ignored (treated as unset), never rejected.
+  // Ordering is by the server's receipt of the attach request: the
+  // later-received attach wins, even if its predecessor's setup finishes later.
+  // The id must be unique per client view (e.g. a UUID minted once per mounted
+  // view).
+  string client_instance_id = 7;
 }
 
 // Terminal resize.

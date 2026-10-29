@@ -28,6 +28,9 @@
 //!   `AttachTerminal` input enforce it.
 //! - [`BearerAuthenticated`] — marker that auth passed (for handler assertions).
 //! - [`SessionToken`] — the validated token, for periodic in-stream re-checks.
+//!
+//! [`TokenIdentity`] derives a stable, non-secret identity from that token for
+//! maps that must be scoped per token (attach eviction) without keying on it.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -61,6 +64,40 @@ impl std::fmt::Debug for SessionToken {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Never leak the token into logs.
         f.write_str("SessionToken(<redacted>)")
+    }
+}
+
+/// A stable, non-secret identity of the bearer token that authenticated a
+/// request — what scopes `AttachTerminal` eviction to one token
+/// (`AttachReq.client_instance_id`, see `crate::relay::AttachRegistry`).
+///
+/// A domain-separated SHA-256 of the token string, so it is deterministic for
+/// one token across requests and connections, distinct across tokens, and never
+/// the raw secret itself: maps may key on it where they must not key on the
+/// token. The domain tag keeps the digest from equalling any plain SHA-256 of
+/// the token stored or computed elsewhere. Kept in memory only; its `Debug`
+/// output is redacted all the same, so it never lands in a log line.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct TokenIdentity([u8; 32]);
+
+impl TokenIdentity {
+    /// Domain-separation tag hashed ahead of the token.
+    const DOMAIN: &'static [u8] = b"muxrd/attach-token-identity/v1\0";
+
+    /// Derive the identity of `token` (the validated bearer string — the value
+    /// [`SessionToken`] carries).
+    pub fn of(token: &str) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(Self::DOMAIN);
+        hasher.update(token.as_bytes());
+        Self(hasher.finalize().into())
+    }
+}
+
+impl std::fmt::Debug for TokenIdentity {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("TokenIdentity(<redacted>)")
     }
 }
 

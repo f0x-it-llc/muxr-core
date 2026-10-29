@@ -133,9 +133,19 @@ mod types;
 
 // Re-export public surface (used by grpc.rs as `crate::relay::<Name>`).
 pub use types::{
-    ControlEntry, ControlRegistry, FloatingHint, RelayControl, RelayViewState, ServerFrameStream,
-    ViewStateEntry, ViewStateRegistry,
+    AttachKey, AttachLease, AttachRegistry, ControlEntry, ControlRegistry, FloatingHint,
+    MAX_CLIENT_INSTANCE_ID_LEN, RelayControl, RelayViewState, ServerFrameStream, ViewStateEntry,
+    ViewStateRegistry, next_attach_arrival,
 };
+
+// ─── Process-wide attach eviction registry ────────────────────────────────────
+
+/// The one [`AttachRegistry`] every `AttachTerminal` relay in this process
+/// registers with (`AttachReq.client_instance_id` eviction). Process-wide on
+/// purpose: a re-attach arrives on a NEW HTTP/2 connection, so the registry
+/// must outlive and span every connection.
+static ATTACH_REGISTRY: std::sync::LazyLock<AttachRegistry> =
+    std::sync::LazyLock::new(AttachRegistry::new);
 
 // ─── Unguessable per-connection id ────────────────────────────────────────────
 
@@ -175,6 +185,10 @@ pub async fn attach_relay(
     view_state: ViewStateRegistry,
     backends: BackendSet,
 ) -> Result<ServerFrameStream, Status> {
+    // Arrival order of this attach (see `AttachRegistry::register`): stamped
+    // before anything slow, so a later-received attach always wins.
+    let attach_arrival = next_attach_arrival();
+
     // ── 1. First frame must be AttachReq ────────────────────────────────────
     let first = inbound
         .next()
@@ -448,6 +462,36 @@ pub async fn attach_relay(
         },
     );
 
+    // ── 3a. Attach eviction (AttachReq.client_instance_id). ─────────────────
+    // Registration is the LAST setup step: the backend attach, reader thread
+    // and view state all exist, so nothing fallible or cancellable sits between
+    // signalling the predecessor and the inbound task owning the lease. A
+    // failed or cancelled re-attach therefore never evicts the live one. Order
+    // is by `attach_arrival` (stamped on receipt): a later-received attach
+    // always wins, and a stale registrant gets an already-evicted lease. A
+    // relay already holding the key is signalled and tears itself down on its
+    // own task — this attach does not wait. No token / an empty or over-long id
+    // yields an inert lease. No await between this call and the spawn below.
+    let attach_key = AttachKey::new(token.as_deref(), &attach.client_instance_id);
+    let (attach_lease, evicted) =
+        ATTACH_REGISTRY.register(attach_key, &connection_id, attach_arrival);
+    if let (Some(key), Some(evicted)) = (attach_lease.key(), evicted) {
+        // FS3 / (g): instance id and connection ids redacted to 8 chars at info;
+        // full values at debug only.
+        log::info!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={}… — \
+             evicting previous connection_id={}…",
+            key.redacted_instance_id(),
+            &connection_id[..8],
+            &evicted[..evicted.len().min(8)]
+        );
+        log::debug!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={connection_id} \
+             — evicting previous connection_id={evicted}",
+            key.debug_instance_id()
+        );
+    }
+
     // ── 4. Inbound: tokio task pumping ClientFrames → IPC sender ────────────
     tokio::spawn(inbound::inbound_loop(
         inbound,
@@ -465,6 +509,7 @@ pub async fn attach_relay(
         clients,
         query_tx,
         view_state,
+        attach_lease,
     ));
 
     // ── 5. Outbound stream from the channel receiver ────────────────────────
