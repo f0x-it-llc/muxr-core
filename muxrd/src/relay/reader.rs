@@ -352,6 +352,19 @@ pub(super) struct ShutdownGuard {
     pub(super) session: String,
 }
 
+impl ShutdownGuard {
+    /// `true` once the reader thread has returned (backend stream closed,
+    /// session `Exit`, outbound receiver dropped, stop-flag, or a panic).
+    ///
+    /// The reader is spawned outside this module and has no channel into the
+    /// inbound task, so the thread handle is the exit signal: `is_finished`
+    /// is a non-blocking, idempotent read. A guard with no thread (already
+    /// joined, or a test double) reports `false` — it has nothing to observe.
+    pub(super) fn reader_finished(&self) -> bool {
+        self.reader.as_ref().is_some_and(JoinHandle::is_finished)
+    }
+}
+
 impl Drop for ShutdownGuard {
     fn drop(&mut self) {
         log::info!("relay [{}]: shutting down", self.session);
