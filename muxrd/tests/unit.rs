@@ -416,7 +416,9 @@ mod attach_eviction {
     use futures::FutureExt;
     use muxrd::auth::TokenIdentity;
     use muxrd::client_count::SessionClients;
-    use muxrd::relay::{AttachKey, AttachLease, AttachRegistry, MAX_CLIENT_INSTANCE_ID_LEN};
+    use muxrd::relay::{
+        AttachKey, AttachLease, AttachRegistry, MAX_CLIENT_INSTANCE_ID_LEN, next_attach_arrival,
+    };
 
     const TOKEN_A: &str = "token-alpha-secret";
     const TOKEN_B: &str = "token-bravo-secret";
@@ -432,7 +434,7 @@ mod attach_eviction {
         key: Option<AttachKey>,
         connection_id: &str,
     ) -> AttachLease {
-        let (lease, evicted) = registry.register(key, connection_id);
+        let (lease, evicted) = registry.register(key, connection_id, next_attach_arrival());
         assert_eq!(evicted, None, "{connection_id} must not evict anyone");
         lease
     }
@@ -466,7 +468,8 @@ mod attach_eviction {
         let first_task = spawn_relay(&clients, first);
         assert_eq!(clients.count(SESSION), 1);
 
-        let (second, evicted) = registry.register(key(TOKEN_A, "view-1"), "conn-second");
+        let (second, evicted) =
+            registry.register(key(TOKEN_A, "view-1"), "conn-second", next_attach_arrival());
         assert_eq!(evicted.as_deref(), Some("conn-first"));
         let second_guard = clients.attach(SESSION);
 
@@ -496,7 +499,8 @@ mod attach_eviction {
     fn eviction_signal_is_not_lost_when_the_relay_is_not_waiting() {
         let registry = AttachRegistry::new();
         let first = register_fresh(&registry, key(TOKEN_A, "view-1"), "conn-first");
-        let (_second, _) = registry.register(key(TOKEN_A, "view-1"), "conn-second");
+        let (_second, _) =
+            registry.register(key(TOKEN_A, "view-1"), "conn-second", next_attach_arrival());
         assert!(first.is_evicted());
         assert!(evicted_now(&first));
         assert!(
@@ -570,7 +574,8 @@ mod attach_eviction {
         let rw = register_fresh(&registry, key(RW_TOKEN, "view-1"), "conn-rw-1");
         let ro = register_fresh(&registry, key(RO_TOKEN, "view-1"), "conn-ro-1");
 
-        let (ro_again, evicted) = registry.register(key(RO_TOKEN, "view-1"), "conn-ro-2");
+        let (ro_again, evicted) =
+            registry.register(key(RO_TOKEN, "view-1"), "conn-ro-2", next_attach_arrival());
         assert_eq!(evicted.as_deref(), Some("conn-ro-1"));
         assert!(
             evicted_now(&ro),
@@ -581,7 +586,8 @@ mod attach_eviction {
             "the read-write token's attach is untouched"
         );
 
-        let (_rw_again, evicted) = registry.register(key(RW_TOKEN, "view-1"), "conn-rw-2");
+        let (_rw_again, evicted) =
+            registry.register(key(RW_TOKEN, "view-1"), "conn-rw-2", next_attach_arrival());
         assert_eq!(evicted.as_deref(), Some("conn-rw-1"));
         assert!(evicted_now(&rw));
         assert!(!evicted_now(&ro_again));
@@ -595,7 +601,7 @@ mod attach_eviction {
         let k = key(TOKEN_A, "view-1").unwrap();
 
         let first = register_fresh(&registry, Some(k.clone()), "conn-first");
-        let (second, _) = registry.register(Some(k.clone()), "conn-second");
+        let (second, _) = registry.register(Some(k.clone()), "conn-second", next_attach_arrival());
 
         drop(first); // the evicted relay finishes tearing down AFTER the swap
         assert_eq!(registry.holder(&k).as_deref(), Some("conn-second"));
@@ -618,7 +624,8 @@ mod attach_eviction {
         let k = key(TOKEN_A, "view-1").unwrap();
         let mut leases = Vec::new();
         for n in 0..4 {
-            let (lease, evicted) = registry.register(Some(k.clone()), &format!("conn-{n}"));
+            let (lease, evicted) =
+                registry.register(Some(k.clone()), &format!("conn-{n}"), next_attach_arrival());
             assert_eq!(evicted, (n > 0).then(|| format!("conn-{}", n - 1)));
             leases.push(lease);
         }
@@ -627,6 +634,66 @@ mod attach_eviction {
         drop(leases);
         assert_eq!(registry.holder(&k).as_deref(), Some("conn-3"));
         assert!(!evicted_now(&newest));
+    }
+
+    /// An attach that arrived EARLIER than the current holder (its setup merely
+    /// finished later) is refused: its lease is already evicted and the holder
+    /// keeps the slot.
+    #[test]
+    fn earlier_arrival_is_refused_and_the_holder_keeps_the_slot() {
+        let registry = AttachRegistry::new();
+        let k = key(TOKEN_A, "view-1").unwrap();
+        let early = next_attach_arrival();
+        let late = next_attach_arrival();
+        let (holder, evicted) = registry.register(Some(k.clone()), "conn-late", late);
+        assert_eq!(evicted, None);
+
+        let (stale, evicted) = registry.register(Some(k.clone()), "conn-early", early);
+        assert_eq!(evicted, None, "a refused registrant evicts nobody");
+        assert!(stale.is_evicted());
+        assert!(evicted_now(&stale));
+        assert!(!evicted_now(&holder));
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-late"));
+    }
+
+    /// Normal order: the later arrival registers after an earlier holder and
+    /// evicts it; the successor keeps the slot.
+    #[test]
+    fn later_arrival_evicts_the_earlier_holder() {
+        let registry = AttachRegistry::new();
+        let k = key(TOKEN_A, "view-1").unwrap();
+        let first_arrival = next_attach_arrival();
+        let second_arrival = next_attach_arrival();
+        let (first, _) = registry.register(Some(k.clone()), "conn-first", first_arrival);
+        let (second, evicted) = registry.register(Some(k.clone()), "conn-second", second_arrival);
+        assert_eq!(evicted.as_deref(), Some("conn-first"));
+        assert!(evicted_now(&first));
+        assert!(!evicted_now(&second));
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-second"));
+    }
+
+    /// Dropping a refused stale lease leaves the holder's slot in place.
+    #[test]
+    fn dropping_a_refused_lease_keeps_the_holders_slot() {
+        let registry = AttachRegistry::new();
+        let k = key(TOKEN_A, "view-1").unwrap();
+        let early = next_attach_arrival();
+        let late = next_attach_arrival();
+        let (holder, _) = registry.register(Some(k.clone()), "conn-late", late);
+        let (stale, _) = registry.register(Some(k.clone()), "conn-early", early);
+        drop(stale);
+        assert_eq!(registry.holder(&k).as_deref(), Some("conn-late"));
+        drop(holder);
+        assert!(registry.is_empty());
+    }
+
+    /// Arrival sequences are strictly increasing across calls.
+    #[test]
+    fn arrival_sequences_strictly_increase() {
+        let a = next_attach_arrival();
+        let b = next_attach_arrival();
+        let c = next_attach_arrival();
+        assert!(a < b && b < c);
     }
 
     /// (g) Logs and `Debug` output carry at most the first 8 characters of

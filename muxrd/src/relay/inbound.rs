@@ -1506,7 +1506,11 @@ mod tests {
 
         let attach_registry = super::super::AttachRegistry::new();
         let key = super::super::AttachKey::new(Some("tok"), "instance-1").expect("key");
-        let (lease, _) = attach_registry.register(Some(key.clone()), "conn-1");
+        let (lease, _) = attach_registry.register(
+            Some(key.clone()),
+            "conn-1",
+            super::super::next_attach_arrival(),
+        );
 
         let (tx, outbound) = mpsc::channel(8);
         let stop = Arc::new(AtomicBool::new(false));
@@ -1643,9 +1647,11 @@ mod tests {
     #[tokio::test]
     async fn eviction_tears_the_relay_down_and_successor_keeps_slot() {
         let rig = spawn_rig(vec![], Duration::from_millis(500), false);
-        let (successor, evicted) = rig
-            .attach_registry
-            .register(Some(rig.key.clone()), "conn-2");
+        let (successor, evicted) = rig.attach_registry.register(
+            Some(rig.key.clone()),
+            "conn-2",
+            super::super::next_attach_arrival(),
+        );
         assert_eq!(evicted.as_deref(), Some("conn-1"));
 
         let done = tokio::time::timeout(Duration::from_secs(3), rig.task).await;

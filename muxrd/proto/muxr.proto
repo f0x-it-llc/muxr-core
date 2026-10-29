@@ -356,6 +356,10 @@ message AttachReq {
   // tokens behave the same way. Unset ("") = no eviction either way — the
   // attach neither evicts nor can be evicted, exactly today's behavior. An id
   // longer than 128 bytes is ignored (treated as unset), never rejected.
+  // Ordering is by the server's receipt of the attach request: the
+  // later-received attach wins, even if its predecessor's setup finishes later.
+  // The id must be unique per client view (e.g. a UUID minted once per mounted
+  // view).
   string client_instance_id = 7;
 }
 

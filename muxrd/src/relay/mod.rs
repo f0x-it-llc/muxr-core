@@ -135,7 +135,7 @@ mod types;
 pub use types::{
     AttachKey, AttachLease, AttachRegistry, ControlEntry, ControlRegistry, FloatingHint,
     MAX_CLIENT_INSTANCE_ID_LEN, RelayControl, RelayViewState, ServerFrameStream, ViewStateEntry,
-    ViewStateRegistry,
+    ViewStateRegistry, next_attach_arrival,
 };
 
 // ─── Process-wide attach eviction registry ────────────────────────────────────
@@ -185,6 +185,10 @@ pub async fn attach_relay(
     view_state: ViewStateRegistry,
     backends: BackendSet,
 ) -> Result<ServerFrameStream, Status> {
+    // Arrival order of this attach (see `AttachRegistry::register`): stamped
+    // before anything slow, so a later-received attach always wins.
+    let attach_arrival = next_attach_arrival();
+
     // ── 1. First frame must be AttachReq ────────────────────────────────────
     let first = inbound
         .next()
@@ -296,32 +300,6 @@ pub async fn attach_relay(
         "relay [{session_name}]: minted connection_id={connection_id} \
          (read_only={read_only})"
     );
-
-    // ── 3a. Attach eviction (AttachReq.client_instance_id). ─────────────────
-    // Registered only now, after the backend attach succeeded: a failed
-    // re-attach must not tear down the live one it was meant to replace. A
-    // relay already holding the same (token identity, instance id) key is
-    // signalled to stop and tears itself down on its own task — this attach
-    // does not wait for it. No token / an empty or over-long id yields an
-    // inert lease: nothing evicted, never evictable (today's behavior).
-    let attach_key = AttachKey::new(token.as_deref(), &attach.client_instance_id);
-    let (attach_lease, evicted) = ATTACH_REGISTRY.register(attach_key, &connection_id);
-    if let (Some(key), Some(evicted)) = (attach_lease.key(), evicted) {
-        // FS3 / (g): instance id and connection ids redacted to 8 chars at info;
-        // full values at debug only.
-        log::info!(
-            "relay [{session_name}]: instance {} re-attached as connection_id={}… — \
-             evicting previous connection_id={}…",
-            key.redacted_instance_id(),
-            &connection_id[..8],
-            &evicted[..evicted.len().min(8)]
-        );
-        log::debug!(
-            "relay [{session_name}]: instance {} re-attached as connection_id={connection_id} \
-             — evicting previous connection_id={evicted}",
-            key.debug_instance_id()
-        );
-    }
 
     // ── 3. Outbound: bounded channel + std reader thread ────────────────────
     let (tx, rx) = mpsc::channel::<Result<ServerFrame, Status>>(RENDER_CHANNEL_BOUND);
@@ -483,6 +461,36 @@ pub async fn attach_relay(
             read_only,
         },
     );
+
+    // ── 3a. Attach eviction (AttachReq.client_instance_id). ─────────────────
+    // Registration is the LAST setup step: the backend attach, reader thread
+    // and view state all exist, so nothing fallible or cancellable sits between
+    // signalling the predecessor and the inbound task owning the lease. A
+    // failed or cancelled re-attach therefore never evicts the live one. Order
+    // is by `attach_arrival` (stamped on receipt): a later-received attach
+    // always wins, and a stale registrant gets an already-evicted lease. A
+    // relay already holding the key is signalled and tears itself down on its
+    // own task — this attach does not wait. No token / an empty or over-long id
+    // yields an inert lease. No await between this call and the spawn below.
+    let attach_key = AttachKey::new(token.as_deref(), &attach.client_instance_id);
+    let (attach_lease, evicted) =
+        ATTACH_REGISTRY.register(attach_key, &connection_id, attach_arrival);
+    if let (Some(key), Some(evicted)) = (attach_lease.key(), evicted) {
+        // FS3 / (g): instance id and connection ids redacted to 8 chars at info;
+        // full values at debug only.
+        log::info!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={}… — \
+             evicting previous connection_id={}…",
+            key.redacted_instance_id(),
+            &connection_id[..8],
+            &evicted[..evicted.len().min(8)]
+        );
+        log::debug!(
+            "relay [{session_name}]: instance {} re-attached as connection_id={connection_id} \
+             — evicting previous connection_id={evicted}",
+            key.debug_instance_id()
+        );
+    }
 
     // ── 4. Inbound: tokio task pumping ClientFrames → IPC sender ────────────
     tokio::spawn(inbound::inbound_loop(

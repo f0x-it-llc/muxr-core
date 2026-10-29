@@ -262,6 +262,17 @@ struct AttachSlot {
     connection_id: String,
     /// The holding relay's eviction signal.
     signal: Arc<EvictSignal>,
+    /// Arrival sequence of the holding attach (see [`next_attach_arrival`]).
+    arrival: u64,
+}
+
+static ATTACH_ARRIVAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Stamp an incoming attach with a process-wide, strictly increasing arrival
+/// sequence. Call it as early as possible (before the backend open) so the
+/// order reflects when the server received the request, not when setup ended.
+pub fn next_attach_arrival() -> u64 {
+    ATTACH_ARRIVAL.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
 }
 
 /// One-shot "you have been superseded" signal shared between the registry and
@@ -308,17 +319,22 @@ impl AttachRegistry {
         Self::default()
     }
 
-    /// Register the relay `connection_id` under `key`.
+    /// Register the relay `connection_id` under `key`, ordered by `arrival`
+    /// (from [`next_attach_arrival`]).
     ///
-    /// With `Some(key)`: any relay already holding `key` is signalled to stop,
-    /// and its `connection_id` is returned alongside the new lease. The swap is
-    /// atomic per key, so of two racing attaches exactly one ends up holding it
-    /// and the other is signalled. With `None` (no token, empty or over-long
-    /// id): nothing is registered or signalled, and the lease is never evicted.
+    /// With `Some(key)`: a holder with an EARLIER arrival is signalled to stop
+    /// and its `connection_id` is returned alongside the new lease. A holder
+    /// with a LATER arrival is left untouched: the registrant is stale, its
+    /// lease comes back already evicted and nothing is returned as evicted.
+    /// The compare-and-swap is atomic per key, so of two racing attaches
+    /// exactly one ends up holding it, the later arrival. With `None` (no
+    /// token, empty or over-long id): nothing is registered or signalled, and
+    /// the lease is never evicted.
     pub fn register(
         &self,
         key: Option<AttachKey>,
         connection_id: &str,
+        arrival: u64,
     ) -> (AttachLease, Option<String>) {
         let Some(key) = key else {
             return (
@@ -332,17 +348,34 @@ impl AttachRegistry {
             );
         };
         let signal = Arc::new(EvictSignal::default());
-        let previous = self.slots.insert(
-            key.clone(),
-            AttachSlot {
-                connection_id: connection_id.to_owned(),
-                signal: signal.clone(),
-            },
-        );
-        let evicted = previous.map(|old| {
-            old.signal.fire();
-            old.connection_id
-        });
+        let new_slot = || AttachSlot {
+            connection_id: connection_id.to_owned(),
+            signal: signal.clone(),
+            arrival,
+        };
+        let mut evicted = None;
+        match self.slots.entry(key.clone()) {
+            dashmap::mapref::entry::Entry::Vacant(v) => {
+                v.insert(new_slot());
+            }
+            dashmap::mapref::entry::Entry::Occupied(mut o) => {
+                if o.get().arrival > arrival {
+                    // A later-received attach already holds the key.
+                    signal.fire();
+                    log::info!(
+                        "relay attach registry: instance {} attach connection_id={}… arrived \
+                         before the current holder connection_id={}… — refused as stale",
+                        key.redacted_instance_id(),
+                        &connection_id[..connection_id.len().min(8)],
+                        &o.get().connection_id[..o.get().connection_id.len().min(8)]
+                    );
+                } else {
+                    let old = o.insert(new_slot());
+                    old.signal.fire();
+                    evicted = Some(old.connection_id);
+                }
+            }
+        }
         (
             AttachLease {
                 registry: self.clone(),
