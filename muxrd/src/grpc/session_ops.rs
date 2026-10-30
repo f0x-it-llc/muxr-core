@@ -1,5 +1,8 @@
 //! Session lifecycle RPC implementations: list, attach, rename, kill, create.
 
+use std::collections::HashMap;
+use std::sync::Arc;
+
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::proto::{
@@ -7,11 +10,12 @@ use crate::proto::{
     SessionRef,
 };
 
-use crate::multiplexer::{make_id, validate_session};
+use crate::multiplexer::{AgentSummary, MuxBackend, make_id, sort_agents, validate_session};
 
 use super::MuxrService;
 use super::helpers::{
-    kind_from_proto, proto_backend, reject_if_read_only, run_action, validate_layout_name,
+    agent_summary_msg, kind_from_proto, proto_backend, reject_if_read_only, run_action,
+    validate_layout_name,
 };
 
 /// Per-backend ceiling for the concurrent ListSessions fan-out (S-M3).
@@ -63,6 +67,12 @@ impl MuxrService {
         // (CODE_STANDARDS: never `.await` blocking IPC directly).
         // The backend Arc is carried through in the result tuple so it can be
         // used in the merge phase for the herdr space_count pre-fetch.
+        //
+        // Agents ride in the same per-backend future: once a backend that
+        // `supports_agents()` has listed its sessions, its live sessions' agent
+        // summaries are fetched under their own timeout, so the fan-out stays
+        // concurrent across backends and a slow or failing agent query only
+        // leaves `SessionInfo.agents` unset — it never drops the sessions.
         let backend_futures: Vec<_> = self
             .backends
             .iter()
@@ -77,7 +87,13 @@ impl MuxrService {
                         }),
                     )
                     .await;
-                    (kind, backend, result)
+                    let agents = match &result {
+                        Ok(Ok(Ok(sessions))) if backend.supports_agents() => {
+                            session_agent_summaries(kind, &backend, sessions).await
+                        }
+                        _ => HashMap::new(),
+                    };
+                    (kind, backend, result, agents)
                 }
             })
             .collect();
@@ -87,7 +103,7 @@ impl MuxrService {
 
         // Merge sessions from all backends that succeeded within the timeout.
         let mut proto_sessions: Vec<crate::proto::SessionInfo> = Vec::new();
-        for (kind, backend, result) in backend_results {
+        for (kind, backend, result, mut agent_summaries) in backend_results {
             let sessions = match result {
                 // S-M3: timeout — warn + skip, return whatever other backends had.
                 Err(_elapsed) => {
@@ -176,6 +192,9 @@ impl MuxrService {
             for (name, age_secs, resurrectable) in sessions {
                 let id = make_id(kind, &name);
                 let connected_clients = clients.count(&id);
+                // Absent for a backend without agents, a resurrectable session,
+                // or a failed/timed-out agent query (see the fan-out above).
+                let agents = agent_summaries.remove(&name);
                 // space_count is per-backend (not per-session): herdr exposes its
                 // workspace count on the single collapsed session; zellij = 0.
                 // The 0-for-non-herdr invariant is encoded by the outer Herdr
@@ -193,6 +212,7 @@ impl MuxrService {
                     backend: proto_kind,
                     id,
                     space_count: herdr_space_count,
+                    agents,
                 });
             }
         }
@@ -382,6 +402,67 @@ impl MuxrService {
             backend.create_session(&name, layout)
         })
         .await
+    }
+}
+
+// ─── ListSessions agent summaries ─────────────────────────────────────────────
+
+/// Fetch the agent summary of every **live** session in `sessions` from a
+/// backend that `supports_agents()`, keyed by bare session name.
+///
+/// One blocking task runs every session's `list_agents` (herdr has exactly one,
+/// the sentinel) under [`LIST_SESSIONS_BACKEND_TIMEOUT`]. Resurrectable
+/// sessions are not running and are skipped. Every failure degrades instead of
+/// failing ListSessions: a per-session error drops only that session's entry, a
+/// timeout or panicked task drops them all — each warn-logged, each leaving
+/// `SessionInfo.agents` unset.
+async fn session_agent_summaries(
+    kind: crate::cli::BackendKind,
+    backend: &Arc<dyn MuxBackend>,
+    sessions: &[(String, u64, bool)],
+) -> HashMap<String, crate::proto::AgentSummary> {
+    let live: Vec<String> = sessions
+        .iter()
+        .filter(|(_, _, resurrectable)| !resurrectable)
+        .map(|(name, _, _)| name.clone())
+        .collect();
+    if live.is_empty() {
+        return HashMap::new();
+    }
+    let b = backend.clone();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut out = HashMap::with_capacity(live.len());
+        for name in live {
+            match b.list_agents(&name) {
+                Ok(mut agents) => {
+                    sort_agents(&mut agents);
+                    let summary = AgentSummary::from(agents.as_slice());
+                    out.insert(name, agent_summary_msg(&summary));
+                }
+                Err(e) => log::warn!(
+                    "ListSessions: list_agents failed for {kind:?} session '{name}', \
+                     leaving agents unset: {e:#}"
+                ),
+            }
+        }
+        out
+    });
+    match tokio::time::timeout(LIST_SESSIONS_BACKEND_TIMEOUT, task).await {
+        Ok(Ok(summaries)) => summaries,
+        Ok(Err(join_err)) => {
+            log::warn!(
+                "ListSessions: list_agents task panicked for {kind:?}, \
+                 leaving agents unset: {join_err}"
+            );
+            HashMap::new()
+        }
+        Err(_elapsed) => {
+            log::warn!(
+                "ListSessions: list_agents timed out after {LIST_SESSIONS_BACKEND_TIMEOUT:?} \
+                 for {kind:?}, leaving agents unset"
+            );
+            HashMap::new()
+        }
     }
 }
 
@@ -1084,5 +1165,119 @@ mod tests {
             sessions[0].space_count, 0,
             "list_spaces Err → degrade to 0, no RPC abort"
         );
+    }
+
+    // ── SessionInfo.agents ────────────────────────────────────────────────────
+
+    use crate::grpc::agent_ops::tests::{AgentsBackend, two_agents};
+
+    /// A zellij stub plus the given agents-reporting herdr fake.
+    fn zellij_and_agents_herdr(herdr: AgentsBackend) -> MuxrService {
+        let zellij_backend: Arc<dyn MuxBackend> = Arc::new(StubBackend {
+            sessions: vec![("zellij-session".to_string(), 0, false)],
+        });
+        MuxrService::with_backends(BackendSet::new(vec![
+            (BackendKind::Zellij, zellij_backend),
+            (BackendKind::Herdr, Arc::new(herdr)),
+        ]))
+    }
+
+    async fn list(service: &MuxrService) -> Vec<crate::proto::SessionInfo> {
+        service
+            .list_sessions_impl(Request::new(Empty {}))
+            .await
+            .expect("RPC must succeed")
+            .into_inner()
+            .sessions
+    }
+
+    #[tokio::test]
+    async fn session_agents_set_for_herdr_and_unset_for_zellij() {
+        let service = zellij_and_agents_herdr(AgentsBackend {
+            sessions: vec![("herdr".to_string(), 0, false)],
+            agents: two_agents(),
+            fail: false,
+        });
+
+        let sessions = list(&service).await;
+        assert_eq!(sessions.len(), 2);
+        let herdr_s = sessions
+            .iter()
+            .find(|s| s.id == "herdr:herdr")
+            .expect("herdr session must be present");
+        let zellij_s = sessions
+            .iter()
+            .find(|s| s.id.starts_with("zellij:"))
+            .expect("zellij session must be present");
+
+        let agents = herdr_s
+            .agents
+            .as_ref()
+            .expect("herdr session carries agents");
+        assert_eq!(
+            (
+                agents.total,
+                agents.blocked,
+                agents.done,
+                agents.working,
+                agents.idle,
+                agents.unknown
+            ),
+            (2, 1, 0, 1, 0, 0)
+        );
+        assert_eq!(agents.kinds, vec!["cli-a".to_owned(), "cli-b".to_owned()]);
+        assert!(
+            zellij_s.agents.is_none(),
+            "a backend without agents leaves the field absent"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_agents_failure_keeps_the_session_and_leaves_agents_unset() {
+        let service = zellij_and_agents_herdr(AgentsBackend {
+            sessions: vec![("herdr".to_string(), 0, false)],
+            agents: two_agents(),
+            fail: true,
+        });
+
+        let sessions = list(&service).await;
+        assert_eq!(
+            sessions.len(),
+            2,
+            "a failing agent query never drops a session"
+        );
+        let herdr_s = sessions
+            .iter()
+            .find(|s| s.id == "herdr:herdr")
+            .expect("herdr session must be present");
+        assert!(herdr_s.agents.is_none());
+    }
+
+    #[tokio::test]
+    async fn resurrectable_session_has_no_agents() {
+        let service = MuxrService::with_backends(BackendSet::single(
+            BackendKind::Herdr,
+            Arc::new(AgentsBackend {
+                sessions: vec![("dead".to_string(), 5, true)],
+                agents: two_agents(),
+                fail: false,
+            }),
+        ));
+
+        let sessions = list(&service).await;
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions[0].agents.is_none(), "not running → no agents");
+    }
+
+    #[test]
+    fn session_agents_is_field_twelve() {
+        // Pins the SessionInfo field-number high-water mark: `agents = 12`
+        // encodes as tag (12 << 3) | LEN = 0x62. Renumbering it is a wire break.
+        use prost::Message;
+        let only_agents = crate::proto::SessionInfo {
+            agents: Some(crate::proto::AgentSummary::default()),
+            ..Default::default()
+        };
+        assert_eq!(only_agents.encode_to_vec(), vec![0x62, 0x00]);
     }
 }

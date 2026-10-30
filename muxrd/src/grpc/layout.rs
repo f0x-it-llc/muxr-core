@@ -39,7 +39,7 @@ use crate::proto::{Layout, PaneMsg, SessionRef, TabMsg};
 use crate::relay::RelayViewState;
 
 use super::MuxrService;
-use super::helpers::short_conn;
+use super::helpers::{agent_mark_msg, short_conn};
 use super::space_ops::{ConnectionSpace, validate_space_id};
 
 /// Timeout for the oneshot reply when routing a `QueryLayout` through the relay.
@@ -659,6 +659,9 @@ fn build_tab_msgs(snapshot: &LayoutSnapshot, relay_vs: Option<&RelayViewState>) 
                         cols: p.cols,
                         is_plugin: p.is_plugin,
                         is_fullscreen: p.is_fullscreen,
+                        // Absent unless the backend reports an agent in this
+                        // pane (zellij never does).
+                        agent: p.agent.as_ref().map(agent_mark_msg),
                     }
                 })
                 .collect();
@@ -960,6 +963,55 @@ mod tests {
         assert!(!raw[1].active, "raw: tab 2 inactive");
         assert!(focused_of(&raw, 1, 10));
         assert!(focused_of(&raw, 2, 21));
+    }
+
+    // ─── PaneMsg.agent ───────────────────────────────────────────────────────
+
+    #[test]
+    fn pane_agent_mark_round_trips_onto_the_wire() {
+        use crate::multiplexer::{AgentMark, AgentStatus};
+        use prost::Message;
+
+        let mut snap = snapshot();
+        snap.tabs[1].panes[0].agent = Some(AgentMark {
+            kind: "cli-a".to_owned(),
+            name: Some("reviewer".to_owned()),
+            status: AgentStatus::Done,
+        });
+
+        let tabs = build_tab_msgs(&snap, None);
+        let marked = &tabs[1].panes[0];
+        assert_eq!(marked.id, 20);
+        let mark = marked.agent.as_ref().expect("pane 20 carries its agent");
+        assert_eq!(mark.kind, "cli-a");
+        assert_eq!(mark.name, "reviewer");
+        assert_eq!(mark.status, crate::proto::AgentStatus::Done as i32);
+        assert!(
+            tabs.iter()
+                .flat_map(|t| &t.panes)
+                .filter(|p| p.id != 20)
+                .all(|p| p.agent.is_none()),
+            "a pane without an agent leaves the field absent"
+        );
+
+        // Encode → decode keeps the mark; an agent-less pane stays absent.
+        let decoded = PaneMsg::decode(marked.encode_to_vec().as_slice()).expect("decode");
+        assert_eq!(&decoded, marked);
+        let bare = &tabs[0].panes[0];
+        let decoded = PaneMsg::decode(bare.encode_to_vec().as_slice()).expect("decode");
+        assert!(decoded.agent.is_none());
+    }
+
+    #[test]
+    fn pane_agent_is_field_fourteen() {
+        // Pins the PaneMsg field-number high-water mark: `agent = 14` encodes as
+        // tag (14 << 3) | LEN = 0x72. Renumbering it is a wire break.
+        use prost::Message;
+        let only_agent = PaneMsg {
+            agent: Some(crate::proto::AgentMark::default()),
+            ..PaneMsg::default()
+        };
+        assert_eq!(only_agent.encode_to_vec(), vec![0x72, 0x00]);
     }
 
     #[test]
