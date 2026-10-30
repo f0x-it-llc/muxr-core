@@ -88,15 +88,17 @@ docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr
 ```
 
 This builds the `runtime-herdr` image (an **unmodified** upstream herdr binary —
-`HERDR_VERSION`, default `0.9.0`), starts a headless `herdr server`,
+`HERDR_VERSION`, default `0.9.5`), starts a headless `herdr server`,
 seeds a demo workspace, and exports `MUXRD_BACKEND=herdr` so the `muxrctl`-started
 daemon selects herdr automatically. Then SSH in and drive `muxrctl` exactly as for
 zellij (Configure → Cert → Tokens → **Server (start)** → Pair). The container is
 **`muxr-herdr-rig`**.
 
-> **herdr is PINNED** — `HERDR_VERSION` defaults to `0.9.0`, the last release muxrd
-> has been tested against (it ships wire protocol 22 = `HERDR_MAX_TESTED_PROTOCOL`
-> in `muxrd/src/multiplexer/herdr/wire.rs`). It used to default to `latest`, but this
+> **herdr is PINNED** — `HERDR_VERSION` defaults to `0.9.5`, the newest release muxrd
+> has been tested against. `0.9.0` stays the supported floor: 0.9.0 through 0.9.5
+> all ship wire protocol 22 (= `HERDR_MAX_TESTED_PROTOCOL` in
+> `muxrd/src/multiplexer/herdr/wire.rs`). To run the suite against another release,
+> e.g. the floor: `HERDR_VERSION=0.9.0 ./docker/run.sh --herdr`. It used to default to `latest`, but this
 > layer sits downstream of the muxrd binary layer, so any unrelated rebuild silently
 > upgraded herdr under the rig — which is how it once came up on 0.8.2 / protocol 20
 > against a muxrd then tested only to 17, with nothing in the build output saying so.
@@ -109,9 +111,12 @@ zellij (Configure → Cert → Tokens → **Server (start)** → Pair). The cont
 > re-verify the wire layout against the new release, re-run the herdr integration
 > smoke tests (`cargo test -p muxrd --test herdr_integration -- --ignored` against a
 > live rig), and update `HERDR_MAX_TESTED_PROTOCOL`. muxrd still only *warns* when
-> herdr reports a protocol newer than that constant and attaches anyway — herdr's
-> protocol changes have been additive so far, so if terminal output ever misbehaves
-> after a herdr release, that warning is the first thing to check.
+> herdr reports a protocol newer than that constant and attaches anyway, but a newer
+> protocol is not presumed compatible: herdr does not only append variants — between
+> protocols 17 and 22 it deleted a server variant (shifting every later tag), renamed
+> and retyped the client handshake, and dropped fields. So that warning means
+> "re-derive the layout from herdr's source", and is the first thing to check if
+> terminal output misbehaves after a herdr release.
 
 > **Apache-2.0:** herdr is a separate, unmodified, user-installed binary that muxrd
 > drives only over its public `0600` Unix sockets. The rig downloads the official
