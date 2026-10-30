@@ -1,6 +1,7 @@
 //! Types matching herdr's public wire/JSON protocol for interop, verified live
-//! against herdr v0.9.0. herdr runs as a separate, unmodified, user-installed
-//! binary driven over its public sockets.
+//! against herdr v0.9.0 (the supported floor); the `session.snapshot` agent
+//! records are mirrored from v0.9.5 and parse from 0.9.0 alike. herdr runs as a
+//! separate, unmodified, user-installed binary driven over its public sockets.
 //!
 //! # herdr backend — Phase 2 foundation
 //!
@@ -18,7 +19,11 @@
 //!
 //! - [`paths`] — resolves herdr's two socket paths (JSON-API + derived wire).
 //! - [`registry`] — stable `u32`/`u64` ↔ herdr `String` id maps.
-//! - [`control`] — the JSON-API control client + neutral layout transcode (P2.02).
+//! - [`control`] — the JSON-API control client + neutral layout transcode (P2.02),
+//!   and the session-wide agent inventory mapped from one `session.snapshot`.
+//!   Only neutral `types::AgentSnapshot`s leave it — no `api` type crosses the
+//!   `multiplexer` boundary; callers reach the inventory through
+//!   `MuxBackend::list_agents` on the lifted [`backend::HerdrBackend`].
 //! - [`relay`] — the wire terminal relay (single-pane attach): the
 //!   `MuxSender`/`MuxReceiver`/`DualHandle` data plane (P2.03).
 //! - [`backend`] — `HerdrBackend`, the `MuxBackend` impl composing control +

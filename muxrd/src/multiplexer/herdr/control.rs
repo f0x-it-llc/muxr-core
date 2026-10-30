@@ -29,6 +29,16 @@
 //! method is unavailable or unusable, and entering it is logged as the degraded
 //! state it is.
 //!
+//! ## Agent inventory
+//! [`HerdrControl::list_agents`] answers from the same one-call
+//! `session.snapshot`, mapping its `agents` records ([`agents_from_snapshot`])
+//! into neutral [`AgentSnapshot`]s through the **same** registries the layout
+//! path uses, so an agent's `pane` / `tab_id` are the ids a `GetLayout` hands
+//! out for that pane. There is no fan-out equivalent: a herdr that refuses the
+//! snapshot method yields an empty inventory. The snapshot path also marks each
+//! [`PaneSnapshot`] whose `PaneInfo` names an agent ([`AgentMarks`]); the
+//! fan-out leaves every mark `None`.
+//!
 //! ## Id translation
 //! The rest of muxrd addresses panes by `u32` and tabs by `u64`; herdr uses
 //! opaque `String`s. The shared [`HerdrPaneRegistry`] / [`HerdrTabRegistry`]
@@ -54,16 +64,18 @@ use anyhow::{Context, Result, anyhow};
 use serde::Serialize;
 
 use crate::multiplexer::types::{
-    ActionAck, LayoutSnapshot, PaneSnapshot, TabSnapshot, UnknownSpace,
+    ActionAck, AgentMark, AgentSnapshot, AgentStatus, LayoutSnapshot, PaneSnapshot, TabSnapshot,
+    UnknownSpace, sort_agents,
 };
 
 use super::api::{
-    ApiErrorBody, ApiRequest, ApiResponseBody, ApiResult, HerdrServerInfo, LayoutDescription,
-    PaneCloseParams, PaneDirection, PaneFocusDirectionParams, PaneInfo, PaneLayoutParams,
-    PaneLayoutSnapshot, PaneRenameParams, PaneSplitParams, PaneZoomMode, PaneZoomParams,
-    PingParams, SessionSnapshot, SessionSnapshotParams, SplitDirection, TabCloseParams,
-    TabCreateParams, TabFocusParams, TabInfo, TabRenameParams, WorkspaceCloseParams,
-    WorkspaceCreateParams, WorkspaceInfo, WorkspaceListParams, WorkspaceRenameParams,
+    AgentInfo, AgentStatus as HerdrAgentStatus, ApiErrorBody, ApiRequest, ApiResponseBody,
+    ApiResult, HerdrServerInfo, LayoutDescription, PaneCloseParams, PaneDirection,
+    PaneFocusDirectionParams, PaneInfo, PaneLayoutParams, PaneLayoutSnapshot, PaneRenameParams,
+    PaneSplitParams, PaneZoomMode, PaneZoomParams, PingParams, SessionSnapshot,
+    SessionSnapshotParams, SplitDirection, TabCloseParams, TabCreateParams, TabFocusParams,
+    TabInfo, TabRenameParams, WorkspaceCloseParams, WorkspaceCreateParams, WorkspaceInfo,
+    WorkspaceListParams, WorkspaceRenameParams,
 };
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 
@@ -107,7 +119,38 @@ pub struct HerdrControl {
     /// broken snapshot method is visible in the log without one `warn!` per
     /// layout poll. Relaxed ordering: this is a logging latch, never a guard.
     snapshot_degraded: AtomicBool,
+    /// `true` once [`Self::list_agents`] has logged that herdr refused
+    /// `session.snapshot`, so the empty-inventory answer is logged once per
+    /// transition rather than once per poll. Relaxed: a logging latch only.
+    agents_unavailable: AtomicBool,
 }
+
+/// herdr answered a JSON-API request with an error envelope
+/// (`{"error":{"code","message"}}`) — as opposed to a transport or decode
+/// failure. Typed so a caller can tell "herdr refused this method" (e.g. a
+/// server without `session.snapshot` answering `method_not_found`) from "herdr
+/// is unreachable"; its `Display` is the message `call_typed` always produced.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HerdrApiError {
+    /// The JSON-API method that was refused.
+    pub method: String,
+    /// herdr's error code (e.g. `"method_not_found"`).
+    pub code: String,
+    /// herdr's error message.
+    pub message: String,
+}
+
+impl std::fmt::Display for HerdrApiError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "herdr {} error {}: {}",
+            self.method, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for HerdrApiError {}
 
 impl HerdrControl {
     /// Construct a control client for the herdr instance at `api_socket`, sharing
@@ -124,6 +167,7 @@ impl HerdrControl {
             next_req_id: AtomicU64::new(1),
             read_timeout: READ_TIMEOUT,
             snapshot_degraded: AtomicBool::new(false),
+            agents_unavailable: AtomicBool::new(false),
         }
     }
 
@@ -205,11 +249,11 @@ impl HerdrControl {
         match self.call_raw(method, params)? {
             ApiResponseBody::Ok { result } => serde_json::from_value(result)
                 .with_context(|| format!("decode herdr {method} result")),
-            ApiResponseBody::Err { error } => Err(anyhow!(
-                "herdr {method} error {}: {}",
-                error.code,
-                error.message
-            )),
+            ApiResponseBody::Err { error } => Err(anyhow::Error::new(HerdrApiError {
+                method: method.to_string(),
+                code: error.code,
+                message: error.message,
+            })),
         }
     }
 
@@ -535,6 +579,36 @@ impl HerdrControl {
         }
     }
 
+    /// Every agent on the daemon, session-wide across workspaces, from one
+    /// [`session_snapshot`](Self::session_snapshot) call — mapped by
+    /// [`agents_from_snapshot`] and sorted with [`sort_agents`] (blocked first).
+    ///
+    /// When herdr **refuses** the snapshot method — an API-level error envelope
+    /// ([`HerdrApiError`]), which is how a server without `session.snapshot`
+    /// answers and the failure class [`query_layout`](Self::query_layout) falls
+    /// back on — the inventory is `Ok(vec![])`, logged at `debug!` once until the
+    /// method works again: an older herdr simply has no inventory to report.
+    /// A transport or decode failure is still an `Err` — "herdr is unreachable"
+    /// must not read as "no agents". Blocking, like every method here.
+    pub(crate) fn list_agents(&self) -> Result<Vec<AgentSnapshot>> {
+        match self.session_snapshot() {
+            Ok(snapshot) => {
+                self.agents_unavailable.store(false, Ordering::Relaxed);
+                Ok(agents_from_snapshot(&snapshot, &self.panes, &self.tabs))
+            }
+            Err(e) if e.downcast_ref::<HerdrApiError>().is_some() => {
+                if !self.agents_unavailable.swap(true, Ordering::Relaxed) {
+                    log::debug!(
+                        "herdr: session.snapshot refused, so there is no agent inventory to \
+                         report ({e:#})"
+                    );
+                }
+                Ok(Vec::new())
+            }
+            Err(e) => Err(e),
+        }
+    }
+
     /// Build the neutral [`LayoutSnapshot`] for a workspace (muxrd "session").
     ///
     /// Tries herdr's one-call [`session_snapshot`](Self::session_snapshot) first
@@ -675,6 +749,7 @@ impl HerdrControl {
             &active_tab_id,
             &self.panes,
             &self.tabs,
+            AgentMarks::Omit,
         ))
     }
 
@@ -772,6 +847,15 @@ fn layout_from_snapshot(
         }
     }
 
+    // Agent names live only on the snapshot's agent records (`PaneInfo` has no
+    // `name`); the first named record for a pane wins.
+    let mut agent_names: HashMap<&str, &str> = HashMap::new();
+    for agent in &snapshot.agents {
+        if let Some(name) = non_empty(agent.name.as_deref()) {
+            agent_names.entry(agent.pane_id.as_str()).or_insert(name);
+        }
+    }
+
     Some(transcode_layout(
         &tabs,
         &panes,
@@ -779,7 +863,181 @@ fn layout_from_snapshot(
         active_tab_id,
         pane_reg,
         tab_reg,
+        AgentMarks::FromPanes(&agent_names),
     ))
+}
+
+/// Whether, and how, [`transcode_layout`] fills [`PaneSnapshot::agent`].
+#[derive(Debug, Clone, Copy)]
+enum AgentMarks<'a> {
+    /// Leave every mark `None` — the fan-out fallback.
+    Omit,
+    /// Mark each pane whose `PaneInfo.agent` is set; the name comes from this
+    /// `pane_id → name` map built from the snapshot's agent records.
+    FromPanes(&'a HashMap<&'a str, &'a str>),
+}
+
+/// The neutral agent kind: `agent`, else `display_agent`, else `"agent"`
+/// (empty strings count as absent).
+fn agent_kind(agent: Option<&str>, display_agent: Option<&str>) -> String {
+    non_empty(agent)
+        .or_else(|| non_empty(display_agent))
+        .unwrap_or("agent")
+        .to_string()
+}
+
+/// `Some` only for a non-empty string.
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.filter(|v| !v.is_empty())
+}
+
+/// herdr's agent status → the neutral one (same five values).
+fn neutral_status(status: HerdrAgentStatus) -> AgentStatus {
+    match status {
+        HerdrAgentStatus::Idle => AgentStatus::Idle,
+        HerdrAgentStatus::Working => AgentStatus::Working,
+        HerdrAgentStatus::Blocked => AgentStatus::Blocked,
+        HerdrAgentStatus::Done => AgentStatus::Done,
+        HerdrAgentStatus::Unknown => AgentStatus::Unknown,
+    }
+}
+
+/// The [`AgentMark`] for one pane on the snapshot path: `Some` exactly when
+/// `PaneInfo.agent` names an agent, with its status from `PaneInfo.agent_status`.
+fn pane_agent_mark(info: &PaneInfo, marks: AgentMarks<'_>) -> Option<AgentMark> {
+    let AgentMarks::FromPanes(names) = marks else {
+        return None;
+    };
+    let agent = non_empty(info.agent.as_deref())?;
+    Some(AgentMark {
+        kind: agent_kind(Some(agent), info.display_agent.as_deref()),
+        name: names.get(info.pane_id.as_str()).map(|n| n.to_string()),
+        status: neutral_status(info.agent_status),
+    })
+}
+
+/// Map a whole-daemon [`SessionSnapshot`]'s agent records into neutral
+/// [`AgentSnapshot`]s, sorted with [`sort_agents`]. Pure (no I/O) beyond the
+/// shared registries, so the inventory is fixture-testable.
+///
+/// A record with an empty `pane_id` (herdr's placeholder records, or anything
+/// that parsed only under [`AgentInfo`]'s all-default shape) names no pane and
+/// is skipped with one `debug!`.
+///
+/// | `AgentSnapshot` field | herdr source |
+/// |---|---|
+/// | `pane` | pane registry id for `pane_id` (`terminal_id` recorded, never erased by an empty one) |
+/// | `tab_id` | tab registry id for `tab_id` (`0` when the record has none) |
+/// | `space_id` | `workspace_id` |
+/// | `space_name` | the workspace's `WorkspaceInfo.label`, else `workspace_id` |
+/// | `tab_name` | the tab's `TabInfo.label`, else its `number`; empty for an unlisted tab |
+/// | `kind` | `agent` ?? `display_agent` ?? `"agent"` |
+/// | `display_kind` / `name` / `focused` | `display_agent` / `name` / `focused` |
+/// | `status` | `agent_status` |
+/// | `title` | `title` ?? `terminal_title_stripped` |
+/// | `summary` | `tokens["summary"]` |
+/// | `cwd` | `foreground_cwd` ?? `cwd` |
+/// | `change_seq` / `completion_seq` | `state_change_seq` / `completion_seq` (absent before herdr 0.9.5) |
+fn agents_from_snapshot(
+    snapshot: &SessionSnapshot,
+    pane_reg: &HerdrPaneRegistry,
+    tab_reg: &HerdrTabRegistry,
+) -> Vec<AgentSnapshot> {
+    let workspaces: HashMap<&str, &WorkspaceInfo> = snapshot
+        .workspaces
+        .iter()
+        .map(|w| (w.workspace_id.as_str(), w))
+        .collect();
+    let tabs: HashMap<&str, &TabInfo> = snapshot
+        .tabs
+        .iter()
+        .map(|t| (t.tab_id.as_str(), t))
+        .collect();
+    // The pane's own attach key, for a record that arrived without one.
+    let terminals: HashMap<&str, &str> = snapshot
+        .panes
+        .iter()
+        .map(|p| (p.pane_id.as_str(), p.terminal_id.as_str()))
+        .collect();
+
+    let mut skipped = 0usize;
+    let mut agents: Vec<AgentSnapshot> = snapshot
+        .agents
+        .iter()
+        .filter_map(|a| {
+            if a.pane_id.is_empty() {
+                skipped += 1;
+                return None;
+            }
+            Some(agent_snapshot(
+                a,
+                &workspaces,
+                &tabs,
+                &terminals,
+                pane_reg,
+                tab_reg,
+            ))
+        })
+        .collect();
+    if skipped > 0 {
+        log::debug!("herdr: skipped {skipped} session.snapshot agent record(s) that name no pane");
+    }
+    sort_agents(&mut agents);
+    agents
+}
+
+/// One [`AgentInfo`] → [`AgentSnapshot`]; see [`agents_from_snapshot`]'s table.
+fn agent_snapshot(
+    a: &AgentInfo,
+    workspaces: &HashMap<&str, &WorkspaceInfo>,
+    tabs: &HashMap<&str, &TabInfo>,
+    terminals: &HashMap<&str, &str>,
+    pane_reg: &HerdrPaneRegistry,
+    tab_reg: &HerdrTabRegistry,
+) -> AgentSnapshot {
+    let terminal_id = non_empty(Some(a.terminal_id.as_str()))
+        .or_else(|| terminals.get(a.pane_id.as_str()).copied())
+        .unwrap_or("");
+    let pane = pane_reg.assign_or_get_keep_terminal(&a.pane_id, terminal_id);
+    let tab_id = if a.tab_id.is_empty() {
+        0
+    } else {
+        tab_reg.assign_or_get(&a.tab_id)
+    };
+    let space_name = workspaces
+        .get(a.workspace_id.as_str())
+        .and_then(|w| non_empty(Some(w.label.as_str())))
+        .unwrap_or(a.workspace_id.as_str())
+        .to_string();
+    let tab_name = tabs
+        .get(a.tab_id.as_str())
+        .map(|t| {
+            non_empty(Some(t.label.as_str()))
+                .map(str::to_string)
+                .unwrap_or_else(|| t.number.to_string())
+        })
+        .unwrap_or_default();
+    AgentSnapshot {
+        pane,
+        tab_id,
+        space_id: a.workspace_id.clone(),
+        space_name,
+        tab_name,
+        kind: agent_kind(a.agent.as_deref(), a.display_agent.as_deref()),
+        name: non_empty(a.name.as_deref()).map(str::to_string),
+        display_kind: non_empty(a.display_agent.as_deref()).map(str::to_string),
+        status: neutral_status(a.agent_status),
+        title: non_empty(a.title.as_deref())
+            .or_else(|| non_empty(a.terminal_title_stripped.as_deref()))
+            .map(str::to_string),
+        summary: non_empty(a.tokens.get("summary").map(String::as_str)).map(str::to_string),
+        cwd: non_empty(a.foreground_cwd.as_deref())
+            .or_else(|| non_empty(a.cwd.as_deref()))
+            .map(str::to_string),
+        focused: a.focused,
+        change_seq: a.state_change_seq,
+        completion_seq: a.completion_seq,
+    }
 }
 
 /// Transcode herdr's per-tab layout + pane metadata into the neutral
@@ -810,6 +1068,7 @@ fn layout_from_snapshot(
 /// | `cwd` | `PaneInfo.cwd` ?? `""` |
 /// | `command` | `""` (herdr `PaneInfo` carries no foreground command string) |
 /// | `is_plugin` / `is_floating` / `exited` | `false` (herdr has no plugin/floating/exited concept here) |
+/// | `agent` | snapshot path: `Some` when `PaneInfo.agent` is set (kind `agent`, status `PaneInfo.agent_status`, name from the snapshot's agent records); fan-out: `None` |
 fn transcode_layout(
     tabs: &[TabInfo],
     panes: &[PaneInfo],
@@ -817,6 +1076,7 @@ fn transcode_layout(
     active_tab_id: &str,
     pane_reg: &HerdrPaneRegistry,
     tab_reg: &HerdrTabRegistry,
+    agent_marks: AgentMarks<'_>,
 ) -> LayoutSnapshot {
     // Register every pane up front so terminal_id is known regardless of which
     // tab's geometry we fetched, and build a pane_id → PaneInfo lookup.
@@ -859,7 +1119,7 @@ fn transcode_layout(
                                 cols: lp.rect.width as u32,
                                 is_plugin: false,
                                 is_fullscreen: zoomed,
-                                agent: None,
+                                agent: info.and_then(|i| pane_agent_mark(i, agent_marks)),
                             }
                         })
                         .collect()
@@ -957,9 +1217,7 @@ fn worktree_group_refusal(method: &str, error: &ApiErrorBody) -> Option<ActionAc
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::multiplexer::herdr::api::{
-        AgentStatus, PaneLayoutPane, PaneLayoutRect, PaneLayoutSnapshot,
-    };
+    use crate::multiplexer::herdr::api::{PaneLayoutPane, PaneLayoutRect, PaneLayoutSnapshot};
 
     fn tab(tab_id: &str, number: usize, label: &str, focused: bool) -> TabInfo {
         serde_json::from_value(serde_json::json!({
@@ -1060,7 +1318,15 @@ mod tests {
             ),
         );
 
-        let snap = transcode_layout(&tabs, &panes, &tab_layouts, "tab-1", &pane_reg, &tab_reg);
+        let snap = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "tab-1",
+            &pane_reg,
+            &tab_reg,
+            AgentMarks::Omit,
+        );
 
         assert_eq!(snap.tabs.len(), 1);
         let t = &snap.tabs[0];
@@ -1123,7 +1389,15 @@ mod tests {
             ),
         );
 
-        let snap = transcode_layout(&tabs, &panes, &tab_layouts, "tab-z", &pane_reg, &tab_reg);
+        let snap = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "tab-z",
+            &pane_reg,
+            &tab_reg,
+            AgentMarks::Omit,
+        );
         assert!(snap.tabs[0].fullscreen_active);
         assert!(snap.tabs[0].panes[0].is_fullscreen);
     }
@@ -1161,7 +1435,15 @@ mod tests {
         );
 
         // The workspace reports `active_tab_id == "tab-2"`.
-        let snap = transcode_layout(&tabs, &panes, &tab_layouts, "tab-2", &pane_reg, &tab_reg);
+        let snap = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "tab-2",
+            &pane_reg,
+            &tab_reg,
+            AgentMarks::Omit,
+        );
 
         assert_eq!(snap.tabs.len(), 2);
         assert!(
@@ -1203,7 +1485,15 @@ mod tests {
             ),
         );
 
-        let snap = transcode_layout(&tabs, &panes, &tab_layouts, "tab-1", &pane_reg, &tab_reg);
+        let snap = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "tab-1",
+            &pane_reg,
+            &tab_reg,
+            AgentMarks::Omit,
+        );
         assert_eq!(snap.tabs.len(), 2);
         assert_eq!(snap.tabs[0].panes.len(), 1);
         assert!(snap.tabs[1].panes.is_empty());
@@ -1314,8 +1604,9 @@ mod tests {
     }
 
     /// A `session.snapshot` response body built from [`daemon_fixture`], carrying
-    /// the `agents` array and the three `focused_*` ids muxrd deliberately does
-    /// not model — so the test also proves those are ignored rather than fatal.
+    /// the three `focused_*` ids muxrd deliberately does not model and an `agents`
+    /// array holding only herdr's placeholder record — so the test also proves
+    /// the former are ignored and the latter is skipped rather than fatal.
     fn snapshot_json() -> serde_json::Value {
         let (workspaces, tabs, panes, layouts) = daemon_fixture();
         serde_json::json!({
@@ -1380,8 +1671,15 @@ mod tests {
         let (tabs, panes, tab_layouts) = fanout_inputs();
         let fan_panes = HerdrPaneRegistry::new();
         let fan_tabs = HerdrTabRegistry::new();
-        let from_fanout =
-            transcode_layout(&tabs, &panes, &tab_layouts, "w1:t1", &fan_panes, &fan_tabs);
+        let from_fanout = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "w1:t1",
+            &fan_panes,
+            &fan_tabs,
+            AgentMarks::Omit,
+        );
 
         assert_eq!(
             from_snapshot, from_fanout,
@@ -1441,6 +1739,447 @@ mod tests {
         );
     }
 
+    // ── Agent inventory (session.snapshot agents) ─────────────────────────────
+
+    /// A daemon with three real agents across two workspaces, shaped as herdr
+    /// v0.9.5 emits it — or, with `v095 = false`, as v0.9.0 does: no
+    /// `completion_seq` on any agent and no `restore_error` on any pane, the only
+    /// two differences between the releases in the fields muxrd reads.
+    ///
+    /// - `w1:p1` (ws-1, the focused workspace): `claude`, named `planner`, working.
+    /// - `w1:p2` (ws-1): only `agent: "codex"`, idle.
+    /// - `w2:p9` (ws-2, NOT focused): blocked, kind only from `display_agent`.
+    /// - `w1:p3`: a plain shell, no agent.
+    ///
+    /// Plus a placeholder record and a record with an empty `pane_id`, both of
+    /// which must be skipped.
+    fn agents_snapshot_json(v095: bool) -> serde_json::Value {
+        let mut panes = serde_json::json!([
+            {
+                "pane_id": "w1:p1", "terminal_id": "term-1", "workspace_id": "ws-1",
+                "tab_id": "w1:t1", "focused": true, "title": "Planning", "cwd": "/home/u",
+                "agent": "claude", "display_agent": "Claude Code",
+                "agent_status": "working", "revision": 3
+            },
+            {
+                "pane_id": "w1:p2", "terminal_id": "term-2", "workspace_id": "ws-1",
+                "tab_id": "w1:t1", "focused": false, "agent": "codex",
+                "agent_status": "idle", "revision": 4
+            },
+            {
+                "pane_id": "w1:p3", "terminal_id": "term-3", "workspace_id": "ws-1",
+                "tab_id": "w1:t1", "focused": false, "cwd": "/tmp",
+                "agent_status": "unknown", "revision": 5
+            },
+            {
+                "pane_id": "w2:p9", "terminal_id": "term-9", "workspace_id": "ws-2",
+                "tab_id": "w2:t1", "focused": true, "display_agent": "Gemini",
+                "agent_status": "blocked", "revision": 1
+            },
+        ]);
+        let mut agents = serde_json::json!([
+            {
+                "terminal_id": "term-1", "name": "planner", "agent": "claude",
+                "title": "Planning", "terminal_title_stripped": "claude: planning",
+                "display_agent": "Claude Code", "agent_status": "working",
+                "tokens": { "summary": "drafting the plan" },
+                "workspace_id": "ws-1", "tab_id": "w1:t1", "pane_id": "w1:p1",
+                "focused": true, "state_change_seq": 7, "completion_seq": 3,
+                "cwd": "/home/u", "foreground_cwd": "/home/u/src", "revision": 3
+            },
+            {
+                "terminal_id": "term-2", "agent": "codex",
+                "terminal_title_stripped": "codex — idle", "agent_status": "idle",
+                "workspace_id": "ws-1", "tab_id": "w1:t1", "pane_id": "w1:p2",
+                "focused": false, "state_change_seq": 2, "completion_seq": 1,
+                "cwd": "/var", "revision": 4
+            },
+            { "anything": "herdr adds here" },
+            {
+                "terminal_id": "term-x", "agent": "ghost", "agent_status": "working",
+                "workspace_id": "ws-1", "tab_id": "w1:t1", "pane_id": "",
+                "focused": false, "state_change_seq": 99, "revision": 1
+            },
+            {
+                "terminal_id": "term-9", "display_agent": "Gemini",
+                "agent_status": "blocked",
+                "state_labels": { "blocked": "approve the edit?" },
+                "workspace_id": "ws-2", "tab_id": "w2:t1", "pane_id": "w2:p9",
+                "focused": true, "state_change_seq": 1, "completion_seq": 0,
+                "revision": 1
+            },
+        ]);
+        if v095 {
+            panes[2]["restore_error"] = serde_json::json!("cwd vanished");
+        } else {
+            for a in agents.as_array_mut().expect("agents array") {
+                if let Some(obj) = a.as_object_mut() {
+                    obj.remove("completion_seq");
+                }
+            }
+        }
+        serde_json::json!({
+            "version": if v095 { "0.9.5" } else { "0.9.0" },
+            "protocol": 22,
+            "focused_workspace_id": "ws-1",
+            "workspaces": [
+                {
+                    "workspace_id": "ws-1", "number": 1, "label": "main", "focused": true,
+                    "pane_count": 3, "tab_count": 1, "active_tab_id": "w1:t1",
+                    "agent_status": "working"
+                },
+                {
+                    "workspace_id": "ws-2", "number": 2, "label": "other", "focused": false,
+                    "pane_count": 1, "tab_count": 1, "active_tab_id": "w2:t1",
+                    "agent_status": "blocked"
+                },
+            ],
+            "tabs": [
+                {
+                    "tab_id": "w1:t1", "workspace_id": "ws-1", "number": 1, "label": "shell",
+                    "focused": true, "pane_count": 3, "agent_status": "working"
+                },
+                {
+                    "tab_id": "w2:t1", "workspace_id": "ws-2", "number": 1, "label": "",
+                    "focused": false, "pane_count": 1, "agent_status": "blocked"
+                },
+            ],
+            "panes": panes,
+            "layouts": [
+                {
+                    "workspace_id": "ws-1", "tab_id": "w1:t1", "zoomed": false,
+                    "area": { "x": 0, "y": 0, "width": 240, "height": 50 },
+                    "focused_pane_id": "w1:p1",
+                    "panes": [
+                        { "pane_id": "w1:p1", "focused": true,
+                          "rect": { "x": 0, "y": 0, "width": 80, "height": 50 } },
+                        { "pane_id": "w1:p2", "focused": false,
+                          "rect": { "x": 80, "y": 0, "width": 80, "height": 50 } },
+                        { "pane_id": "w1:p3", "focused": false,
+                          "rect": { "x": 160, "y": 0, "width": 80, "height": 50 } }
+                    ],
+                    "splits": []
+                },
+                {
+                    "workspace_id": "ws-2", "tab_id": "w2:t1", "zoomed": false,
+                    "area": { "x": 0, "y": 0, "width": 80, "height": 24 },
+                    "focused_pane_id": "w2:p9",
+                    "panes": [
+                        { "pane_id": "w2:p9", "focused": true,
+                          "rect": { "x": 0, "y": 0, "width": 80, "height": 24 } }
+                    ],
+                    "splits": []
+                },
+            ],
+            "agents": agents,
+        })
+    }
+
+    fn agents_snapshot(v095: bool) -> SessionSnapshot {
+        serde_json::from_value(agents_snapshot_json(v095)).expect("agents snapshot must parse")
+    }
+
+    /// Acceptance (1): three agents across two workspaces map to three neutral
+    /// snapshots with the expected locations, kinds and statuses — the blocked
+    /// one, in the non-focused workspace, first — and the placeholder and the
+    /// empty-pane_id record are skipped, not fatal.
+    #[test]
+    fn snapshot_agents_map_to_sorted_neutral_snapshots() {
+        let pane_reg = HerdrPaneRegistry::new();
+        let tab_reg = HerdrTabRegistry::new();
+        let agents = agents_from_snapshot(&agents_snapshot(true), &pane_reg, &tab_reg);
+
+        assert_eq!(
+            agents.len(),
+            3,
+            "placeholder and empty-pane_id records skipped"
+        );
+        let herdr_pane = |a: &AgentSnapshot| pane_reg.herdr_pane_id(a.pane).unwrap_or_default();
+        let herdr_tab = |a: &AgentSnapshot| tab_reg.herdr_tab_id(a.tab_id).unwrap_or_default();
+
+        // Blocked first, despite the lowest change_seq and a non-focused space.
+        let blocked = &agents[0];
+        assert_eq!(herdr_pane(blocked), "w2:p9");
+        assert_eq!(herdr_tab(blocked), "w2:t1");
+        assert_eq!(blocked.status, AgentStatus::Blocked);
+        assert_eq!(blocked.space_id, "ws-2");
+        assert_eq!(blocked.space_name, "other");
+        assert_eq!(
+            blocked.tab_name, "1",
+            "an unlabelled tab falls back to its number"
+        );
+        assert_eq!(
+            blocked.kind, "Gemini",
+            "no `agent`: kind from display_agent"
+        );
+        assert_eq!(blocked.display_kind.as_deref(), Some("Gemini"));
+        assert_eq!(blocked.name, None);
+        assert_eq!(blocked.title, None);
+        assert_eq!(blocked.cwd, None);
+        assert_eq!(blocked.completion_seq, Some(0));
+
+        let named = &agents[1];
+        assert_eq!(herdr_pane(named), "w1:p1");
+        assert_eq!(herdr_tab(named), "w1:t1");
+        assert_eq!(named.status, AgentStatus::Working);
+        assert_eq!(
+            (named.space_id.as_str(), named.space_name.as_str()),
+            ("ws-1", "main")
+        );
+        assert_eq!(named.tab_name, "shell");
+        assert_eq!(named.kind, "claude");
+        assert_eq!(named.name.as_deref(), Some("planner"));
+        assert_eq!(named.display_kind.as_deref(), Some("Claude Code"));
+        assert_eq!(named.title.as_deref(), Some("Planning"));
+        assert_eq!(named.summary.as_deref(), Some("drafting the plan"));
+        assert_eq!(
+            named.cwd.as_deref(),
+            Some("/home/u/src"),
+            "foreground_cwd wins"
+        );
+        assert!(named.focused);
+        assert_eq!(named.change_seq, 7);
+        assert_eq!(named.completion_seq, Some(3));
+
+        let bare = &agents[2];
+        assert_eq!(herdr_pane(bare), "w1:p2");
+        assert_eq!(bare.status, AgentStatus::Idle);
+        assert_eq!(bare.kind, "codex");
+        assert_eq!(bare.name, None);
+        assert_eq!(bare.display_kind, None);
+        assert_eq!(
+            bare.title.as_deref(),
+            Some("codex — idle"),
+            "no title: falls back to terminal_title_stripped"
+        );
+        assert_eq!(bare.summary, None);
+        assert_eq!(bare.cwd.as_deref(), Some("/var"));
+        assert!(!bare.focused);
+
+        // The relay's attach keys were recorded for every agent pane.
+        assert_eq!(pane_reg.terminal_id(named.pane).as_deref(), Some("term-1"));
+        assert_eq!(
+            pane_reg.terminal_id(blocked.pane).as_deref(),
+            Some("term-9")
+        );
+        assert!(
+            pane_reg.id_for_herdr_pane("").is_none(),
+            "a record naming no pane must never be registered"
+        );
+    }
+
+    /// Acceptance (1b): the same daemon as herdr 0.9.0 emits it maps to the
+    /// identical inventory, every `completion_seq` `None`.
+    #[test]
+    fn a_herdr_090_snapshot_maps_to_the_same_agents_without_completion_seq() {
+        let v095 = agents_from_snapshot(
+            &agents_snapshot(true),
+            &HerdrPaneRegistry::new(),
+            &HerdrTabRegistry::new(),
+        );
+        let v090 = agents_from_snapshot(
+            &agents_snapshot(false),
+            &HerdrPaneRegistry::new(),
+            &HerdrTabRegistry::new(),
+        );
+        assert_eq!(v090.len(), 3);
+        assert!(v090.iter().all(|a| a.completion_seq.is_none()));
+        let expected: Vec<AgentSnapshot> = v095
+            .into_iter()
+            .map(|a| AgentSnapshot {
+                completion_seq: None,
+                ..a
+            })
+            .collect();
+        assert_eq!(v090, expected);
+    }
+
+    /// A snapshot without an `agents` key yields an empty inventory.
+    #[test]
+    fn a_snapshot_without_agents_yields_no_agents() {
+        let mut json = agents_snapshot_json(true);
+        json.as_object_mut().expect("object").remove("agents");
+        let snapshot: SessionSnapshot = serde_json::from_value(json).expect("must parse");
+        assert!(
+            agents_from_snapshot(
+                &snapshot,
+                &HerdrPaneRegistry::new(),
+                &HerdrTabRegistry::new()
+            )
+            .is_empty()
+        );
+    }
+
+    /// Acceptance (3): an agent's neutral pane and tab ids are the ids the layout
+    /// path hands out for the same herdr pane — in either order of first sight.
+    #[test]
+    fn agent_registry_ids_equal_the_layout_path_ids() {
+        let snapshot = agents_snapshot(true);
+        for agents_first in [true, false] {
+            let pane_reg = HerdrPaneRegistry::new();
+            let tab_reg = HerdrTabRegistry::new();
+            let (agents, layout) = if agents_first {
+                let agents = agents_from_snapshot(&snapshot, &pane_reg, &tab_reg);
+                let layout = layout_from_snapshot(&snapshot, "ws-1", &pane_reg, &tab_reg);
+                (agents, layout)
+            } else {
+                let layout = layout_from_snapshot(&snapshot, "ws-1", &pane_reg, &tab_reg);
+                (agents_from_snapshot(&snapshot, &pane_reg, &tab_reg), layout)
+            };
+            let layout = layout.expect("ws-1 is in the snapshot");
+            let tab = &layout.tabs[0];
+            for agent in agents.iter().filter(|a| a.space_id == "ws-1") {
+                let herdr_pane = pane_reg.herdr_pane_id(agent.pane).expect("registered");
+                let pane = tab
+                    .panes
+                    .iter()
+                    .find(|p| pane_reg.herdr_pane_id(p.id).as_deref() == Some(&herdr_pane))
+                    .expect("the agent's pane is in the layout");
+                assert_eq!(pane.id, agent.pane, "agents_first={agents_first}");
+                assert_eq!(tab.tab_id, agent.tab_id, "agents_first={agents_first}");
+            }
+        }
+    }
+
+    /// Acceptance (1), marks: on the snapshot path a pane whose `PaneInfo` names
+    /// an agent carries a mark (name from the agent record), every other pane
+    /// `None`; the fan-out path leaves every mark `None`.
+    #[test]
+    fn pane_agent_marks_are_set_on_the_snapshot_path_only() {
+        let snapshot = agents_snapshot(true);
+        let pane_reg = HerdrPaneRegistry::new();
+        let tab_reg = HerdrTabRegistry::new();
+        let layout =
+            layout_from_snapshot(&snapshot, "ws-1", &pane_reg, &tab_reg).expect("ws-1 exists");
+        let marks: Vec<Option<AgentMark>> = layout.tabs[0]
+            .panes
+            .iter()
+            .map(|p| p.agent.clone())
+            .collect();
+        assert_eq!(
+            marks,
+            vec![
+                Some(AgentMark {
+                    kind: "claude".into(),
+                    name: Some("planner".into()),
+                    status: AgentStatus::Working,
+                }),
+                Some(AgentMark {
+                    kind: "codex".into(),
+                    name: None,
+                    status: AgentStatus::Idle,
+                }),
+                None,
+            ]
+        );
+
+        // ws-2's pane has only `display_agent`, no `agent`: no mark.
+        let other =
+            layout_from_snapshot(&snapshot, "ws-2", &pane_reg, &tab_reg).expect("ws-2 exists");
+        assert_eq!(other.tabs[0].panes.len(), 1);
+        assert!(other.tabs[0].panes[0].agent.is_none());
+
+        // The fan-out transcode of the same rows marks nothing.
+        let tabs: Vec<TabInfo> = snapshot
+            .tabs
+            .iter()
+            .filter(|t| t.workspace_id == "ws-1")
+            .cloned()
+            .collect();
+        let panes: Vec<PaneInfo> = snapshot
+            .panes
+            .iter()
+            .filter(|p| p.workspace_id == "ws-1")
+            .cloned()
+            .collect();
+        let mut tab_layouts = HashMap::new();
+        tab_layouts.insert("w1:t1".to_string(), snapshot.layouts[0].clone());
+        let fanout = transcode_layout(
+            &tabs,
+            &panes,
+            &tab_layouts,
+            "w1:t1",
+            &HerdrPaneRegistry::new(),
+            &HerdrTabRegistry::new(),
+            AgentMarks::Omit,
+        );
+        assert_eq!(fanout.tabs[0].panes.len(), 3);
+        assert!(fanout.tabs[0].panes.iter().all(|p| p.agent.is_none()));
+    }
+
+    /// One `session.snapshot` round trip answers the whole inventory.
+    #[test]
+    fn list_agents_is_one_session_snapshot_call() {
+        let sock = unique_socket_path("agents");
+        let body = format!(
+            r#""result":{{"type":"session_snapshot","snapshot":{}}}"#,
+            agents_snapshot_json(true)
+        );
+        let server = fake_herdr_scripted(&sock, 1, vec![("session.snapshot", body)]);
+        let agents = control_over(&sock)
+            .list_agents()
+            .expect("the snapshot must answer");
+        let methods = server.join().expect("fake server thread must not panic");
+        assert_eq!(methods, vec!["session.snapshot".to_string()]);
+        assert_eq!(agents.len(), 3);
+        assert_eq!(agents[0].status, AgentStatus::Blocked);
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// A herdr that refuses `session.snapshot` (`method_not_found`) has no
+    /// inventory: `Ok(vec![])`, and no fan-out is attempted.
+    #[test]
+    fn list_agents_is_empty_when_herdr_refuses_the_snapshot() {
+        let sock = unique_socket_path("agentsnf");
+        let server = fake_herdr_scripted(&sock, 2, vec![]);
+        let control = control_over(&sock);
+        assert!(
+            control
+                .list_agents()
+                .expect("a refusal is not an error")
+                .is_empty()
+        );
+        assert!(
+            control
+                .list_agents()
+                .expect("still not an error")
+                .is_empty()
+        );
+        let methods = server.join().expect("fake server thread must not panic");
+        assert_eq!(
+            methods,
+            vec![
+                "session.snapshot".to_string(),
+                "session.snapshot".to_string()
+            ]
+        );
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// An unreachable herdr is an error, never an empty inventory.
+    #[test]
+    fn list_agents_errors_when_herdr_is_unreachable() {
+        let control = control_over(&unique_socket_path("agentsdown"));
+        let err = control
+            .list_agents()
+            .expect_err("no socket means no answer");
+        assert!(err.downcast_ref::<HerdrApiError>().is_none(), "{err:#}");
+    }
+
+    /// The typed API error keeps the exact message `call_typed` always produced.
+    #[test]
+    fn herdr_api_error_display_is_unchanged() {
+        let e = HerdrApiError {
+            method: "session.snapshot".into(),
+            code: "method_not_found".into(),
+            message: "unknown method".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "herdr session.snapshot error method_not_found: unknown method"
+        );
+    }
+
     #[test]
     fn ack_helpers_shape() {
         assert!(ack_ok().ok);
@@ -1449,12 +2188,6 @@ mod tests {
         assert_eq!(e.error.as_deref(), Some("boom"));
         assert!(!unknown_pane(7).ok);
         assert!(!unknown_tab(7).ok);
-    }
-
-    // Touch an unused import path so the fixtures compile cleanly under all-targets.
-    #[allow(dead_code)]
-    fn _agent_status_is_reachable() -> AgentStatus {
-        AgentStatus::Idle
     }
 
     // ── worktree-group close refusals (herdr 0.9.0) ───────────────────────────
