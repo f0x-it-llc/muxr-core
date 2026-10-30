@@ -8,6 +8,11 @@
 //! unmodified, user-installed binary driven only over its public sockets; see
 //! [`super`]'s module docs for the licence-discipline note governing this file.
 //!
+//! [`AgentInfo`] is the one type verified against a later release: it mirrors
+//! herdr v0.9.5 `src/api/schema/agents.rs`, which differs from v0.9.0 only by
+//! the optional `completion_seq` — so a 0.9.0 record parses into the same shape
+//! with that field `None`.
+//!
 //! # JSON-API — control socket
 //!
 //! herdr exposes a line-delimited JSON control socket.  Each line is either a
@@ -435,13 +440,18 @@ pub enum PaneZoomMode {
 
 /// High-level agent activity status exposed on workspaces, tabs, and panes.
 /// Matches herdr's `AgentStatus` (`snake_case`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// `Default` (`Unknown`) is muxrd's addition, not herdr's: it is what an
+/// [`AgentInfo`] record that omits `agent_status` falls back to, so a sparse
+/// record degrades to "unclassified" instead of failing to parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentStatus {
     Idle,
     Working,
     Blocked,
     Done,
+    #[default]
     Unknown,
 }
 
@@ -536,6 +546,60 @@ pub struct PaneInfo {
     pub revision: u64,
 }
 
+/// One agent record from `session.snapshot`'s `agents` array.
+///
+/// Derived from herdr's `AgentInfo` (v0.9.5 `src/api/schema/agents.rs:187-228`;
+/// identical at v0.9.0 bar `completion_seq`), and **modified** in one respect:
+/// the whole struct is `#[serde(default)]`, where herdr's own struct requires
+/// `terminal_id`, `agent_status`, `workspace_id`, `tab_id`, `pane_id`,
+/// `focused` and `revision`. herdr documents placeholder records (muxrd's own
+/// snapshot fixture carries `{"anything": …}`), and one record that misses a
+/// required key must not fail the whole snapshot — and with it the layout path
+/// that rides the same call. A record that parses this way but names no pane
+/// (`pane_id` empty) is skipped by the control client, not here.
+///
+/// herdr serializes every `Option` and every empty map / `false` flag with
+/// `skip_serializing_if`, so on the wire an absent key is the common case; an
+/// explicit `null` still parses into `None` for the `Option` fields.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct AgentInfo {
+    /// Wire-relay attach key of the agent's terminal (same as the pane's).
+    pub terminal_id: String,
+    /// User-facing agent name, when one was assigned.
+    pub name: Option<String>,
+    /// Canonical agent kind detected in the pane (e.g. `"claude"`).
+    pub agent: Option<String>,
+    /// Agent-reported title.
+    pub title: Option<String>,
+    /// Raw terminal title (OSC 0/2).
+    pub terminal_title: Option<String>,
+    /// Terminal title with spinner / status glyphs stripped.
+    pub terminal_title_stripped: Option<String>,
+    /// Human-readable agent kind.
+    pub display_agent: Option<String>,
+    pub agent_status: AgentStatus,
+    pub screen_detection_skipped: bool,
+    pub state_labels: HashMap<String, String>,
+    /// Metadata tokens; muxrd reads `tokens["summary"]`.
+    pub tokens: HashMap<String, String>,
+    pub agent_session: Option<AgentSessionInfo>,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub focused: bool,
+    pub launch_pending: bool,
+    pub interactive_ready: bool,
+    /// Advances on every agent state change.
+    pub state_change_seq: u64,
+    /// Sequence of the idle transition that completed work. New in herdr
+    /// v0.9.5; absent — so `None` — on v0.9.0 through v0.9.4.
+    pub completion_seq: Option<u64>,
+    pub cwd: Option<String>,
+    pub foreground_cwd: Option<String>,
+    pub revision: u64,
+}
+
 /// Absolute-cell rectangle within a tab's layout area.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub struct PaneLayoutRect {
@@ -582,16 +646,21 @@ pub struct PaneLayoutSnapshot {
 /// replacement for muxrd's `workspace.list` + `tab.list` + `pane.list` + one
 /// `pane.layout` per tab fan-out.
 ///
-/// Derived from herdr's `SessionSnapshot` (v0.9.0
-/// `src/api/schema/session.rs`), and **modified**: only the fields muxrd's
-/// layout path consumes are mirrored. serde ignores unknown fields, so herdr's
-/// `focused_workspace_id` / `focused_tab_id` / `focused_pane_id` and its
-/// `agents: Vec<AgentInfo>` are deliberately absent rather than modelled —
-/// muxrd derives the per-workspace active tab from
-/// [`WorkspaceInfo::active_tab_id`] exactly as the fan-out does (herdr's global
-/// focus is *not* per-workspace; see [`super::control`]'s `query_layout`), and
-/// nothing here consumes agent records. Not modelling `AgentInfo` also keeps a
-/// second copy of that type out of this file.
+/// Derived from herdr's `SessionSnapshot` (v0.9.0–v0.9.5
+/// `src/api/schema/session.rs`), and **modified**: only the fields muxrd
+/// consumes are mirrored — the layout rows for the layout path, and `agents`
+/// for the session-wide agent inventory. serde ignores unknown fields, so
+/// herdr's `focused_workspace_id` / `focused_tab_id` / `focused_pane_id` are
+/// deliberately absent rather than modelled: muxrd derives the per-workspace
+/// active tab from [`WorkspaceInfo::active_tab_id`] exactly as the fan-out does
+/// (herdr's global focus is *not* per-workspace; see [`super::control`]'s
+/// `query_layout`).
+///
+/// `agents` is parsed **per record** ([`deserialize_agents`]): a record that
+/// does not parse even under [`AgentInfo`]'s all-default shape is dropped with
+/// a `debug!`, never allowed to fail the snapshot — the layout path depends on
+/// this same call, and an inventory short one malformed row is the better
+/// failure than a layout fallback.
 ///
 /// Every field carries `#[serde(default)]`, which herdr's own struct does not:
 /// the whole point of this method is that it is an *optimisation* over a
@@ -621,6 +690,53 @@ pub struct SessionSnapshot {
     /// fan-out). Each entry names its own `workspace_id` / `tab_id`.
     #[serde(default)]
     pub layouts: Vec<PaneLayoutSnapshot>,
+    /// Every agent on the daemon, across all workspaces. Absent on a snapshot
+    /// that carries none; see [`deserialize_agents`] for the per-record parse.
+    #[serde(default, deserialize_with = "deserialize_agents")]
+    pub agents: Vec<AgentInfo>,
+}
+
+/// Parse `session.snapshot`'s `agents` one record at a time, dropping any record
+/// that will not parse (with a `debug!`) instead of failing the whole snapshot.
+/// An explicit `null`, or a value that is not an array at all, reads as no
+/// agents.
+fn deserialize_agents<'de, D>(deserializer: D) -> std::result::Result<Vec<AgentInfo>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let records = match serde_json::Value::deserialize(deserializer)? {
+        serde_json::Value::Array(records) => records,
+        serde_json::Value::Null => return Ok(Vec::new()),
+        other => {
+            log::debug!(
+                "herdr: session.snapshot `agents` is not an array ({}) — reading it as no agents",
+                json_kind(&other)
+            );
+            return Ok(Vec::new());
+        }
+    };
+    Ok(records
+        .into_iter()
+        .filter_map(|record| match serde_json::from_value::<AgentInfo>(record) {
+            Ok(agent) => Some(agent),
+            Err(e) => {
+                log::debug!("herdr: skipping an unparseable session.snapshot agent record ({e})");
+                None
+            }
+        })
+        .collect())
+}
+
+/// A JSON value's kind, for a log line that must not echo the value itself.
+fn json_kind(value: &serde_json::Value) -> &'static str {
+    match value {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "number",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
 }
 
 /// Reason a directional focus change did not take effect.
@@ -994,6 +1110,130 @@ mod tests {
                 );
             }
             other => panic!("expected ApiResult::Pong, got {other:?}"),
+        }
+    }
+
+    // ── AgentInfo / session.snapshot agents ───────────────────────────────────
+
+    /// A full herdr v0.9.5 `AgentInfo` record locks every mirrored field name.
+    #[test]
+    fn agent_info_v095_record_deserializes_every_field() {
+        let json = r#"{
+            "terminal_id": "term-1",
+            "name": "planner",
+            "agent": "claude",
+            "title": "Planning",
+            "terminal_title": "* Planning",
+            "terminal_title_stripped": "Planning",
+            "display_agent": "Claude Code",
+            "agent_status": "blocked",
+            "screen_detection_skipped": true,
+            "state_labels": { "blocked": "needs approval" },
+            "tokens": { "summary": "drafting the plan" },
+            "agent_session": { "source": "herdr:claude", "agent": "claude", "kind": "id", "value": "s-1" },
+            "workspace_id": "ws-1",
+            "tab_id": "w1:t1",
+            "pane_id": "w1:p1",
+            "focused": true,
+            "launch_pending": true,
+            "interactive_ready": true,
+            "state_change_seq": 41,
+            "completion_seq": 7,
+            "cwd": "/home/u",
+            "foreground_cwd": "/home/u/src",
+            "revision": 12
+        }"#;
+        let a: AgentInfo = serde_json::from_str(json).expect("v0.9.5 AgentInfo must parse");
+        assert_eq!(a.terminal_id, "term-1");
+        assert_eq!(a.name.as_deref(), Some("planner"));
+        assert_eq!(a.agent.as_deref(), Some("claude"));
+        assert_eq!(a.title.as_deref(), Some("Planning"));
+        assert_eq!(a.terminal_title.as_deref(), Some("* Planning"));
+        assert_eq!(a.terminal_title_stripped.as_deref(), Some("Planning"));
+        assert_eq!(a.display_agent.as_deref(), Some("Claude Code"));
+        assert_eq!(a.agent_status, AgentStatus::Blocked);
+        assert!(a.screen_detection_skipped);
+        assert_eq!(a.state_labels["blocked"], "needs approval");
+        assert_eq!(a.tokens["summary"], "drafting the plan");
+        assert_eq!(
+            a.agent_session.as_ref().map(|s| s.kind),
+            Some(AgentSessionRefKind::Id)
+        );
+        assert_eq!(
+            (
+                a.workspace_id.as_str(),
+                a.tab_id.as_str(),
+                a.pane_id.as_str()
+            ),
+            ("ws-1", "w1:t1", "w1:p1")
+        );
+        assert!(a.focused && a.launch_pending && a.interactive_ready);
+        assert_eq!(a.state_change_seq, 41);
+        assert_eq!(a.completion_seq, Some(7));
+        assert_eq!(a.cwd.as_deref(), Some("/home/u"));
+        assert_eq!(a.foreground_cwd.as_deref(), Some("/home/u/src"));
+        assert_eq!(a.revision, 12);
+    }
+
+    /// herdr 0.9.0 has no `completion_seq`; the same record without it parses,
+    /// with `None`.
+    #[test]
+    fn agent_info_v090_record_has_no_completion_seq() {
+        let json = r#"{
+            "terminal_id": "term-1", "agent": "claude", "agent_status": "idle",
+            "workspace_id": "ws-1", "tab_id": "w1:t1", "pane_id": "w1:p1",
+            "focused": false, "state_change_seq": 3, "revision": 1
+        }"#;
+        let a: AgentInfo = serde_json::from_str(json).expect("v0.9.0 AgentInfo must parse");
+        assert_eq!(a.completion_seq, None);
+        assert_eq!(a.state_change_seq, 3);
+    }
+
+    /// The documented placeholder record parses into the all-default shape (an
+    /// empty `pane_id`, which the control client then skips) instead of failing.
+    #[test]
+    fn agent_info_placeholder_record_parses_as_defaults() {
+        let a: AgentInfo = serde_json::from_str(r#"{ "anything": "herdr adds here" }"#)
+            .expect("a placeholder record must parse");
+        assert_eq!(a, AgentInfo::default());
+        assert!(a.pane_id.is_empty());
+        assert_eq!(a.agent_status, AgentStatus::Unknown);
+    }
+
+    /// One malformed agent record is dropped; its siblings and the rest of the
+    /// snapshot survive.
+    #[test]
+    fn session_snapshot_drops_an_unparseable_agent_record_only() {
+        let json = r#"{
+            "version": "0.9.5", "protocol": 22,
+            "workspaces": [], "tabs": [], "panes": [], "layouts": [],
+            "agents": [
+                { "pane_id": "w1:p1", "agent": "claude", "agent_status": "working" },
+                { "pane_id": "w1:p2", "agent_status": 5 },
+                "not even an object",
+                { "anything": "herdr adds here" }
+            ]
+        }"#;
+        let snap: SessionSnapshot =
+            serde_json::from_str(json).expect("the snapshot must survive a bad agent row");
+        assert_eq!(snap.version, "0.9.5");
+        assert_eq!(snap.agents.len(), 2, "the two parseable records remain");
+        assert_eq!(snap.agents[0].pane_id, "w1:p1");
+        assert!(snap.agents[1].pane_id.is_empty(), "the placeholder parses");
+    }
+
+    /// `agents` absent, `null`, or not an array all read as no agents.
+    #[test]
+    fn session_snapshot_agents_absent_null_or_scalar_read_as_empty() {
+        for json in [
+            r#"{}"#,
+            r#"{"agents": null}"#,
+            r#"{"agents": {"nope": 1}}"#,
+            r#"{"agents": 3}"#,
+        ] {
+            let snap: SessionSnapshot =
+                serde_json::from_str(json).unwrap_or_else(|e| panic!("{json} must parse: {e}"));
+            assert!(snap.agents.is_empty(), "{json}");
         }
     }
 }

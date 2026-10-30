@@ -57,8 +57,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 
 use crate::multiplexer::types::{
-    ActionAck, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ResumeTarget, ScrollDir,
-    SpaceSnapshot,
+    ActionAck, AgentSnapshot, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ResumeTarget,
+    ScrollDir, SpaceSnapshot,
 };
 use crate::multiplexer::{DualHandle, MuxBackend};
 
@@ -515,6 +515,26 @@ impl MuxBackend for HerdrBackend {
 
     fn create_space(&self, label: Option<String>) -> Result<ActionAck> {
         self.control.create_workspace(label)
+    }
+
+    // ── Agents ───────────────────────────────────────────────────────────────
+
+    fn supports_agents(&self) -> bool {
+        // herdr detects agents per pane and reports them in `session.snapshot`.
+        true
+    }
+
+    fn list_agents(&self, session: &str) -> Result<Vec<AgentSnapshot>> {
+        // The inventory is daemon-wide (every workspace), and the daemon is the
+        // one sentinel session — so that is the only session it can describe.
+        // Refused before any I/O, like `kill_session`'s sentinel check.
+        if session != HERDR_SESSION {
+            return Err(anyhow!(
+                "herdr: no session '{session}' — the daemon is the single \
+                 '{HERDR_SESSION}' session"
+            ));
+        }
+        self.control.list_agents()
     }
 
     fn rename_space(&self, space_id: &str, label: &str) -> Result<ActionAck> {
@@ -1039,6 +1059,32 @@ mod tests {
     #[test]
     fn pick_active_or_first_is_none_for_empty_daemon() {
         assert!(pick_active_or_first(&[]).is_none());
+    }
+
+    // ── Agents ────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn herdr_supports_agents() {
+        assert!(backend().supports_agents());
+    }
+
+    #[test]
+    fn list_agents_refuses_a_non_sentinel_session_before_any_io() {
+        let err = backend()
+            .list_agents("not-herdr")
+            .expect_err("only the sentinel session has agents");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("single 'herdr' session"), "got: {msg}");
+    }
+
+    #[test]
+    fn list_agents_on_the_sentinel_reaches_the_daemon() {
+        // The sentinel passes the guard and goes to the (nonexistent) socket:
+        // an unreachable daemon is an error, never an empty inventory.
+        let err = backend()
+            .list_agents(HERDR_SESSION)
+            .expect_err("unreachable daemon must error");
+        assert!(format!("{err:#}").contains("connect herdr JSON-API socket"));
     }
 
     // ── Space-scoped layout reads ─────────────────────────────────────────────
