@@ -1,8 +1,8 @@
 //! grpc — tonic service implementation of the Muxr gRPC API.
 //!
 //! Surface: `GetVersion`, `Login` (public, no bearer), `AttachTerminal` (bidi
-//! relay), `ListSessions`/`GetLayout` (typed reads), and the pane/tab/session
-//! mutating ops.
+//! relay), `ListSessions`/`GetLayout`/`GetSpaces`/`ListAgents` (typed reads), and
+//! the pane/tab/session/space mutating ops.
 //!
 //! Auth note: `Login` and `GetVersion` are **public** (no bearer required).
 //! Every other RPC requires a valid bearer token injected by the tower layer in
@@ -16,14 +16,15 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::proto::muxr_server::Muxr;
 use crate::proto::{
-    ActionAck as ProtoAck, ClientFrame, CloseSpaceReq, CreateSessionReq, CreateSpaceReq, Empty,
-    Layout, ListPushTargetsReq, ListPushTargetsResp, LoginRequest, LoginResponse, NewPaneReq,
-    NewTabReq, PaneTarget, RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq,
+    ActionAck as ProtoAck, AgentList, ClientFrame, CloseSpaceReq, CreateSessionReq, CreateSpaceReq,
+    Empty, Layout, ListPushTargetsReq, ListPushTargetsResp, LoginRequest, LoginResponse,
+    NewPaneReq, NewTabReq, PaneTarget, RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq,
     RenameSessionReq, RenameSpaceReq, RenameTabReq, ResizePaneReq, ScrollReq, SessionList,
     SessionRef, SpaceList, SwitchSpaceReq, TabTarget, ToggleFullscreenReq, VersionInfo,
     WriteToPaneReq,
 };
 
+mod agent_ops;
 pub mod helpers;
 mod layout;
 mod pane_ops;
@@ -493,6 +494,20 @@ impl Muxr for MuxrService {
         request: Request<CloseSpaceReq>,
     ) -> Result<Response<ProtoAck>, Status> {
         self.close_space_impl(request).await
+    }
+
+    // ── Agents (session-wide agent inventory) ───────────────────────────────
+    //
+    // A read, like GetSpaces: bearer-gated, permitted for read-only tokens, and
+    // never relay-routed. A backend without agents (zellij) answers an empty
+    // list. See [`agent_ops`].
+
+    /// List every agent in a session, across all its spaces. Read-only allowed.
+    async fn list_agents(
+        &self,
+        request: Request<SessionRef>,
+    ) -> Result<Response<AgentList>, Status> {
+        self.list_agents_impl(request).await
     }
 
     // ── Push-notification device registry ───────────────────────────────────

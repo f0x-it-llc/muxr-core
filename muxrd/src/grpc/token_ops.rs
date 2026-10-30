@@ -68,6 +68,12 @@ impl MuxrService {
         if push_available {
             capabilities.push("push-notifications".to_owned());
         }
+        // Additive capability flag — some served backend reports agents, so
+        // ListAgents can return entries and PaneMsg.agent / SessionInfo.agents
+        // may be set. A zellij-only server never advertises it.
+        if self.backends.iter().any(|(_, b)| b.supports_agents()) {
+            capabilities.push("agents".to_owned());
+        }
 
         let info = VersionInfo {
             server_version: SERVER_VERSION.to_owned(),
@@ -362,6 +368,49 @@ mod tests {
         assert_eq!(
             info.notification_relay_url, "",
             "notification_relay_url must stay empty without a herdr backend"
+        );
+    }
+
+    // ── "agents" capability ──────────────────────────────────────────────────
+
+    async fn capabilities(service: &MuxrService) -> Vec<String> {
+        service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner()
+            .capabilities
+    }
+
+    /// A zellij-only server has no backend reporting agents → no capability.
+    #[tokio::test]
+    async fn zellij_only_server_does_not_advertise_agents() {
+        let caps = capabilities(&MuxrService::new()).await;
+        assert!(
+            !caps.iter().any(|c| c == "agents"),
+            "zellij-only must not advertise agents: {caps:?}"
+        );
+    }
+
+    /// A served backend that `supports_agents()` (the herdr fake) → advertised,
+    /// alongside a co-served zellij backend.
+    #[tokio::test]
+    async fn herdr_agents_backend_advertises_agents() {
+        let service = MuxrService::with_backends(BackendSet::new(vec![
+            (BackendKind::Zellij, Arc::new(ZellijBackend) as _),
+            (
+                BackendKind::Herdr,
+                Arc::new(crate::grpc::agent_ops::tests::AgentsBackend::default()) as _,
+            ),
+        ]));
+        let caps = capabilities(&service).await;
+        assert!(
+            caps.iter().any(|c| c == "agents"),
+            "an agents backend must advertise agents: {caps:?}"
+        );
+        assert!(
+            caps.iter().any(|c| c == "mouse-input"),
+            "existing flags kept"
         );
     }
 }

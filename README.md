@@ -129,6 +129,14 @@ the read-only-token check, so a read-only token can list every herdr space
 viewing. Pane content still requires an attach, and neither call mutates
 anything or moves focus. See the `space_id` comment in `muxr.proto`.
 
+**Agent inventory:** `ListAgents` lists the coding agents running in a session,
+across all of its spaces, most urgent first (blocked, then done, working, idle),
+with summary counts. It is a read like `GetSpaces` — permitted for read-only
+tokens, never moving focus — and answers an empty list on a backend that reports
+no agents. Servers that can report agents advertise the `"agents"` capability on
+`GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
+`SessionInfo.agents` on `ListSessions`.
+
 ## Releasing
 
 Releases are cut by the **Release** GitHub Actions workflow

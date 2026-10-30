@@ -361,6 +361,56 @@ pub(crate) fn kind_from_proto(backend: crate::proto::Backend) -> Option<BackendK
     }
 }
 
+// ─── Neutral agent types → proto ─────────────────────────────────────────────
+//
+// One mapping, shared by every RPC that puts agents on the wire: `ListAgents`
+// (`agent_ops`), `PaneMsg.agent` (`layout`) and `SessionInfo.agents`
+// (`session_ops`), so the three can never disagree about a status or a field.
+
+/// Map a neutral [`AgentStatus`](crate::multiplexer::AgentStatus) to its proto
+/// enum tag. Never yields `AGENT_STATUS_UNSPECIFIED` (the proto3 default is
+/// reserved for "not sent").
+pub(super) fn agent_status_msg(
+    status: crate::multiplexer::AgentStatus,
+) -> crate::proto::AgentStatus {
+    use crate::multiplexer::AgentStatus as S;
+    use crate::proto::AgentStatus as P;
+    match status {
+        S::Idle => P::Idle,
+        S::Working => P::Working,
+        S::Blocked => P::Blocked,
+        S::Done => P::Done,
+        S::Unknown => P::Unknown,
+    }
+}
+
+/// Map a pane's neutral [`AgentMark`](crate::multiplexer::AgentMark) to the
+/// proto `AgentMark` (`PaneMsg.agent`). An absent name becomes `""`.
+pub(super) fn agent_mark_msg(mark: &crate::multiplexer::AgentMark) -> crate::proto::AgentMark {
+    crate::proto::AgentMark {
+        kind: mark.kind.clone(),
+        name: mark.name.clone().unwrap_or_default(),
+        status: agent_status_msg(mark.status) as i32,
+    }
+}
+
+/// Map a neutral [`AgentSummary`](crate::multiplexer::AgentSummary) to the proto
+/// `AgentSummary` (`AgentList.summary`, `SessionInfo.agents`). `kinds` keeps its
+/// order and cap as computed by `AgentSummary::from`.
+pub(super) fn agent_summary_msg(
+    summary: &crate::multiplexer::AgentSummary,
+) -> crate::proto::AgentSummary {
+    crate::proto::AgentSummary {
+        total: summary.total,
+        blocked: summary.blocked,
+        done: summary.done,
+        working: summary.working,
+        idle: summary.idle,
+        unknown: summary.unknown,
+        kinds: summary.kinds.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -1005,5 +1055,71 @@ mod tests {
             Some(BackendKind::Herdr)
         );
         assert_eq!(kind_from_proto(crate::proto::Backend::Unspecified), None);
+    }
+
+    // ─── Agent mapping tests ─────────────────────────────────────────────────
+
+    #[test]
+    fn agent_status_maps_each_neutral_status_and_never_unspecified() {
+        use crate::multiplexer::AgentStatus as S;
+        use crate::proto::AgentStatus as P;
+        let pairs = [
+            (S::Idle, P::Idle),
+            (S::Working, P::Working),
+            (S::Blocked, P::Blocked),
+            (S::Done, P::Done),
+            (S::Unknown, P::Unknown),
+        ];
+        for (neutral, wire) in pairs {
+            assert_eq!(agent_status_msg(neutral), wire);
+            assert_ne!(agent_status_msg(neutral), P::Unspecified);
+        }
+    }
+
+    #[test]
+    fn agent_mark_maps_fields_and_defaults_an_absent_name_to_empty() {
+        use crate::multiplexer::{AgentMark, AgentStatus};
+        let named = agent_mark_msg(&AgentMark {
+            kind: "cli-a".to_owned(),
+            name: Some("reviewer".to_owned()),
+            status: AgentStatus::Blocked,
+        });
+        assert_eq!(named.kind, "cli-a");
+        assert_eq!(named.name, "reviewer");
+        assert_eq!(named.status, crate::proto::AgentStatus::Blocked as i32);
+
+        let anon = agent_mark_msg(&AgentMark {
+            kind: "cli-b".to_owned(),
+            name: None,
+            status: AgentStatus::Idle,
+        });
+        assert_eq!(anon.name, "");
+        assert_eq!(anon.status, crate::proto::AgentStatus::Idle as i32);
+    }
+
+    #[test]
+    fn agent_summary_copies_counts_and_kinds_in_order() {
+        let neutral = crate::multiplexer::AgentSummary {
+            total: 6,
+            blocked: 1,
+            done: 2,
+            working: 1,
+            idle: 1,
+            unknown: 1,
+            kinds: vec!["b".to_owned(), "a".to_owned()],
+        };
+        let wire = agent_summary_msg(&neutral);
+        assert_eq!(
+            (
+                wire.total,
+                wire.blocked,
+                wire.done,
+                wire.working,
+                wire.idle,
+                wire.unknown
+            ),
+            (6, 1, 2, 1, 1, 1)
+        );
+        assert_eq!(wire.kinds, vec!["b".to_owned(), "a".to_owned()]);
     }
 }
