@@ -26,6 +26,7 @@
 //! | `smoke_observer_repoints_across_tabs_and_panes` | `go_to_tab` / `focus_pane` on a read-only attach — the re-point works in observe mode |
 //! | `smoke_observer_resize_never_resizes_the_pane` | an observer's `Resize` is accepted and leaves the pane at the owner's size |
 //! | `smoke_observer_wheel_scroll_does_not_reach_the_pane` | herdr drops an observer's wheel — read-only scroll is a no-op on this backend |
+//! | `smoke_list_agents_reports_a_reported_agent_pane` | `list_agents` + the `AgentMark` on `query_layout_for_space` agree on a pane herdr was told hosts an agent (herdr 0.9.0 and 0.9.5) |
 //!
 //! The four observe-mode tests attach to the SAME workspace, so run them serially
 //! (`-- --ignored --test-threads=1`): concurrent attaches take each other over by
@@ -52,7 +53,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use muxrd::multiplexer::{
-    HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind, MuxReceiver, MuxServerMsg, PaneRef,
+    AgentSummary, HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind, MuxReceiver, MuxServerMsg,
+    PaneRef,
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -1206,4 +1208,141 @@ fn smoke_observer_wheel_scroll_does_not_reach_the_pane() {
     observer_tx.send_client_exited().ok();
     owner_tx.send_client_exited().ok();
     println!("[observe] PASS — an observer's wheel never scrolls the shared pane");
+}
+
+// ─── smoke_list_agents_reports_a_reported_agent_pane ──────────────────────────
+
+/// First `pane_id` string found anywhere in a herdr CLI JSON reply — the CLI's
+/// envelope differs per subcommand (`result.pane.pane_id`, `result.pane_id`, …).
+fn find_pane_id(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::Object(m) => {
+            if let Some(id) = m.get("pane_id").and_then(|x| x.as_str()) {
+                return Some(id.to_string());
+            }
+            m.values().find_map(find_pane_id)
+        }
+        serde_json::Value::Array(a) => a.iter().find_map(find_pane_id),
+        _ => None,
+    }
+}
+
+/// Closes the pane the agent test created even when an assertion panics, so a
+/// failed run does not leave a stray agent pane behind in the operator's herdr.
+struct AgentPaneGuard(String);
+
+impl Drop for AgentPaneGuard {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new(herdr_bin())
+            .args(["pane", "close", &self.0])
+            .output();
+    }
+}
+
+/// `HerdrBackend::list_agents` surfaces an agent herdr was told about, and the
+/// same pane carries its `AgentMark` in the space-scoped layout.
+///
+/// herdr 0.9.x's `agent start` needs a known `--kind` and a pane at a shell
+/// prompt, which a headless rig cannot guarantee, so the agent is made the way an
+/// integration would: `pane split` for a fresh pane, then `pane report-agent
+/// --state working`. The agent is identified by diffing the inventory before and
+/// after, so agents the operator already has are left out of the assertions.
+/// `completion_seq` is `None` on a 0.9.0 server and may be `Some` on 0.9.5 —
+/// deliberately not asserted.
+///
+/// The split pane is closed at the end (and on panic); the focused workspace is
+/// never switched, so the observe-mode tests' ≥2-tabs precondition is untouched.
+///
+/// # Run
+/// ```text
+/// HERDR_SOCKET_PATH=/path/to/herdr.sock HERDR_BIN=herdr \
+///   cargo test -p muxrd --test herdr_integration \
+///     smoke_list_agents_reports_a_reported_agent_pane -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires a live herdr 0.9.0 or newer with at least one pane (set HERDR_SOCKET_PATH, HERDR_BIN)"]
+fn smoke_list_agents_reports_a_reported_agent_pane() {
+    let b = backend();
+    let before: Vec<u32> = b
+        .list_agents(HERDR_SESSION)
+        .expect("list_agents() failed against live herdr")
+        .iter()
+        .map(|a| a.pane)
+        .collect();
+
+    // A fresh pane next to the focused one, then tell herdr an agent runs in it.
+    let (focused, _) = focused_pane();
+    let raw = herdr_cli(&["pane", "split", &focused, "--direction", "down"]);
+    let parsed: serde_json::Value = serde_json::from_str(&raw)
+        .unwrap_or_else(|e| panic!("herdr pane split is not JSON: {e}\n{raw}"));
+    let new_pane = find_pane_id(&parsed)
+        .unwrap_or_else(|| panic!("no pane_id in the pane split reply:\n{raw}"));
+    let _cleanup = AgentPaneGuard(new_pane.clone());
+    herdr_cli(&[
+        "pane",
+        "report-agent",
+        &new_pane,
+        "--source",
+        "muxrd-smoke",
+        "--agent",
+        "pi",
+        "--state",
+        "working",
+    ]);
+
+    // The report is applied asynchronously on some releases: poll briefly.
+    let deadline = std::time::Instant::now() + WAIT;
+    let fresh = loop {
+        let agents = b
+            .list_agents(HERDR_SESSION)
+            .expect("list_agents() failed after the report");
+        let fresh: Vec<_> = agents
+            .iter()
+            .filter(|a| !before.contains(&a.pane))
+            .cloned()
+            .collect();
+        if !fresh.is_empty() || std::time::Instant::now() >= deadline {
+            break (agents, fresh);
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    let (all, fresh) = fresh;
+    assert_eq!(
+        fresh.len(),
+        1,
+        "exactly one new agent expected for pane {new_pane}, got {fresh:?}"
+    );
+    let agent = &fresh[0];
+    println!("[herdr smoke] agent: {agent:?}");
+    assert!(!agent.kind.is_empty(), "agent kind must be non-empty");
+    assert!(!agent.space_name.is_empty(), "space_name must be non-empty");
+    assert!(!agent.tab_name.is_empty(), "tab_name must be non-empty");
+
+    // The same pane carries its mark in the layout of the agent's own space.
+    let layout = b
+        .query_layout_for_space(HERDR_SESSION, Some(&agent.space_id))
+        .expect("query_layout_for_space() failed for the agent's space");
+    let pane = layout
+        .tabs
+        .iter()
+        .flat_map(|t| t.panes.iter())
+        .find(|p| p.id == agent.pane)
+        .unwrap_or_else(|| {
+            panic!(
+                "pane {} missing from space {:?}",
+                agent.pane, agent.space_id
+            )
+        });
+    assert!(
+        pane.agent.is_some(),
+        "the layout must mark pane {} with its agent",
+        agent.pane
+    );
+
+    let summary = AgentSummary::from(all.as_slice());
+    assert!(summary.total >= 1, "summary.total must count the agent");
+
+    // Cleanup is explicit so the removal is asserted, not only best-effort.
+    herdr_cli(&["pane", "close", &new_pane]);
+    println!("[herdr smoke] PASS — list_agents and the layout mark agree");
 }
