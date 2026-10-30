@@ -859,6 +859,7 @@ fn transcode_layout(
                                 cols: lp.rect.width as u32,
                                 is_plugin: false,
                                 is_fullscreen: zoomed,
+                                agent: None,
                             }
                         })
                         .collect()
