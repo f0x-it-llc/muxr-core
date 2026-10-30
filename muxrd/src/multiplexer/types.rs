@@ -168,6 +168,141 @@ pub struct PaneSnapshot {
     pub is_plugin: bool,
     /// `PaneInfo.is_fullscreen`.
     pub is_fullscreen: bool,
+    /// Agent running in this pane, when the backend reports one.
+    pub agent: Option<AgentMark>,
+}
+
+// ─── Agent vocabulary ───────────────────────────────────────────────────────────
+
+/// High-level agent activity status for a pane. Backend-neutral.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AgentStatus {
+    /// No agent, or an agent at rest.
+    Idle,
+    /// Agent actively producing output.
+    Working,
+    /// Agent is waiting for user input ("your agent needs you").
+    Blocked,
+    /// Agent process finished and the pane has not been viewed yet.
+    Done,
+    /// State could not be classified.
+    #[default]
+    Unknown,
+}
+
+impl AgentStatus {
+    /// Attention priority: Blocked 4, Done 3, Working 2, Idle 1, Unknown 0.
+    pub fn priority(self) -> u8 {
+        match self {
+            Self::Blocked => 4,
+            Self::Done => 3,
+            Self::Working => 2,
+            Self::Idle => 1,
+            Self::Unknown => 0,
+        }
+    }
+}
+
+/// The agent marker attached to a pane.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentMark {
+    /// Agent kind identifier (e.g. the agent program's canonical name).
+    pub kind: String,
+    /// Optional user-facing agent name.
+    pub name: Option<String>,
+    /// Current activity status.
+    pub status: AgentStatus,
+}
+
+/// A session-wide, source-neutral snapshot of one agent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSnapshot {
+    /// Neutral pane id, the same id [`PaneSnapshot::id`] carries.
+    pub pane: u32,
+    /// Neutral tab id, the same id [`TabSnapshot::tab_id`] carries.
+    pub tab_id: u64,
+    /// Space id the agent lives in; empty on a backend without spaces.
+    pub space_id: String,
+    /// Space display name; empty on a backend without spaces.
+    pub space_name: String,
+    /// Display name of the containing tab.
+    pub tab_name: String,
+    /// Agent kind identifier.
+    pub kind: String,
+    /// Optional user-facing agent name.
+    pub name: Option<String>,
+    /// Optional human-readable form of the kind.
+    pub display_kind: Option<String>,
+    /// Current activity status.
+    pub status: AgentStatus,
+    /// Pane or agent title, when known.
+    pub title: Option<String>,
+    /// Short summary of the agent's current activity, when known.
+    pub summary: Option<String>,
+    /// Working directory, when known.
+    pub cwd: Option<String>,
+    /// Whether the agent's pane is focused.
+    pub focused: bool,
+    /// Monotonic counter that advances when the agent's state changes.
+    pub change_seq: u64,
+    /// Monotonic counter of the agent's last completion, when it has one.
+    pub completion_seq: Option<u64>,
+}
+
+impl AgentSnapshot {
+    /// Sort key: `(status priority, change_seq)`; larger sorts first.
+    pub fn sort_key(&self) -> (u8, u64) {
+        (self.status.priority(), self.change_seq)
+    }
+}
+
+/// Sort agents descending by [`AgentSnapshot::sort_key`] (stable).
+pub fn sort_agents(agents: &mut [AgentSnapshot]) {
+    agents.sort_by_key(|a| std::cmp::Reverse(a.sort_key()));
+}
+
+/// Maximum number of distinct kinds listed in an [`AgentSummary`].
+const SUMMARY_KINDS_CAP: usize = 8;
+
+/// Aggregate counts over a set of agents.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AgentSummary {
+    /// Total agents.
+    pub total: u32,
+    /// Agents in [`AgentStatus::Blocked`].
+    pub blocked: u32,
+    /// Agents in [`AgentStatus::Done`].
+    pub done: u32,
+    /// Agents in [`AgentStatus::Working`].
+    pub working: u32,
+    /// Agents in [`AgentStatus::Idle`].
+    pub idle: u32,
+    /// Agents in [`AgentStatus::Unknown`].
+    pub unknown: u32,
+    /// Distinct kinds in slice order (first occurrence wins), capped at 8.
+    pub kinds: Vec<String>,
+}
+
+impl From<&[AgentSnapshot]> for AgentSummary {
+    fn from(agents: &[AgentSnapshot]) -> Self {
+        let mut out = AgentSummary {
+            total: agents.len() as u32,
+            ..Default::default()
+        };
+        for a in agents {
+            match a.status {
+                AgentStatus::Blocked => out.blocked += 1,
+                AgentStatus::Done => out.done += 1,
+                AgentStatus::Working => out.working += 1,
+                AgentStatus::Idle => out.idle += 1,
+                AgentStatus::Unknown => out.unknown += 1,
+            }
+            if out.kinds.len() < SUMMARY_KINDS_CAP && !out.kinds.contains(&a.kind) {
+                out.kinds.push(a.kind.clone());
+            }
+        }
+        out
+    }
 }
 
 // ─── Space snapshot ─────────────────────────────────────────────────────────────
@@ -433,9 +568,84 @@ mod tests {
                     cols: 80,
                     is_plugin: false,
                     is_fullscreen: false,
+                    agent: None,
                 }],
             }],
         };
         assert_eq!(snap, snap.clone());
+    }
+
+    fn agent(kind: &str, status: AgentStatus, change_seq: u64) -> AgentSnapshot {
+        AgentSnapshot {
+            pane: 1,
+            tab_id: 1,
+            space_id: String::new(),
+            space_name: String::new(),
+            tab_name: String::new(),
+            kind: kind.to_string(),
+            name: None,
+            display_kind: None,
+            status,
+            title: None,
+            summary: None,
+            cwd: None,
+            focused: false,
+            change_seq,
+            completion_seq: None,
+        }
+    }
+
+    #[test]
+    fn agent_status_priority_order() {
+        use AgentStatus::*;
+        assert!(Blocked.priority() > Done.priority());
+        assert!(Done.priority() > Working.priority());
+        assert!(Working.priority() > Idle.priority());
+        assert!(Idle.priority() > Unknown.priority());
+        assert_eq!(AgentStatus::default(), Unknown);
+    }
+
+    #[test]
+    fn sort_agents_blocked_first_then_newest() {
+        let mut v = vec![
+            agent("a", AgentStatus::Working, 9),
+            agent("b", AgentStatus::Blocked, 1),
+            agent("c", AgentStatus::Blocked, 5),
+            agent("d", AgentStatus::Idle, 20),
+        ];
+        sort_agents(&mut v);
+        let kinds: Vec<_> = v.iter().map(|a| a.kind.as_str()).collect();
+        assert_eq!(kinds, ["c", "b", "a", "d"]);
+    }
+
+    #[test]
+    fn agent_summary_counts_and_kinds() {
+        let mut v = vec![
+            agent("x", AgentStatus::Idle, 1),
+            agent("y", AgentStatus::Blocked, 2),
+            agent("x", AgentStatus::Working, 3),
+            agent("z", AgentStatus::Done, 4),
+            agent("y", AgentStatus::Unknown, 5),
+        ];
+        sort_agents(&mut v);
+        let s = AgentSummary::from(v.as_slice());
+        assert_eq!(
+            (s.total, s.blocked, s.done, s.working, s.idle, s.unknown),
+            (5, 1, 1, 1, 1, 1)
+        );
+        assert_eq!(s.kinds, ["y", "z", "x"]);
+    }
+
+    #[test]
+    fn agent_summary_caps_kinds() {
+        let v: Vec<_> = (0..12)
+            .map(|i| agent(&format!("k{i}"), AgentStatus::Idle, i))
+            .collect();
+        assert_eq!(AgentSummary::from(v.as_slice()).kinds.len(), 8);
+    }
+
+    #[test]
+    fn pane_snapshot_agent_defaults_none() {
+        assert!(PaneSnapshot::default().agent.is_none());
     }
 }
