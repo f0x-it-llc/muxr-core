@@ -40,9 +40,10 @@ pub mod types;
 mod zellij;
 
 pub use types::{
-    ActionAck, FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef,
-    PaneSnapshot, ResizeDir, ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot,
-    TabSnapshot, UnknownSpace,
+    ActionAck, AgentMark, AgentSnapshot, AgentStatus, AgentSummary, FullscreenHint, LayoutSnapshot,
+    MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, PaneSnapshot, ResizeDir, ResizeKind,
+    ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession, UnknownSpace,
+    sort_agents,
 };
 pub use zellij::ZellijBackend;
 
@@ -305,6 +306,21 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     fn list_spaces(&self, session: &str) -> anyhow::Result<Vec<SpaceSnapshot>> {
         let _ = session;
         Ok(vec![])
+    }
+
+    /// Whether this backend reports per-pane agent state via
+    /// [`Self::list_agents`]. Default `false`.
+    fn supports_agents(&self) -> bool {
+        false
+    }
+
+    /// List every agent in `session`, session-wide across spaces.
+    ///
+    /// Blocking like every other trait method. The default returns the empty
+    /// vec for backends without an agent concept.
+    fn list_agents(&self, session: &str) -> anyhow::Result<Vec<AgentSnapshot>> {
+        let _ = session;
+        Ok(Vec::new())
     }
 
     /// Create a new space with an optional label. Default: unsupported (zellij).

@@ -138,7 +138,7 @@ start_herdr() {
 # Describe the herdr actually installed in this image, for the banner.
 #
 # The rig DOES pin a herdr version (the Dockerfile's `ARG HERDR_VERSION`, currently
-# 0.9.0) — that pin is deliberate. What is NOT pinned is the wire protocol: muxrd
+# 0.9.5; 0.9.0 is the compatibility floor) — that pin is deliberate. What is NOT pinned is the wire protocol: muxrd
 # discovers the server's via the JSON-API `ping` rather than hard-coding one, so the
 # banner reports the protocol actually running instead of a compiled-in number.
 # Falls back gracefully when an older herdr's `status server` prints no protocol line.

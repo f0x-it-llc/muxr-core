@@ -36,22 +36,7 @@ use tokio::sync::broadcast;
 /// reconciles from the next event / resync / re-query.
 pub const EVENT_BUS_CAPACITY: usize = 256;
 
-/// High-level agent activity status for a pane — muxrd's neutral mirror of
-/// herdr's `AgentStatus`, kept independent so no `herdr::api` type crosses this
-/// seam.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentStatus {
-    /// No agent, or an agent at rest.
-    Idle,
-    /// Agent actively producing output.
-    Working,
-    /// Agent is waiting for user input ("your agent needs you").
-    Blocked,
-    /// Agent process finished and the pane has not been viewed yet.
-    Done,
-    /// State could not be classified.
-    Unknown,
-}
+pub use crate::multiplexer::types::AgentStatus;
 
 /// A pane's agent status changed (or, for a post-reconnect resync, its current
 /// status was observed). Pane ids are muxrd's neutral `u32` (registry-translated);

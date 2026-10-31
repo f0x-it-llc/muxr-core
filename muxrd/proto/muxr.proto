@@ -103,6 +103,24 @@ service Muxr {
   // Close (delete) a space. MUTATING — refused for read-only sessions.
   rpc CloseSpace(CloseSpaceReq)   returns (ActionAck);
 
+  // ─── Agents (session-wide agent inventory) ────────────────────────────────
+  // Requires bearer auth. A read: permitted for read-only sessions, like
+  // GetSpaces and GetLayout (the same disclosure surface — agent kinds, names,
+  // titles and summaries are structure, not pane content).
+
+  // List every agent running in a session, session-wide across all of its
+  // spaces (not just the space this connection is viewing), most-urgent first:
+  // blocked, then done, working, idle, unknown, newest state change first
+  // within each status. NOT relay-routed: it reads the backend directly and
+  // moves no focus. A backend without an agent concept (e.g. zellij) answers an
+  // empty AgentList, never an error. Only SessionRef.session is read; the
+  // connection_id and space_id fields are ignored. Errors: an unknown backend
+  // token in the session id (or a rejected session name) is invalid_argument, a
+  // known backend this server is not driving is NOT_FOUND, a session name the
+  // backend does not know is NOT_FOUND, and a backend failure or timeout is
+  // INTERNAL.
+  rpc ListAgents(SessionRef) returns (AgentList);
+
   // ─── Phase F: token management ─────────────────────────────────────────────
   // Wraps the same zellij `web_authentication_tokens` ops the CLI uses. All
   // require bearer auth and are ADMIN-gated: read-only session tokens are
@@ -163,6 +181,9 @@ message VersionInfo {
   //   "mouse-input" — ClientFrame.mouse is understood on AttachTerminal.
   //   "push-notifications" — the server has a notify relay configured
   //     (see notification_relay_url); present only when a relay is set.
+  //   "agents" — at least one served backend reports agents: ListAgents can
+  //     return entries, PaneMsg.agent and SessionInfo.agents may be set.
+  //     Absent = ListAgents answers empty and those fields stay unset.
   // Clients must ignore unknown values.
   repeated string capabilities = 5;
   // The push-notification relay URL clients should register devices with.
@@ -453,6 +474,11 @@ message SessionInfo {
   // client can show a space count on herdr session cards without a separate
   // GetSpaces call.
   uint32 space_count        = 11;
+  // Agent counts for this session, session-wide across its spaces. Unset
+  // (absent) = the backend reports no agents (e.g. zellij), the session is
+  // resurrectable, or the agent query failed or timed out — never a reason to
+  // drop the session from the list. Field-number high-water mark: 12.
+  AgentSummary agents       = 12;
 }
 
 // Full tab/pane layout for a session (returned by GetLayout).
@@ -510,6 +536,10 @@ message PaneMsg {
   bool   is_plugin    = 12;
   // Whether this pane is currently fullscreened (PaneInfo.is_fullscreen).
   bool   is_fullscreen = 13;
+  // The agent running in this pane. Unset (absent) = no agent in this pane, or
+  // a backend without an agent concept (e.g. zellij). Field-number high-water
+  // mark: 14.
+  AgentMark agent      = 14;
 }
 
 // ─── Phase D1: action targets + ack ──────────────────────────────────────────
@@ -743,4 +773,103 @@ message CloseSpaceReq {
   // can reconcile its space list. muxrd still refuses a group close that would
   // leave the daemon with zero spaces.
   bool close_group     = 4;
+}
+
+// ─── Agents (session-wide agent inventory) ───────────────────────────────────
+// An agent is an interactive coding-assistant CLI the backend has recognised in
+// a pane. Only backends that report agents (server capability "agents") ever
+// populate these; every other backend answers an empty AgentList.
+
+// Agent activity status. Clients must treat an unknown value as
+// AGENT_STATUS_UNKNOWN.
+enum AgentStatus {
+  // Never sent by this server; the proto3 default.
+  AGENT_STATUS_UNSPECIFIED = 0;
+  // An agent at rest.
+  AGENT_STATUS_IDLE        = 1;
+  // An agent actively producing output.
+  AGENT_STATUS_WORKING     = 2;
+  // An agent waiting for user input — it needs the user.
+  AGENT_STATUS_BLOCKED     = 3;
+  // An agent that finished and whose pane has not been viewed since.
+  AGENT_STATUS_DONE        = 4;
+  // The backend reported a state it could not classify.
+  AGENT_STATUS_UNKNOWN     = 5;
+}
+
+// The agent marker carried on a PaneMsg.
+message AgentMark {
+  // Agent kind: the CLI's canonical label as the backend reports it.
+  string      kind   = 1;
+  // Optional user-facing agent name; empty when the backend has none.
+  string      name   = 2;
+  // Current activity status.
+  AgentStatus status = 3;
+}
+
+// One agent in a ListAgents answer.
+message AgentMsg {
+  // Pane the agent runs in — the same id GetLayout's PaneMsg.id carries.
+  uint32      pane_id            = 1;
+  // Tab containing that pane — the same id GetLayout's TabMsg.tab_id carries.
+  uint64      tab_id             = 2;
+  // Opaque space id (the same id GetSpaces/SwitchSpace use); empty on a
+  // backend without spaces.
+  string      space_id           = 3;
+  // Display name of that space; empty on a backend without spaces.
+  string      space_name         = 4;
+  // Display name of the containing tab.
+  string      tab_name           = 5;
+  // Agent kind: the CLI's canonical label as the backend reports it.
+  string      kind               = 6;
+  // Optional user-facing agent name; empty when the backend has none.
+  string      name               = 7;
+  // Optional human-readable form of `kind`; empty = display `kind` itself.
+  string      display_kind       = 8;
+  // Current activity status.
+  AgentStatus status             = 9;
+  // Pane or agent title; empty when unknown.
+  string      title              = 10;
+  // Short summary of the agent's current activity; empty when unknown.
+  string      summary            = 11;
+  // Working directory of the agent's pane; empty when unknown.
+  string      cwd                = 12;
+  // Whether the agent's pane is the backend's focused pane.
+  bool        focused            = 13;
+  // Monotonic counter that advances whenever this agent's state changes;
+  // orders agents within one status (larger = more recent).
+  uint64      change_seq         = 14;
+  // Monotonic counter of the agent's last completion. Meaningful only when
+  // has_completion_seq is true.
+  uint64      completion_seq     = 15;
+  // Explicit presence flag for completion_seq: proto3 cannot tell 0 from
+  // unset, and an agent that has never completed has no completion counter.
+  bool        has_completion_seq = 16;
+}
+
+// Aggregate agent counts over a set of agents.
+message AgentSummary {
+  // Number of agents.
+  uint32          total   = 1;
+  // Agents in AGENT_STATUS_BLOCKED.
+  uint32          blocked = 2;
+  // Agents in AGENT_STATUS_DONE.
+  uint32          done    = 3;
+  // Agents in AGENT_STATUS_WORKING.
+  uint32          working = 4;
+  // Agents in AGENT_STATUS_IDLE.
+  uint32          idle    = 5;
+  // Agents in AGENT_STATUS_UNKNOWN.
+  uint32          unknown = 6;
+  // Distinct agent kinds (CLI labels) in priority order — the order of the
+  // agents themselves, most urgent first — at most 8.
+  repeated string kinds   = 7;
+}
+
+// ListAgents answer.
+message AgentList {
+  // Every agent in the session, most urgent first (see ListAgents).
+  repeated AgentMsg agents  = 1;
+  // Counts over `agents`. Always set, even when `agents` is empty.
+  AgentSummary      summary = 2;
 }

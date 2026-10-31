@@ -106,6 +106,7 @@ pub(crate) fn parse_zellij_layout(tabs_json: &str, panes_json: &str) -> Result<L
             cols: p.pane_columns as u32,
             is_plugin: p.is_plugin,
             is_fullscreen: p.is_fullscreen,
+            agent: None,
         };
         panes_by_tab.entry(entry.tab_id).or_default().push(pane);
     }

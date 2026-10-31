@@ -79,9 +79,32 @@ impl HerdrPaneRegistry {
     /// first sight. The pane's `terminal_id` is recorded (and refreshed if herdr
     /// reports a new one for an existing pane).
     pub fn assign_or_get(&self, herdr_pane_id: &str, terminal_id: &str) -> u32 {
+        self.assign_or_get_inner(herdr_pane_id, terminal_id, true)
+    }
+
+    /// [`Self::assign_or_get`] for a source whose `terminal_id` may be missing:
+    /// an **empty** `terminal_id` never overwrites the one already recorded for a
+    /// known pane (a fresh pane is still assigned, with the empty value, until a
+    /// layout read supplies the real one). A non-empty value refreshes exactly as
+    /// `assign_or_get` does. One lock, so a concurrent layout poll cannot slip a
+    /// real `terminal_id` in between a lookup and a clobbering write.
+    ///
+    /// The agent inventory uses this: `session.snapshot` agent records are parsed
+    /// leniently, so a record can arrive without the relay's attach key.
+    pub fn assign_or_get_keep_terminal(&self, herdr_pane_id: &str, terminal_id: &str) -> u32 {
+        self.assign_or_get_inner(herdr_pane_id, terminal_id, !terminal_id.is_empty())
+    }
+
+    fn assign_or_get_inner(
+        &self,
+        herdr_pane_id: &str,
+        terminal_id: &str,
+        refresh_terminal: bool,
+    ) -> u32 {
         let mut inner = lock(&self.inner);
         if let Some(&id) = inner.by_herdr.get(herdr_pane_id) {
-            if let Some(entry) = inner.by_id.get_mut(&id)
+            if refresh_terminal
+                && let Some(entry) = inner.by_id.get_mut(&id)
                 && entry.terminal_id != terminal_id
             {
                 entry.terminal_id = terminal_id.to_string();
@@ -237,6 +260,25 @@ mod tests {
         let same = reg.assign_or_get("pane-a", "term-new");
         assert_eq!(id, same);
         assert_eq!(reg.terminal_id(id).as_deref(), Some("term-new"));
+    }
+
+    #[test]
+    fn keep_terminal_assign_never_clobbers_with_an_empty_terminal_id() {
+        let reg = HerdrPaneRegistry::new();
+        let id = reg.assign_or_get("pane-a", "term-a");
+        assert_eq!(reg.assign_or_get_keep_terminal("pane-a", ""), id);
+        assert_eq!(
+            reg.terminal_id(id).as_deref(),
+            Some("term-a"),
+            "an empty terminal_id must not erase the relay's attach key"
+        );
+        // A real value still refreshes, as with assign_or_get.
+        assert_eq!(reg.assign_or_get_keep_terminal("pane-a", "term-b"), id);
+        assert_eq!(reg.terminal_id(id).as_deref(), Some("term-b"));
+        // An unseen pane is assigned the next id either way.
+        let fresh = reg.assign_or_get_keep_terminal("pane-new", "");
+        assert_eq!(fresh, id + 1);
+        assert_eq!(reg.terminal_id(fresh).as_deref(), Some(""));
     }
 
     #[test]

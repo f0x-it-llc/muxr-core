@@ -34,6 +34,17 @@
 //! i.e. its push notifications — silently stopped. Do not reintroduce a
 //! replay-shaped assumption here; treat the stream as live-only.
 //!
+//! ## Falling behind: `events_lost` (herdr 0.9.2+)
+//!
+//! herdr 0.9.0 skipped events silently when a reader fell behind. Since 0.9.2
+//! it delivers subscription events from a bounded shared history, and a reader
+//! that falls behind is sent one error line on its own subscription,
+//! `{"id":"<subscribe request id>","error":{"code":"events_lost",…}}`, after
+//! which herdr closes that connection. The kernel logs that line at `info!`,
+//! naming the connection and the error code, and classifies it as ignored: the
+//! EOF that follows remains the single reconnect trigger, answered by the same
+//! backoff and resync as any other close.
+//!
 //! ### The bootstrap gap, and why the obvious fix is also wrong
 //!
 //! With one connection, the sequence was: enumerate panes → connect → subscribe
@@ -829,6 +840,7 @@ async fn connect_status(
             }
             EnumTick::Line(Ok(Some(line))) => {
                 lifecycle.mark_event();
+                log_stream_error("lifecycle", &line);
                 buffered.push(line);
             }
             EnumTick::Line(Ok(None)) => {
@@ -996,6 +1008,7 @@ async fn pump(
             }
             Tick::Lifecycle(Ok(Some(line))) => {
                 lifecycle.mark_event();
+                log_stream_error("lifecycle", &line);
                 match classify_pushed(line.trim_end(), &kernel.panes) {
                     Pushed::PaneCreated(pane_id) => {
                         if pane_needs_widening(pane_id.as_deref(), subscribed) {
@@ -1044,6 +1057,7 @@ async fn pump(
             }
             Tick::Status(Ok(Some(line))) => {
                 status.mark_event();
+                log_stream_error("agent-status", &line);
                 match classify_pushed(line.trim_end(), &kernel.panes) {
                     Pushed::AgentStatus(ev) => publish(kernel, ev),
                     _ => {
@@ -1460,6 +1474,35 @@ fn pushed_envelope(line: &str) -> Option<(String, Option<Value>)> {
     Some((canonical, data))
 }
 
+/// A stream-level error envelope on a subscription connection, as
+/// `(error.code, error.message)`. `None` for any line without a top-level
+/// `error` object, so an ack or a pushed event never matches.
+fn stream_error(line: &str) -> Option<(String, String)> {
+    let value: Value = serde_json::from_str(line).ok()?;
+    let error = value.get("error")?.as_object()?;
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown");
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or("no message");
+    Some((code.to_string(), message.to_string()))
+}
+
+/// Log a stream-level error envelope at `info!`, naming the connection. The
+/// caller still classifies the line as ignored; the EOF that follows is what
+/// drives the reconnect.
+fn log_stream_error(connection: &str, line: &str) {
+    if !line.contains("\"error\"") {
+        return;
+    }
+    if let Some((code, message)) = stream_error(line) {
+        log::info!("herdr event kernel: {connection} stream ended with error {code}: {message}");
+    }
+}
+
 /// Classify one newline-stripped stream line.
 fn classify_pushed(line: &str, panes: &HerdrPaneRegistry) -> Pushed {
     let Some((event, data)) = pushed_envelope(line) else {
@@ -1853,7 +1896,8 @@ fn take_utf8(pending: &mut Vec<u8>) -> std::io::Result<String> {
 mod tests {
     use super::*;
     use fake_herdr::{
-        FakeHerdr, FakeState, RunningKernel, fast_probe_tuning, no_probe_tuning, pane,
+        FakeHerdr, FakeState, RunningKernel, agent_status_line, fast_probe_tuning, no_probe_tuning,
+        pane,
     };
     use tokio::sync::broadcast;
 
@@ -2167,6 +2211,40 @@ mod tests {
         let err = subscribe_error(line).expect("error present");
         assert!(err.contains("invalid_request"));
         assert!(subscribe_error(r#"{"id":"x","result":{"type":"ok"}}"#).is_none());
+    }
+
+    #[test]
+    fn stream_error_names_the_events_lost_code_and_message() {
+        let line = r#"{"id":"r1","error":{"code":"events_lost","message":"event subscription fell behind retained history; resubscribe and resync with session.snapshot"}}"#;
+        assert_eq!(
+            stream_error(line),
+            Some((
+                "events_lost".to_string(),
+                "event subscription fell behind retained history; resubscribe and resync with session.snapshot"
+                    .to_string(),
+            ))
+        );
+    }
+
+    #[test]
+    fn stream_error_is_not_an_ack_or_a_pushed_event() {
+        assert!(stream_error(r#"{"id":"r1","result":{"type":"subscription_started"}}"#).is_none());
+        assert!(
+            stream_error(r#"{"event":"pane.created","data":{"pane_id":"w1:p1"}}"#).is_none(),
+            "a pushed event is never a stream error"
+        );
+        assert!(
+            stream_error(r#"{"id":"r1","error":"not an object"}"#).is_none(),
+            "an error that is not an object carries no code to name"
+        );
+    }
+
+    #[test]
+    fn stream_error_without_a_code_still_surfaces_as_unknown() {
+        let (code, message) = stream_error(r#"{"id":"r1","error":{"message":"gone"}}"#)
+            .expect("an error object is an error");
+        assert_eq!(code, "unknown");
+        assert_eq!(message, "gone");
     }
 
     #[test]
@@ -2774,6 +2852,50 @@ mod tests {
             pub rejected_once: bool,
             /// Sender into the live lifecycle connection.
             pub lifecycle_tx: Option<mpsc::UnboundedSender<String>>,
+            /// Sender into the live agent-status connection. Replaced on every
+            /// accepted agent-status subscribe, so it always targets the newest
+            /// connection; `None` while the newest one is closing with events_lost.
+            pub status_tx: Option<mpsc::UnboundedSender<String>>,
+            /// The next N lifecycle subscribes are acked, then answered with an
+            /// `events_lost` error line and closed — herdr 0.9.2's fell-behind close.
+            pub lose_lifecycle_after_ack: usize,
+            /// As above, for agent-status subscribes.
+            pub lose_status_after_ack: usize,
+        }
+
+        /// Consume one pending `events_lost` close, if any is queued.
+        fn take_pending(counter: &mut usize) -> bool {
+            if *counter == 0 {
+                return false;
+            }
+            *counter -= 1;
+            true
+        }
+
+        /// The error envelope herdr sends on a subscription that fell behind.
+        pub(super) fn events_lost_line(id: &str) -> String {
+            let body = serde_json::json!({
+                "id": id,
+                "error": {
+                    "code": "events_lost",
+                    "message": "event subscription fell behind retained history; resubscribe and resync with session.snapshot"
+                }
+            });
+            format!("{body}\n")
+        }
+
+        /// A live `pane.agent_status_changed` push, as herdr 0.9.0 sends it.
+        pub(super) fn agent_status_line(pane_id: &str, status: &str) -> String {
+            serde_json::json!({
+                "event": "pane.agent_status_changed",
+                "data": {
+                    "agent": "claude",
+                    "agent_status": status,
+                    "pane_id": pane_id,
+                    "workspace_id": "w1"
+                }
+            })
+            .to_string()
         }
 
         pub(super) struct FakeHerdr {
@@ -2907,12 +3029,20 @@ mod tests {
                         .unwrap_or_default();
                     if id == LIFECYCLE_REQUEST_ID {
                         let (tx, mut rx) = mpsc::unbounded_channel::<String>();
-                        {
+                        let lose = {
                             let mut s = lock(&state);
                             s.lifecycle_subscribes += 1;
-                            s.lifecycle_tx = Some(tx);
-                        }
+                            let lose = take_pending(&mut s.lose_lifecycle_after_ack);
+                            if !lose {
+                                s.lifecycle_tx = Some(tx);
+                            }
+                            lose
+                        };
                         let _ = write.write_all(ack_line(&id).as_bytes()).await;
+                        if lose {
+                            let _ = write.write_all(events_lost_line(&id).as_bytes()).await;
+                            return;
+                        }
                         while let Some(line) = rx.recv().await {
                             if write
                                 .write_all(format!("{line}\n").as_bytes())
@@ -2928,15 +3058,25 @@ mod tests {
                         .iter()
                         .filter_map(|s| s["pane_id"].as_str().map(str::to_string))
                         .collect();
-                    let reject = {
+                    // The push channel is installed in the same critical section
+                    // that records the subscribe, so a test that sees the count
+                    // move can always reach this connection.
+                    let (reject, lose, status_rx) = {
                         let mut s = lock(&state);
                         s.status_subscribes.push(pane_ids);
-                        if s.reject_first_status_subscribe && !s.rejected_once {
+                        let reject = s.reject_first_status_subscribe && !s.rejected_once;
+                        if reject {
                             s.rejected_once = true;
-                            true
-                        } else {
-                            false
                         }
+                        let lose = !reject && take_pending(&mut s.lose_status_after_ack);
+                        let status_rx = if reject || lose {
+                            None
+                        } else {
+                            let (tx, rx) = mpsc::unbounded_channel::<String>();
+                            s.status_tx = Some(tx);
+                            Some(rx)
+                        };
+                        (reject, lose, status_rx)
                     };
                     if reject {
                         // herdr resolves every per-pane entry at subscribe time;
@@ -2950,9 +3090,23 @@ mod tests {
                         return;
                     }
                     let _ = write.write_all(ack_line(&id).as_bytes()).await;
-                    // Acked and then permanently silent — the wedged-but-open
-                    // subscription the watchdog exists for.
-                    std::future::pending::<()>().await;
+                    if lose {
+                        let _ = write.write_all(events_lost_line(&id).as_bytes()).await;
+                        return;
+                    }
+                    // Acked, then silent unless a test pushes a line. With
+                    // nothing pushed this is the wedged-but-open subscription the
+                    // watchdog exists for.
+                    let Some(mut rx) = status_rx else { return };
+                    while let Some(line) = rx.recv().await {
+                        if write
+                            .write_all(format!("{line}\n").as_bytes())
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                 }
                 _ => {}
             }
@@ -3215,6 +3369,111 @@ mod tests {
             assert!(
                 s.pane_list_calls >= 2,
                 "each B attempt must re-enumerate, or a stale id would fail forever"
+            );
+        });
+        kernel.stop().await;
+    }
+
+    /// Push one agent-status transition and wait for it on the bus. A line sent
+    /// to a connection the kernel has since torn down is lost by design, so each
+    /// round re-targets whichever agent-status connection is current. The bus
+    /// receiver predates the kernel's start, so nothing published is missed.
+    async fn status_push_reaches_bus(
+        fake: &FakeHerdr,
+        events: &mut broadcast::Receiver<MuxEvent>,
+        pane_id: &str,
+        status: &str,
+        want: AgentStatus,
+    ) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                if let Some(tx) = fake.with(|s| s.status_tx.clone()) {
+                    let _ = tx.send(agent_status_line(pane_id, status));
+                }
+                match tokio::time::timeout(Duration::from_millis(100), events.recv()).await {
+                    Ok(Ok(MuxEvent::AgentStatusChanged(ev))) if ev.status == want => return,
+                    _ => continue,
+                }
+            }
+        })
+        .await
+        .expect("a status pushed after the rebuild must reach the bus");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn events_lost_on_the_agent_status_connection_rebuilds_only_that_connection() {
+        // herdr 0.9.2 answers a subscription that fell behind with an
+        // `events_lost` error line and closes it. The first agent-status
+        // subscription is answered that way: the kernel must rebuild that one
+        // connection (re-enumerating and re-subscribing), leave the lifecycle
+        // watcher alone, and carry on delivering pushes afterwards.
+        let fake = FakeHerdr::start(FakeState {
+            panes: vec![pane("w1:p1", HerdrAgentStatus::Idle)],
+            lose_status_after_ack: 1,
+            ..FakeState::default()
+        });
+        let mut kernel = RunningKernel::start(&fake, no_probe_tuning());
+
+        fake.wait_for("the rebuilt agent-status subscription", |s| {
+            s.status_subscribes.len() >= 2
+        })
+        .await;
+        status_push_reaches_bus(
+            &fake,
+            &mut kernel.events,
+            "w1:p1",
+            "blocked",
+            AgentStatus::Blocked,
+        )
+        .await;
+
+        fake.with(|s| {
+            assert_eq!(
+                s.status_subscribes.len(),
+                2,
+                "one events_lost close must cost exactly one agent-status rebuild"
+            );
+            assert_eq!(
+                s.lifecycle_subscribes, 1,
+                "an events_lost on connection B must not take connection A down"
+            );
+            assert!(
+                s.pane_list_calls >= 2,
+                "the rebuild must re-enumerate before re-subscribing"
+            );
+        });
+        kernel.stop().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn events_lost_on_the_lifecycle_connection_rebuilds_both_connections() {
+        // The same close on connection A. A is the one whose watermark everything
+        // else hangs off, so its rebuild takes agent-status connection B down and
+        // re-establishes it too; a push after that must still reach the bus.
+        let fake = FakeHerdr::start(FakeState {
+            panes: vec![pane("w1:p1", HerdrAgentStatus::Idle)],
+            lose_lifecycle_after_ack: 1,
+            ..FakeState::default()
+        });
+        let mut kernel = RunningKernel::start(&fake, no_probe_tuning());
+
+        fake.wait_for("the rebuilt lifecycle subscription", |s| {
+            s.lifecycle_subscribes >= 2
+        })
+        .await;
+        status_push_reaches_bus(
+            &fake,
+            &mut kernel.events,
+            "w1:p1",
+            "blocked",
+            AgentStatus::Blocked,
+        )
+        .await;
+
+        fake.with(|s| {
+            assert_eq!(
+                s.lifecycle_subscribes, 2,
+                "one events_lost close must cost exactly one lifecycle rebuild"
             );
         });
         kernel.stop().await;

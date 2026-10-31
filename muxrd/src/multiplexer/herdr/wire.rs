@@ -4,7 +4,8 @@
 //!
 //! The message layouts in this file are derived from herdr's own protocol source,
 //! `src/protocol/wire.rs` at tag `v0.9.0` of the upstream herdr repository
-//! (<https://github.com/herdrdev/herdr>), which herdr licenses under the **Apache
+//! (<https://github.com/herdrdev/herdr>) and verified unchanged through v0.9.5
+//! (2026-10-30, tag `2ecf19a`), which herdr licenses under the **Apache
 //! License, Version 2.0** — herdr relicensed from AGPL-3.0-or-later at v0.8.0.
 //!
 //! **This file is a modified derivation, not a copy.** It mirrors only the subset
@@ -123,7 +124,7 @@ use serde::{Deserialize, Serialize};
 // ─── Protocol constants ───────────────────────────────────────────────────────
 
 /// Oldest herdr wire protocol version this module's layout is valid for (herdr
-/// v0.9.0 ships 22, and 22 is the only version mirrored here).
+/// v0.9.0 through v0.9.5 ship 22, and 22 is the only version mirrored here).
 ///
 /// muxrd **does not pin** a protocol version: herdr enforces strict equality on the
 /// handshake and rejects clients older *or* newer than itself, so the only correct
@@ -133,7 +134,8 @@ use serde::{Deserialize, Serialize};
 /// never gates or refuses an attach.
 pub const HERDR_MIN_PROTOCOL: u32 = 22;
 
-/// Highest herdr wire protocol version muxrd has been **tested** against (v0.9.0).
+/// Highest herdr wire protocol version muxrd has been **tested** against (v0.9.0
+/// through v0.9.5 all ship 22).
 ///
 /// A diagnostic tripwire, **not a gate** — muxrd still attaches to a server
 /// reporting a higher protocol, it just logs a prominent warning first. Unlike the
@@ -143,8 +145,8 @@ pub const HERDR_MIN_PROTOCOL: u32 = 22;
 ///
 /// **Paired with the dev rig's pin:** `docker/Dockerfile`'s `ARG HERDR_VERSION`
 /// (and compose's `${HERDR_VERSION:-…}` fallbacks) name the release that ships this
-/// protocol — 0.9.0. Move both in the same change, or the rig stops testing the
-/// protocol this constant claims.
+/// protocol — 0.9.5. Move both in the same change, or the rig stops testing the
+/// protocol this constant claims. The pin is 0.9.5; 0.9.0 remains the floor.
 pub const HERDR_MAX_TESTED_PROTOCOL: u32 = 22;
 
 /// Highest `ServerMessage` bincode tag herdr 0.9.0 declares (`EndpointControl`).

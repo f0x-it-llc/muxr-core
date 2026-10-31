@@ -260,9 +260,11 @@ FROM runtime AS runtime-herdr
 
 # PINNED to the last herdr release muxrd has been TESTED against.
 #
-# 0.9.0 is the release that ships wire protocol 22 — the value recorded in
-# `HERDR_MAX_TESTED_PROTOCOL` (muxrd/src/multiplexer/herdr/wire.rs). The two must
-# move together.
+# 0.9.5 is the pin (the newest release tested); 0.9.0 is the supported FLOOR. Both
+# ship wire protocol 22 with byte-identical message bodies — the value recorded in
+# `HERDR_MAX_TESTED_PROTOCOL` (muxrd/src/multiplexer/herdr/wire.rs). The pin and
+# that constant must move together. Run the suite against the floor with
+# `HERDR_VERSION=0.9.0 ./docker/run.sh --herdr`.
 #
 # This used to default to `latest`, on the theory that muxrd negotiates the
 # protocol at runtime so the rig should track upstream. It does negotiate — but
@@ -281,7 +283,7 @@ FROM runtime AS runtime-herdr
 # `latest` is still accepted as an explicit opt-in and resolves to the newest
 # non-prerelease tag (herdr's `preview-*` builds are flagged as prereleases, so
 # they are correctly skipped) — an untested-by-construction rig, use knowingly.
-ARG HERDR_VERSION=0.9.0
+ARG HERDR_VERSION=0.9.5
 
 # herdr spells its ARM asset `aarch64` (like zellij, unlike lazygit).
 ARG TARGETARCH
