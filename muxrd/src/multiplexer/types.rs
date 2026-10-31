@@ -379,6 +379,51 @@ impl std::fmt::Display for UnknownSpace {
 
 impl std::error::Error for UnknownSpace {}
 
+// ─── Unknown-session error ──────────────────────────────────────────────────────
+
+/// Typed error: the session named by a session-scoped request does **not exist**
+/// on the backend (e.g. any name other than the single `herdr` sentinel on a
+/// herdr backend).
+///
+/// Kept distinct from every other backend failure so the gRPC layer can answer
+/// with `not_found` rather than `internal` — naming a session that does not
+/// exist is a client error, not a server fault.
+///
+/// It travels inside an [`anyhow::Error`]; callers test for it with
+/// [`UnknownSession::in_chain`] (which looks through any `.context(…)` layers),
+/// never by string-matching a message. The `Display` text is for **server logs
+/// only**; the client-facing status is deliberately terse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnknownSession {
+    /// The session name the caller asked for.
+    pub session: String,
+}
+
+impl UnknownSession {
+    /// Build the error for `session`.
+    pub fn new(session: impl Into<String>) -> Self {
+        Self {
+            session: session.into(),
+        }
+    }
+
+    /// Whether `err` **is**, or wraps, an [`UnknownSession`].
+    ///
+    /// Walks the whole [`anyhow`] chain so added context does not silently
+    /// downgrade the client's `not_found` to an `internal`.
+    pub fn in_chain(err: &anyhow::Error) -> bool {
+        err.chain().any(|cause| cause.is::<Self>())
+    }
+}
+
+impl std::fmt::Display for UnknownSession {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no such session: '{}'", self.session)
+    }
+}
+
+impl std::error::Error for UnknownSession {}
+
 // ─── Attach resume hint ─────────────────────────────────────────────────────────
 
 /// A **best-effort** hint naming the view a fresh attach should land on

@@ -42,7 +42,8 @@ mod zellij;
 pub use types::{
     ActionAck, AgentMark, AgentSnapshot, AgentStatus, AgentSummary, FullscreenHint, LayoutSnapshot,
     MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, PaneSnapshot, ResizeDir, ResizeKind,
-    ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSpace, sort_agents,
+    ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession, UnknownSpace,
+    sort_agents,
 };
 pub use zellij::ZellijBackend;
 
