@@ -7,11 +7,14 @@
 //! directly on the blocking pool and no focus moves anywhere.
 //!
 //! Routing and errors mirror `GetSpaces` (`space_ops`): the id resolves through
-//! [`crate::multiplexer::routing`] — an unknown backend token is
-//! `invalid_argument`, a known backend this server is not driving `NOT_FOUND` —
-//! and a backend failure, timeout or panicked task is `internal`. A backend
-//! without an agent concept (zellij) answers the trait's empty default, so the
-//! RPC returns an empty [`AgentList`] rather than an error.
+//! [`crate::multiplexer::routing`]. The full code set: an unknown backend token
+//! is `INVALID_ARGUMENT`; a known backend this server is not driving, or a herdr
+//! session name that is not the `herdr` sentinel (a typed `UnknownSession`), is
+//! `NOT_FOUND`; a backend failure, timeout or panicked task is `INTERNAL`. A
+//! backend without an agent concept (zellij) answers the trait's empty default
+//! for **any** name, since that default performs no existence check — an
+//! accepted, documented divergence — so the RPC returns an empty [`AgentList`]
+//! rather than an error.
 //!
 //! The neutral → proto mapping of status, mark and summary lives in
 //! [`super::helpers`] so `GetLayout` (`PaneMsg.agent`) and `ListSessions`
@@ -19,7 +22,7 @@
 
 use tonic::{Request, Response, Status};
 
-use crate::multiplexer::{AgentSnapshot, AgentSummary, sort_agents};
+use crate::multiplexer::{AgentSnapshot, AgentSummary, UnknownSession, sort_agents};
 use crate::proto::{AgentList, AgentMsg, SessionRef};
 
 use super::MuxrService;
@@ -56,11 +59,7 @@ impl MuxrService {
         .await
         {
             Ok(Ok(Ok(snapshots))) => snapshots,
-            Ok(Ok(Err(e))) => {
-                // The cause goes to the log; the caller gets a terse status.
-                log::warn!("ListAgents: list_agents failed for '{session}': {e:#}");
-                return Err(Status::internal("ListAgents: backend query failed"));
-            }
+            Ok(Ok(Err(e))) => return Err(agents_query_status(&session, &e)),
             Ok(Err(join_err)) => {
                 log::warn!("ListAgents: list task panicked for '{session}': {join_err}");
                 return Err(Status::internal("ListAgents: query task failed"));
@@ -81,6 +80,23 @@ impl MuxrService {
             list.summary.as_ref().map_or(0, |s| s.blocked)
         );
         Ok(Response::new(list))
+    }
+}
+
+/// Map a backend `list_agents` failure to a client status.
+///
+/// An [`UnknownSession`] (found through any `.context` layers, never by string
+/// matching) is a client error → `NOT_FOUND`, logged at `info!`. Everything else
+/// is a server fault → `INTERNAL`. Both messages are terse: the cause goes to
+/// the log only, as in `space_query_status` (`grpc/layout.rs`).
+fn agents_query_status(session: &str, err: &anyhow::Error) -> Status {
+    if UnknownSession::in_chain(err) {
+        log::info!("ListAgents: session='{session}' names no live session → not_found");
+        log::debug!("ListAgents: unknown session='{session}': {err:#}");
+        Status::not_found("session: no such session")
+    } else {
+        log::warn!("ListAgents: list_agents failed for '{session}': {err:#}");
+        Status::internal("ListAgents: backend query failed")
     }
 }
 
@@ -146,7 +162,8 @@ pub(super) mod tests {
     // ── Shared fake (also used by `session_ops` and `token_ops` tests) ────────
 
     /// A herdr-like backend that reports agents. `list_agents` answers `agents`
-    /// for every session (or errors when `fail` is set); `sessions` feeds
+    /// for every session (or errors when `fail` is set), except that the session
+    /// named `nope` is unknown (a typed `UnknownSession`); `sessions` feeds
     /// `ListSessions`. Every other method is unreachable from these tests.
     #[derive(Debug, Default)]
     pub(in crate::grpc) struct AgentsBackend {
@@ -159,7 +176,13 @@ pub(super) mod tests {
         fn supports_agents(&self) -> bool {
             true
         }
-        fn list_agents(&self, _: &str) -> anyhow::Result<Vec<AgentSnapshot>> {
+        fn list_agents(&self, session: &str) -> anyhow::Result<Vec<AgentSnapshot>> {
+            if session == "nope" {
+                return Err(
+                    anyhow::Error::new(crate::multiplexer::UnknownSession::new("nope"))
+                        .context("herdr: detail at /run/stub.sock"),
+                );
+            }
             if self.fail {
                 anyhow::bail!("agents: daemon unreachable at /run/stub.sock");
             }
@@ -425,6 +448,33 @@ pub(super) mod tests {
             .await
             .expect_err("herdr is not served by a zellij-only server");
         assert_eq!(err.code(), tonic::Code::NotFound);
+    }
+
+    #[tokio::test]
+    async fn unknown_session_is_a_terse_not_found() {
+        let service = herdr_service(AgentsBackend::default());
+
+        let err = service
+            .list_agents_impl(session_ref("herdr:nope"))
+            .await
+            .expect_err("an unknown session is a client error");
+        assert_eq!(err.code(), tonic::Code::NotFound);
+        assert_eq!(err.message(), "session: no such session");
+        assert!(!err.message().contains("/run/stub.sock"));
+    }
+
+    #[test]
+    fn agents_query_status_separates_unknown_session_from_other_failures() {
+        let unknown = anyhow::Error::new(super::UnknownSession::new("x")).context("ctx");
+        assert_eq!(
+            super::agents_query_status("x", &unknown).code(),
+            tonic::Code::NotFound
+        );
+        let other = anyhow::anyhow!("boom");
+        assert_eq!(
+            super::agents_query_status("x", &other).code(),
+            tonic::Code::Internal
+        );
     }
 
     #[tokio::test]

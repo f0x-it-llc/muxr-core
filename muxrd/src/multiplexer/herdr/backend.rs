@@ -58,7 +58,7 @@ use anyhow::{Result, anyhow};
 
 use crate::multiplexer::types::{
     ActionAck, AgentSnapshot, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ResumeTarget,
-    ScrollDir, SpaceSnapshot,
+    ScrollDir, SpaceSnapshot, UnknownSession,
 };
 use crate::multiplexer::{DualHandle, MuxBackend};
 
@@ -529,10 +529,13 @@ impl MuxBackend for HerdrBackend {
         // one sentinel session — so that is the only session it can describe.
         // Refused before any I/O, like `kill_session`'s sentinel check.
         if session != HERDR_SESSION {
-            return Err(anyhow!(
-                "herdr: no session '{session}' — the daemon is the single \
+            // Typed so the gRPC layer answers `not_found`, not `internal`.
+            return Err(
+                anyhow::Error::new(UnknownSession::new(session)).context(format!(
+                    "herdr: no session '{session}' — the daemon is the single \
                  '{HERDR_SESSION}' session"
-            ));
+                )),
+            );
         }
         self.control.list_agents()
     }
@@ -1073,6 +1076,7 @@ mod tests {
         let err = backend()
             .list_agents("not-herdr")
             .expect_err("only the sentinel session has agents");
+        assert!(UnknownSession::in_chain(&err), "got: {err:#}");
         let msg = format!("{err:#}");
         assert!(msg.contains("single 'herdr' session"), "got: {msg}");
     }

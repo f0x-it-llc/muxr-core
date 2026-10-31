@@ -116,8 +116,9 @@ service Muxr {
   // empty AgentList, never an error. Only SessionRef.session is read; the
   // connection_id and space_id fields are ignored. Errors: an unknown backend
   // token in the session id (or a rejected session name) is invalid_argument, a
-  // known backend this server is not driving is NOT_FOUND, and a backend failure
-  // or timeout is INTERNAL.
+  // known backend this server is not driving is NOT_FOUND, a session name the
+  // backend does not know is NOT_FOUND, and a backend failure or timeout is
+  // INTERNAL.
   rpc ListAgents(SessionRef) returns (AgentList);
 
   // ─── Phase F: token management ─────────────────────────────────────────────

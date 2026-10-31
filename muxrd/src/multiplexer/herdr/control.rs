@@ -128,13 +128,13 @@ pub struct HerdrControl {
 /// herdr answered a JSON-API request with an error envelope
 /// (`{"error":{"code","message"}}`) — as opposed to a transport or decode
 /// failure. Typed so a caller can tell "herdr refused this method" (e.g. a
-/// server without `session.snapshot` answering `method_not_found`) from "herdr
+/// server without `session.snapshot` answering `invalid_request`) from "herdr
 /// is unreachable"; its `Display` is the message `call_typed` always produced.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HerdrApiError {
     /// The JSON-API method that was refused.
     pub method: String,
-    /// herdr's error code (e.g. `"method_not_found"`).
+    /// herdr's error code (e.g. `"invalid_request"`, `"internal"`).
     pub code: String,
     /// herdr's error message.
     pub message: String,
@@ -151,6 +151,22 @@ impl std::fmt::Display for HerdrApiError {
 }
 
 impl std::error::Error for HerdrApiError {}
+
+impl HerdrApiError {
+    /// `true` when herdr is telling us it does not know the *method*, as
+    /// opposed to failing to serve a method it knows.
+    ///
+    /// herdr has no `method_not_found` code. On 0.9.0 and 0.9.5 a request whose
+    /// `method` is absent from the schema fails serde decoding of the tagged
+    /// `Request` enum and is answered `invalid_request` (`invalid request: …`);
+    /// 0.9.5 additionally answers its retired `pane.graphics.*` methods
+    /// `unknown_method`. Callers must only use this for methods whose params
+    /// cannot themselves be malformed (e.g. `session.snapshot`, empty params),
+    /// since `invalid_request` is also herdr's generic bad-params answer.
+    pub(crate) fn is_unknown_method(&self) -> bool {
+        matches!(self.code.as_str(), "invalid_request" | "unknown_method")
+    }
+}
 
 impl HerdrControl {
     /// Construct a control client for the herdr instance at `api_socket`, sharing
@@ -568,7 +584,7 @@ impl HerdrControl {
     ///
     /// Present since herdr 0.9.0, which is also this module's protocol floor
     /// ([`HERDR_MIN_PROTOCOL`](super::wire::HERDR_MIN_PROTOCOL) = 22). A server
-    /// that does not know the method answers a `method_not_found` API error,
+    /// that does not know the method answers an `invalid_request` API error,
     /// which [`call_typed`](Self::call_typed) turns into an `Err` — exactly what
     /// [`query_layout`](Self::query_layout) needs to fall back on.
     pub fn session_snapshot(&self) -> Result<SessionSnapshot> {
@@ -583,20 +599,24 @@ impl HerdrControl {
     /// [`session_snapshot`](Self::session_snapshot) call — mapped by
     /// [`agents_from_snapshot`] and sorted with [`sort_agents`] (blocked first).
     ///
-    /// When herdr **refuses** the snapshot method — an API-level error envelope
-    /// ([`HerdrApiError`]), which is how a server without `session.snapshot`
-    /// answers and the failure class [`query_layout`](Self::query_layout) falls
-    /// back on — the inventory is `Ok(vec![])`, logged at `debug!` once until the
-    /// method works again: an older herdr simply has no inventory to report.
-    /// A transport or decode failure is still an `Err` — "herdr is unreachable"
-    /// must not read as "no agents". Blocking, like every method here.
+    /// Only when herdr does not **know** the snapshot method — a
+    /// [`HerdrApiError`] with [`is_unknown_method`](HerdrApiError::is_unknown_method)
+    /// (`invalid_request` / `unknown_method`; a sub-floor herdr) — is the
+    /// inventory `Ok(vec![])`, logged at `debug!` once until the method works
+    /// again: such a herdr simply has no inventory to report. Every other API
+    /// error (`internal`, `timeout`, `server_unavailable`, …) and every
+    /// transport or decode failure is an `Err` — a failing herdr must not read
+    /// as "no agents". Blocking, like every method here.
     pub(crate) fn list_agents(&self) -> Result<Vec<AgentSnapshot>> {
         match self.session_snapshot() {
             Ok(snapshot) => {
                 self.agents_unavailable.store(false, Ordering::Relaxed);
                 Ok(agents_from_snapshot(&snapshot, &self.panes, &self.tabs))
             }
-            Err(e) if e.downcast_ref::<HerdrApiError>().is_some() => {
+            Err(e)
+                if e.downcast_ref::<HerdrApiError>()
+                    .is_some_and(HerdrApiError::is_unknown_method) =>
+            {
                 if !self.agents_unavailable.swap(true, Ordering::Relaxed) {
                     log::debug!(
                         "herdr: session.snapshot refused, so there is no agent inventory to \
@@ -605,7 +625,7 @@ impl HerdrControl {
                 }
                 Ok(Vec::new())
             }
-            Err(e) => Err(e),
+            Err(e) => Err(e.context("herdr list_agents: session.snapshot failed")),
         }
     }
 
@@ -2126,7 +2146,7 @@ mod tests {
         let _ = std::fs::remove_file(&sock);
     }
 
-    /// A herdr that refuses `session.snapshot` (`method_not_found`) has no
+    /// A herdr that does not know `session.snapshot` (`invalid_request`) has no
     /// inventory: `Ok(vec![])`, and no fan-out is attempted.
     #[test]
     fn list_agents_is_empty_when_herdr_refuses_the_snapshot() {
@@ -2171,13 +2191,71 @@ mod tests {
     fn herdr_api_error_display_is_unchanged() {
         let e = HerdrApiError {
             method: "session.snapshot".into(),
-            code: "method_not_found".into(),
-            message: "unknown method".into(),
+            code: "invalid_request".into(),
+            message: "invalid request: unknown variant".into(),
         };
         assert_eq!(
             e.to_string(),
-            "herdr session.snapshot error method_not_found: unknown method"
+            "herdr session.snapshot error invalid_request: invalid request: unknown variant"
         );
+    }
+
+    /// `unknown_method` (0.9.5's retired-method answer) reads like
+    /// `invalid_request`: an empty inventory, not an error.
+    #[test]
+    fn list_agents_is_empty_on_unknown_method() {
+        let sock = unique_socket_path("agentsum");
+        let server = fake_herdr_scripted(
+            &sock,
+            1,
+            vec![(
+                "session.snapshot",
+                r#""error":{"code":"unknown_method","message":"retired"}"#.to_string(),
+            )],
+        );
+        let control = control_over(&sock);
+        assert!(control.list_agents().expect("not an error").is_empty());
+        server.join().expect("fake server thread must not panic");
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    /// Any other API error is a failing herdr, never an empty inventory.
+    #[test]
+    fn list_agents_errors_on_other_api_error_codes() {
+        for code in ["internal", "timeout"] {
+            let sock = unique_socket_path("agentsint");
+            let server = fake_herdr_scripted(
+                &sock,
+                1,
+                vec![(
+                    "session.snapshot",
+                    format!(r#""error":{{"code":"{code}","message":"boom"}}"#),
+                )],
+            );
+            let control = control_over(&sock);
+            let err = control
+                .list_agents()
+                .expect_err("a non-unknown-method error must not read as no agents");
+            let api = err
+                .downcast_ref::<HerdrApiError>()
+                .unwrap_or_else(|| panic!("HerdrApiError must be in the chain: {err:#}"));
+            assert_eq!(api.code, code);
+            server.join().expect("fake server thread must not panic");
+            let _ = std::fs::remove_file(&sock);
+        }
+    }
+
+    #[test]
+    fn is_unknown_method_matches_only_herdrs_unknown_method_codes() {
+        let with = |code: &str| HerdrApiError {
+            method: "session.snapshot".into(),
+            code: code.into(),
+            message: String::new(),
+        };
+        assert!(with("invalid_request").is_unknown_method());
+        assert!(with("unknown_method").is_unknown_method());
+        assert!(!with("internal").is_unknown_method());
+        assert!(!with("method_not_found").is_unknown_method());
     }
 
     #[test]
@@ -2478,7 +2556,7 @@ mod tests {
     /// connection-per-request round trips from a `method → body` table (the body
     /// being the `"result":{…}` or `"error":{…}` fragment), echoing each
     /// request's own id. Any method absent from the table gets a
-    /// `method_not_found` error — which is precisely how a herdr without
+    /// `invalid_request` error — which is precisely how a herdr without
     /// `session.snapshot` would answer. Returns the ordered method trace.
     fn fake_herdr_scripted(
         sock: &std::path::Path,
@@ -2507,7 +2585,7 @@ mod tests {
                     .map(|(_, b)| b.clone())
                     .unwrap_or_else(|| {
                         format!(
-                            r#""error":{{"code":"method_not_found","message":"unknown method {method}"}}"#
+                            r#""error":{{"code":"invalid_request","message":"invalid request: unknown variant `{method}`"}}"#
                         )
                     });
                 let mut out = format!(r#"{{"id":"{id}",{body}}}"#);
@@ -2581,7 +2659,7 @@ mod tests {
     fn query_layout_serves_the_common_case_from_one_session_snapshot_call() {
         let sock = unique_socket_path("snap");
         // Only the snapshot is answerable. Every fan-out method would come back
-        // `method_not_found`, so a layout can only be produced by the snapshot.
+        // `invalid_request`, so a layout can only be produced by the snapshot.
         let server = fake_herdr_scripted(&sock, 1, vec![snapshot_response()]);
         let control = control_over(&sock);
 
