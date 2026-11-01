@@ -754,19 +754,25 @@ async fn serve(
     let push_devices = muxrd::notify::devices::PushDeviceStore::new();
 
     // The internal agent-event bus exists only when herdr is present (its event
-    // kernel is the sole producer). Created BEFORE the service so `WatchAgents`
-    // subscribes to the very bus the kernel and the notifier use below; a
-    // zellij-only server creates none, and WatchAgents then answers its empty
-    // snapshot and ends. The initial receiver is dropped at once — publishing
-    // with no receiver is a recoverable no-op, exactly as before.
-    let event_bus: Option<muxrd::multiplexer::events::EventBus> = herdr_backend
-        .as_ref()
-        .map(|_| tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY).0);
+    // kernel is the sole producer), so it is built once, paired with the herdr
+    // backend it serves: the one value below can never hold a bus without a
+    // kernel to feed it, or the reverse. Created BEFORE the service so
+    // `WatchAgents` subscribes to the very bus the kernel and the notifier use
+    // below; a zellij-only server creates none, and WatchAgents then answers its
+    // empty snapshot and ends. The initial receiver is dropped at once —
+    // publishing with no receiver is a recoverable no-op, exactly as before.
+    let herdr_events: Option<(Arc<HerdrBackend>, muxrd::multiplexer::events::EventBus)> =
+        herdr_backend.map(|backend| {
+            let bus =
+                tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY).0;
+            (backend, bus)
+        });
+    let event_bus = herdr_events.as_ref().map(|(_, bus)| bus.clone());
 
     let service = MuxrService::with_backends(backends)
         .with_notify_relay_url(notify_relay_url.clone())
         .with_push_device_store(push_devices.clone())
-        .with_event_bus(event_bus.clone());
+        .with_event_bus(event_bus);
 
     // Retained inputs for the task-05 outbound notifier, spawned in the herdr
     // branch below AFTER `spawn_listener` consumes the originals. Built only when
@@ -774,7 +780,7 @@ async fn serve(
     // then), so a zellij-only server allocates nothing here. Capturing
     // `notify_verbosity` in the closure also keeps the param "used" on the
     // zellij-only path (no dead-code warning).
-    let notifier_seed = herdr_backend.as_ref().map(|_| {
+    let notifier_seed = herdr_events.as_ref().map(|_| {
         (
             notify_relay_url.clone(),
             push_devices.clone(),
@@ -809,46 +815,36 @@ async fn serve(
     // broadcast bus created above. Its consumers are the outbound notifier
     // (below) and every live `WatchAgents` stream (through the service). A
     // zellij-only server spawns nothing and has no bus.
-    let _event_bus: Option<muxrd::multiplexer::events::EventBus> = match (herdr_backend, event_bus)
-    {
-        (Some(backend), Some(bus)) => {
-            muxrd::multiplexer::spawn_event_kernel(
-                backend.as_ref(),
-                bus.clone(),
-                kernel_shutdown_rx,
-            );
+    if let Some((backend, bus)) = &herdr_events {
+        muxrd::multiplexer::spawn_event_kernel(backend.as_ref(), bus.clone(), kernel_shutdown_rx);
 
-            // ── Outbound push notifier (task 05) ────────────────────────────
-            // Consume the same bus, but only when a relay URL is configured.
-            // A fresh shutdown receiver off the same watch channel winds the
-            // notifier down alongside the kernel. A build failure (reqwest
-            // client) is logged and non-fatal — the daemon still serves.
-            if let Some((relay_url, store, verbosity)) = notifier_seed {
-                match relay_url.as_deref() {
-                    Some(url) => {
-                        if let Err(e) = muxrd::notify::sender::spawn_notifier(
-                            &bus,
-                            kernel_shutdown_tx.subscribe(),
-                            store,
-                            url,
-                            verbosity,
-                        ) {
-                            log::warn!("notify: failed to start outbound notifier: {e:#}");
-                        }
-                    }
-                    None => {
-                        log::info!(
-                            "notify: relay disabled — outbound notifier not started \
-                             (herdr events still published to the bus)"
-                        );
+        // ── Outbound push notifier (task 05) ────────────────────────────
+        // Consume the same bus, but only when a relay URL is configured.
+        // A fresh shutdown receiver off the same watch channel winds the
+        // notifier down alongside the kernel. A build failure (reqwest
+        // client) is logged and non-fatal — the daemon still serves.
+        if let Some((relay_url, store, verbosity)) = notifier_seed {
+            match relay_url.as_deref() {
+                Some(url) => {
+                    if let Err(e) = muxrd::notify::sender::spawn_notifier(
+                        bus,
+                        kernel_shutdown_tx.subscribe(),
+                        store,
+                        url,
+                        verbosity,
+                    ) {
+                        log::warn!("notify: failed to start outbound notifier: {e:#}");
                     }
                 }
+                None => {
+                    log::info!(
+                        "notify: relay disabled — outbound notifier not started \
+                         (herdr events still published to the bus)"
+                    );
+                }
             }
-
-            Some(bus)
         }
-        _ => None,
-    };
+    }
 
     let transport_desc = match cert_mode {
         muxrd::config::CertMode::SelfSigned => "TLS (self-signed)",

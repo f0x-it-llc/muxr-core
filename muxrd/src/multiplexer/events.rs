@@ -6,10 +6,12 @@
 //! is the shared foundation for the notifications notifier (task 05) and the
 //! future agents screen — both are just *consumers* of this same bus.
 //!
-//! Three event families ride it today: [`AgentStatusChanged`], which a consumer
+//! Four event families ride it today: [`AgentStatusChanged`], which a consumer
 //! may act on directly because a status is a level, [`PaneClosed`], which tells a
-//! consumer to forget a pane, and [`LayoutChanged`], which is purely a hint to
-//! re-query. None is guaranteed delivery.
+//! consumer to forget a pane, [`LayoutChanged`], which is purely a hint to
+//! re-query, and [`MuxEvent::Resynced`], which marks the end of a post-reconnect
+//! resync so a consumer mirroring state can re-read it whole. None is guaranteed
+//! delivery.
 //!
 //! Consumers: the push notifier ([`notify::sender`](crate::notify::sender)) and
 //! the `WatchAgents` stream (`grpc::agent_ops`), each on its own receiver.
@@ -116,6 +118,14 @@ pub enum MuxEvent {
     LayoutChanged(LayoutChanged),
     /// A pane closed or exited. See [`PaneClosed`].
     PaneClosed(PaneClosed),
+    /// The herdr event kernel finished a post-reconnect resync: everything it
+    /// re-observed (closures, status changes) has been published before this.
+    /// Published once per resync, successful or not, because events pushed
+    /// while the agent-status subscription was down are lost either way. A
+    /// consumer that mirrors state re-reads it whole; one that only reacts to
+    /// transitions (the push notifier) ignores it. The bus is fed by the one
+    /// kernel serving herdr's single session, so it names nothing.
+    Resynced,
 }
 
 /// The producer half of the internal event bus. The event kernel holds one and
@@ -179,6 +189,17 @@ mod tests {
         let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
         tx.send(closed.clone()).expect("a subscriber exists");
         assert_eq!(rx.try_recv().expect("closure event"), closed);
+    }
+
+    #[test]
+    fn bus_carries_the_resync_marker_after_what_the_resync_published() {
+        let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let mut rx = tx.subscribe();
+        let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
+        tx.send(closed.clone()).expect("a subscriber exists");
+        tx.send(MuxEvent::Resynced).expect("a subscriber exists");
+        assert_eq!(rx.try_recv().expect("closure event"), closed);
+        assert_eq!(rx.try_recv().expect("resync marker"), MuxEvent::Resynced);
     }
 
     #[test]

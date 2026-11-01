@@ -127,6 +127,8 @@ which = "7"
 [dev-dependencies]
 # base64 for decoding PEM certificates in unit tests (already a transitive dep).
 base64 = "0.22"
+# Paused-clock tests (`#[tokio::test(start_paused = true)]`); adds no crate.
+tokio = { version = "1", features = ["test-util"] }
 
 # ─── Build deps ──────────────────────────────────────────────────────────────
 
