@@ -310,11 +310,21 @@ pub fn toggle_pane_floating(session: &str, pane: PaneId) -> Result<ActionAck> {
     )
 }
 
-/// `ToggleFocusFullscreenByPaneId { pane_id }` — toggle fullscreen for a pane.
+/// `ToggleFocusNoUiFullscreenByPaneId { pane_id }` — toggle **no-UI**
+/// fullscreen for a pane.
+///
+/// The no-UI variant (zellij ≥ 0.45) expands the pane over the whole display:
+/// it hides the tab-bar/status-bar plugin panes as well as the sibling panes
+/// and draws the pane without its frame, so a phone-sized grid spends every
+/// cell on content. Plain `ToggleFocusFullscreenByPaneId` only covers the
+/// viewport between the bars and keeps the frame. Both variants are the same
+/// tab-global fullscreen (`TabInfo.is_fullscreen_active` / `PaneInfo.is_fullscreen`
+/// report either), and the two toggles interleave: a plain toggle issued while
+/// no-UI fullscreen is active switches to plain fullscreen rather than exiting.
 pub fn toggle_pane_fullscreen(session: &str, pane: PaneId) -> Result<ActionAck> {
     send_action(
         session,
-        Action::ToggleFocusFullscreenByPaneId { pane_id: pane },
+        Action::ToggleFocusNoUiFullscreenByPaneId { pane_id: pane },
     )
 }
 

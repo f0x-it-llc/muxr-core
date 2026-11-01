@@ -357,10 +357,15 @@ impl MuxSender for ZellijMuxSender {
                     })?;
             }
         } else {
-            // Tiled: focus then active-pane fullscreen toggle (clean parity).
+            // Tiled: focus then active-pane NO-UI fullscreen toggle (clean
+            // parity with `actions::toggle_pane_fullscreen`). No-UI covers the
+            // tab-bar/status-bar plugin panes too and drops the pane frame, so
+            // the pane owns the whole display rather than the viewport between
+            // the bars.
             self.0
                 .send_action_as_self(Action::FocusPaneByPaneId { pane_id })?;
-            self.0.send_action_as_self(Action::ToggleFocusFullscreen)?;
+            self.0
+                .send_action_as_self(Action::ToggleFocusNoUiFullscreen)?;
         }
         Ok(())
     }
