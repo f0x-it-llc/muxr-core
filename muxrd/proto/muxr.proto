@@ -129,8 +129,9 @@ service Muxr {
   // when an agent's pane closes or its agent leaves the inventory. A server
   // that fell behind its own event feed sends a fresh `snapshot`, which
   // replaces everything the client holds. A backend without an agent concept
-  // (e.g. zellij), or a server with no live agent event feed, sends the empty
-  // snapshot and ends the stream. Only SessionRef.session is read. Errors are
+  // (e.g. zellij) sends the empty snapshot and ends the stream; a server with
+  // no live agent event feed sends its one snapshot and ends (poll ListAgents
+  // when "agents-stream" is absent). Only SessionRef.session is read. Errors are
   // ListAgents' own, before the first message; the session token is
   // re-validated every 30 s and a revoked one ends the stream with
   // UNAUTHENTICATED. Advertised by the "agents-stream" capability.
