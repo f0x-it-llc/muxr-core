@@ -233,13 +233,24 @@
 //! The resync is now the *only* mechanism that can observe state predating a
 //! subscription, so it is more load-bearing than before, not less. After every B
 //! (re)connect it re-observes current pane agent states through `HerdrControl`
-//! and emits synthetic [`AgentStatus::Blocked`] / [`AgentStatus::Done`] events
-//! (`synthetic: true`) — but **only** where a pane's status differs from its
-//! last-known value, so a flapping connection never re-pings a consumer about
-//! the same still-stuck agent. The last-known table lives for the whole kernel
-//! lifetime, is updated by live pushes, and is pruned for panes that vanish from
-//! the enumeration. The downstream push sender deliberately skips synthetic
-//! `done` events; that contract is not this module's to change.
+//! and publishes what changed while B was down:
+//!
+//! - a synthetic [`AgentStatusChanged`](crate::multiplexer::events::AgentStatusChanged)
+//!   (`synthetic: true`, kind and tab from the listing) for **every** pane whose
+//!   status differs from its last-known value, whatever the status — but
+//!   **only** where it differs, so a flapping connection never re-pings a
+//!   consumer about the same still-stuck agent;
+//! - a [`PaneClosed`](crate::multiplexer::events::PaneClosed) for every pane
+//!   pruned from the last-known tables because it vanished from the enumeration
+//!   (its `pane.closed` push may have been the one lost);
+//! - then one [`MuxEvent::Resynced`](crate::multiplexer::events::MuxEvent::Resynced),
+//!   published even when the resync itself failed, so a consumer mirroring the
+//!   inventory re-reads it whole.
+//!
+//! The last-known table lives for the whole kernel lifetime and is updated by
+//! live pushes. The downstream push sender keeps only blocked and done
+//! transitions and deliberately skips synthetic `done` events; that contract is
+//! not this module's to change.
 //!
 //! ## Read-only
 //!
@@ -909,7 +920,7 @@ async fn connect_status(
         kernel.bus.clone(),
     )
     .await;
-    log::info!("herdr event kernel: resync emitted {resynced} synthetic event(s)");
+    log::info!("herdr event kernel: resync published {resynced} event(s)");
 
     Bring::Ready(conn)
 }
@@ -1041,19 +1052,7 @@ async fn pump(
                     Pushed::PaneGone {
                         herdr_pane_id,
                         pane,
-                    } => {
-                        // A dead subscription is harmless; drop tracking so a
-                        // future pane reusing the id inherits nothing, and tell
-                        // the bus the pane is gone.
-                        if let Some(id) = pane {
-                            lock(&kernel.last_status).remove(&id);
-                            lock(&kernel.pane_tabs).remove(&id);
-                            publish_closed(kernel, id);
-                        }
-                        if let Some(hid) = herdr_pane_id {
-                            subscribed.remove(&hid);
-                        }
-                    }
+                    } => forget_pane(kernel, subscribed, herdr_pane_id, pane),
                     Pushed::LayoutUpdated {
                         workspace_id,
                         herdr_tab_id,
@@ -1153,6 +1152,26 @@ fn publish_closed(kernel: &Kernel, pane: u32) {
     let _ = kernel.bus.send(MuxEvent::PaneClosed(PaneClosed { pane }));
 }
 
+/// A `pane.closed` / `pane.exited` push. A dead subscription is harmless; drop
+/// the pane's tracking so a future pane reusing the id inherits nothing, drop
+/// it from B's subscribed set so such a pane is treated as new, and tell the bus
+/// the pane is gone (only a pane the registry knows has a neutral id to name).
+fn forget_pane(
+    kernel: &Kernel,
+    subscribed: &mut HashSet<String>,
+    herdr_pane_id: Option<String>,
+    pane: Option<u32>,
+) {
+    if let Some(id) = pane {
+        lock(&kernel.last_status).remove(&id);
+        lock(&kernel.pane_tabs).remove(&id);
+        publish_closed(kernel, id);
+    }
+    if let Some(hid) = herdr_pane_id {
+        subscribed.remove(&hid);
+    }
+}
+
 /// Translate one `layout.updated` push into the neutral
 /// [`LayoutChanged`](crate::multiplexer::events::LayoutChanged) hint and publish
 /// it.
@@ -1237,9 +1256,12 @@ fn collect_pane_ids(control: &HerdrControl) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-/// Re-observe current pane agent states after a (re)connect and publish synthetic
-/// `Blocked`/`Done` events (deduped against the last-known status table). Returns
-/// the number of synthetic events emitted.
+/// Re-observe current pane agent states after a (re)connect and publish what
+/// changed: a [`PaneClosed`] per pruned pane, a synthetic status event per pane
+/// whose status moved (deduped against the last-known status table), then one
+/// [`MuxEvent::Resynced`] — the last even when the resync failed, since events
+/// pushed while B was down are lost either way. Returns the number of closure
+/// and status events published (the marker excluded).
 ///
 /// Runs the blocking `HerdrControl` list calls on the blocking pool (they use the
 /// synchronous connection-per-request transport, per the `spawn_blocking`
@@ -1255,11 +1277,12 @@ async fn resync(
         collect_resync_events(&control, &panes, &last_status, &pane_tabs)
     })
     .await;
-    match collected {
+    let published = match collected {
         Ok(Ok(events)) => {
+            let events = events.into_bus_events();
             let n = events.len();
             for ev in events {
-                let _ = bus.send(MuxEvent::AgentStatusChanged(ev));
+                let _ = bus.send(ev);
             }
             n
         }
@@ -1271,20 +1294,23 @@ async fn resync(
             log::error!("herdr event kernel: resync task panicked: {e}");
             0
         }
-    }
+    };
+    // No receivers is fine, as for every publish here.
+    let _ = bus.send(MuxEvent::Resynced);
+    published
 }
 
-/// Blocking helper: list every workspace's panes and build synthetic events for
-/// those currently `Blocked`/`Done` whose status *changed* since last observed.
-/// `list_panes` carries each pane's real `terminal_id`, so `assign_or_get` here
-/// refreshes the registry correctly — and its `tab_id`, which refreshes the
-/// kernel's pane → tab table.
+/// Blocking helper: list every workspace's panes and build the resync's events —
+/// a synthetic status event per pane whose status *changed* since last observed,
+/// and a closure per pane that vanished. `list_panes` carries each pane's real
+/// `terminal_id`, so `assign_or_get` here refreshes the registry correctly — and
+/// its `tab_id`, which refreshes the kernel's pane → tab table.
 fn collect_resync_events(
     control: &HerdrControl,
     panes: &HerdrPaneRegistry,
     last_status: &Mutex<HashMap<u32, AgentStatus>>,
     pane_tabs: &Mutex<HashMap<u32, u64>>,
-) -> Result<Vec<AgentStatusChanged>> {
+) -> Result<ResyncEvents> {
     let workspaces = control
         .list_workspaces()
         .context("resync: workspace.list")?;
@@ -1333,17 +1359,41 @@ struct ResyncPane {
     status: HerdrAgentStatus,
 }
 
+/// What one resync observed changing, in the order it is published.
+#[derive(Debug, Default)]
+struct ResyncEvents {
+    /// Neutral ids of the panes pruned because they vanished from the
+    /// enumeration, ascending.
+    closed: Vec<u32>,
+    /// One synthetic event per pane whose status differs from its last-known
+    /// value, any status, in listing order.
+    changed: Vec<AgentStatusChanged>,
+}
+
+impl ResyncEvents {
+    /// The bus events, closures first: a consumer forgets the vanished panes
+    /// before it hears about the live ones. The closing
+    /// [`MuxEvent::Resynced`] is [`resync`]'s to add.
+    fn into_bus_events(self) -> Vec<MuxEvent> {
+        self.closed
+            .into_iter()
+            .map(|pane| MuxEvent::PaneClosed(PaneClosed { pane }))
+            .chain(self.changed.into_iter().map(MuxEvent::AgentStatusChanged))
+            .collect()
+    }
+}
+
 /// Pure dedup core: register each pane (and its tab), update the last-known
-/// status and pane → tab tables, and emit a synthetic event only for a
-/// `Blocked`/`Done` pane whose status *changed*. Panes absent from `input` are
-/// pruned from both tables.
+/// status and pane → tab tables, and emit a synthetic event for every pane whose
+/// status *changed*, whatever it changed to. Panes absent from `input` are
+/// pruned from both tables and reported as closed.
 fn build_resync_events(
     input: &[ResyncPane],
     reg: &HerdrPaneRegistry,
     tabs: &HerdrTabRegistry,
     last_status: &mut HashMap<u32, AgentStatus>,
     pane_tabs: &mut HashMap<u32, u64>,
-) -> Vec<AgentStatusChanged> {
+) -> ResyncEvents {
     let mut live: HashSet<u32> = HashSet::with_capacity(input.len());
     let mut events = Vec::new();
     for p in input {
@@ -1361,7 +1411,7 @@ fn build_resync_events(
         let status = map_status(p.status);
         let changed = last_status.get(&id) != Some(&status);
         last_status.insert(id, status);
-        if changed && matches!(status, AgentStatus::Blocked | AgentStatus::Done) {
+        if changed {
             events.push(AgentStatusChanged {
                 pane: id,
                 workspace_id: p.workspace_id.clone(),
@@ -1375,9 +1425,20 @@ fn build_resync_events(
             });
         }
     }
+    let mut closed: Vec<u32> = last_status
+        .keys()
+        .chain(pane_tabs.keys())
+        .filter(|id| !live.contains(id))
+        .copied()
+        .collect();
+    closed.sort_unstable();
+    closed.dedup();
     last_status.retain(|id, _| live.contains(id));
     pane_tabs.retain(|id, _| live.contains(id));
-    events
+    ResyncEvents {
+        closed,
+        changed: events,
+    }
 }
 
 /// One pane as the liveness probe sees it: its herdr id, its neutral id when the
@@ -1977,7 +2038,7 @@ fn take_utf8(pending: &mut Vec<u8>) -> std::io::Result<String> {
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use fake_herdr::{
         FakeHerdr, FakeState, RunningKernel, agent_status_line, fast_probe_tuning, no_probe_tuning,
@@ -2634,8 +2695,9 @@ mod tests {
         }
     }
 
-    /// [`build_resync_events`] with throwaway tab registry and pane → tab table,
-    /// for the tests that assert only on status dedup.
+    /// The status events of [`build_resync_events`] with a throwaway tab
+    /// registry and pane → tab table, for the tests that assert only on status
+    /// dedup.
     fn resync_events(
         input: &[ResyncPane],
         reg: &HerdrPaneRegistry,
@@ -2648,10 +2710,11 @@ mod tests {
             last,
             &mut HashMap::new(),
         )
+        .changed
     }
 
     #[test]
-    fn fresh_start_emits_each_blocked_pane_once() {
+    fn fresh_start_emits_every_pane_once_whatever_its_status() {
         let reg = HerdrPaneRegistry::new();
         let mut last = HashMap::new();
         let input = vec![
@@ -2660,7 +2723,12 @@ mod tests {
             resync_pane("w1:p3", HerdrAgentStatus::Idle),
         ];
         let events = resync_events(&input, &reg, &mut last);
-        assert_eq!(events.len(), 2, "only blocked + done emit");
+        let statuses: Vec<AgentStatus> = events.iter().map(|e| e.status).collect();
+        assert_eq!(
+            statuses,
+            vec![AgentStatus::Blocked, AgentStatus::Done, AgentStatus::Idle],
+            "every first observation is a change, in listing order"
+        );
         assert!(events.iter().all(|e| e.synthetic));
         // Second resync with identical state emits nothing.
         let again = resync_events(&input, &reg, &mut last);
@@ -2678,13 +2746,21 @@ mod tests {
             &mut last,
         );
         assert_eq!(first.len(), 1);
-        // Goes idle (no emit — not blocked/done — but last-known updates).
+        // Goes idle: a change too, republished so a mirror converges.
         let idle = resync_events(
             &[resync_pane("w1:p1", HerdrAgentStatus::Idle)],
             &reg,
             &mut last,
         );
-        assert!(idle.is_empty());
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].status, AgentStatus::Idle);
+        // Still idle: nothing.
+        let still = resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Idle)],
+            &reg,
+            &mut last,
+        );
+        assert!(still.is_empty(), "unchanged state must not re-emit");
         // Blocked again — a genuine change from idle → re-emit.
         let reblocked = resync_events(
             &[resync_pane("w1:p1", HerdrAgentStatus::Blocked)],
@@ -2692,6 +2768,103 @@ mod tests {
             &mut last,
         );
         assert_eq!(reblocked.len(), 1, "idle→blocked is a real transition");
+    }
+
+    #[test]
+    fn every_status_change_is_republished_not_only_blocked_and_done() {
+        let reg = HerdrPaneRegistry::new();
+        let mut last = HashMap::new();
+        let all = [
+            HerdrAgentStatus::Idle,
+            HerdrAgentStatus::Working,
+            HerdrAgentStatus::Blocked,
+            HerdrAgentStatus::Done,
+            HerdrAgentStatus::Unknown,
+        ];
+        // Seed every pane with the status BEFORE its slot, then move each one to
+        // its own slot: five panes, five distinct transitions, all published.
+        let seeded: Vec<ResyncPane> = (0..all.len())
+            .map(|i| resync_pane(&format!("w1:p{i}"), all[(i + 1) % all.len()]))
+            .collect();
+        resync_events(&seeded, &reg, &mut last);
+        let moved: Vec<ResyncPane> = (0..all.len())
+            .map(|i| resync_pane(&format!("w1:p{i}"), all[i]))
+            .collect();
+        let events = resync_events(&moved, &reg, &mut last);
+        let statuses: Vec<AgentStatus> = events.iter().map(|e| e.status).collect();
+        assert_eq!(
+            statuses,
+            all.iter().map(|s| map_status(*s)).collect::<Vec<_>>(),
+            "all five statuses are republished on change"
+        );
+        assert!(
+            events.iter().all(|e| e.kind.as_deref() == Some("claude")),
+            "each carries the listing's kind"
+        );
+    }
+
+    #[test]
+    fn a_pruned_pane_is_reported_closed_and_published_before_the_changes() {
+        let reg = HerdrPaneRegistry::new();
+        let tabs = HerdrTabRegistry::new();
+        let mut last = HashMap::new();
+        let mut pane_tabs = HashMap::new();
+        build_resync_events(
+            &[
+                resync_pane("w1:p1", HerdrAgentStatus::Idle),
+                resync_pane("w1:p2", HerdrAgentStatus::Blocked),
+                resync_pane("w1:p3", HerdrAgentStatus::Idle),
+            ],
+            &reg,
+            &tabs,
+            &mut last,
+            &mut pane_tabs,
+        );
+        let p1 = reg.id_for_herdr_pane("w1:p1").unwrap();
+        let p2 = reg.id_for_herdr_pane("w1:p2").unwrap();
+        let p3 = reg.id_for_herdr_pane("w1:p3").unwrap();
+        // A pane known only to the pane → tab table (its status was never
+        // recorded) is pruned and reported too.
+        pane_tabs.insert(99, 1);
+
+        // p2 and p3 vanished; p1 went working.
+        let events = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Working)],
+            &reg,
+            &tabs,
+            &mut last,
+            &mut pane_tabs,
+        );
+        let mut expected_closed = vec![p2, p3, 99];
+        expected_closed.sort_unstable();
+        assert_eq!(events.closed, expected_closed, "ascending, deduplicated");
+        let bus = events.into_bus_events();
+        let mut want: Vec<MuxEvent> = expected_closed
+            .iter()
+            .map(|&pane| MuxEvent::PaneClosed(PaneClosed { pane }))
+            .collect();
+        want.push(MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            pane: p1,
+            workspace_id: "w1".into(),
+            workspace_name: Some("main".into()),
+            status: AgentStatus::Working,
+            title: None,
+            kind: Some("claude".into()),
+            name: None,
+            tab: Some(tabs.assign_or_get("w1:t1")),
+            synthetic: true,
+        }));
+        assert_eq!(bus, want, "closures first, then the status change");
+
+        // A second identical resync has nothing left to close.
+        let again = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Working)],
+            &reg,
+            &tabs,
+            &mut last,
+            &mut pane_tabs,
+        );
+        assert!(again.closed.is_empty() && again.changed.is_empty());
     }
 
     #[test]
@@ -2753,7 +2926,8 @@ mod tests {
             &tabs,
             &mut last,
             &mut pane_tabs,
-        );
+        )
+        .changed;
         assert_eq!(events.len(), 2);
         let t1 = tabs.assign_or_get("w1:t1");
         let t2 = tabs.assign_or_get("w1:t2");
@@ -3029,7 +3203,7 @@ mod tests {
     // one request per connection, a `subscription_started` ack, and **no replay
     // of anything that happened before the request was accepted**.
 
-    mod fake_herdr {
+    pub(crate) mod fake_herdr {
         use super::*;
         use crate::multiplexer::events::EVENT_BUS_CAPACITY;
         use crate::multiplexer::herdr::registry::HerdrTabRegistry;
@@ -3039,12 +3213,12 @@ mod tests {
 
         /// A pane as the fake reports it from `pane.list`.
         #[derive(Debug, Clone)]
-        pub(super) struct FakePane {
+        pub(crate) struct FakePane {
             pub pane_id: String,
             pub status: HerdrAgentStatus,
         }
 
-        pub(super) fn pane(pane_id: &str, status: HerdrAgentStatus) -> FakePane {
+        pub(crate) fn pane(pane_id: &str, status: HerdrAgentStatus) -> FakePane {
             FakePane {
                 pane_id: pane_id.to_string(),
                 status,
@@ -3052,7 +3226,7 @@ mod tests {
         }
 
         #[derive(Default)]
-        pub(super) struct FakeState {
+        pub(crate) struct FakeState {
             /// What `pane.list` answers. Tests mutate this mid-run.
             pub panes: Vec<FakePane>,
             /// Pane-id lists from every agent-status subscribe received, in order.
@@ -3093,7 +3267,7 @@ mod tests {
         }
 
         /// The error envelope herdr sends on a subscription that fell behind.
-        pub(super) fn events_lost_line(id: &str) -> String {
+        pub(crate) fn events_lost_line(id: &str) -> String {
             let body = serde_json::json!({
                 "id": id,
                 "error": {
@@ -3105,7 +3279,7 @@ mod tests {
         }
 
         /// A live `pane.agent_status_changed` push, as herdr 0.9.0 sends it.
-        pub(super) fn agent_status_line(pane_id: &str, status: &str) -> String {
+        pub(crate) fn agent_status_line(pane_id: &str, status: &str) -> String {
             serde_json::json!({
                 "event": "pane.agent_status_changed",
                 "data": {
@@ -3118,7 +3292,7 @@ mod tests {
             .to_string()
         }
 
-        pub(super) struct FakeHerdr {
+        pub(crate) struct FakeHerdr {
             pub socket: PathBuf,
             pub state: Arc<Mutex<FakeState>>,
             server: tokio::task::JoinHandle<()>,
@@ -3132,7 +3306,7 @@ mod tests {
         }
 
         impl FakeHerdr {
-            pub(super) fn start(state: FakeState) -> Self {
+            pub(crate) fn start(state: FakeState) -> Self {
                 // Keep the path SHORT: `sun_path` caps at ~104 bytes and CI's
                 // temp dir is deep (mirrors control.rs's fake-socket tests).
                 static SEQ: AtomicU64 = AtomicU64::new(0);
@@ -3152,12 +3326,12 @@ mod tests {
                 }
             }
 
-            pub(super) fn with<T>(&self, f: impl FnOnce(&mut FakeState) -> T) -> T {
+            pub(crate) fn with<T>(&self, f: impl FnOnce(&mut FakeState) -> T) -> T {
                 f(&mut lock(&self.state))
             }
 
             /// Block until `cond` holds, or fail the test.
-            pub(super) async fn wait_for(&self, what: &str, cond: impl Fn(&FakeState) -> bool) {
+            pub(crate) async fn wait_for(&self, what: &str, cond: impl Fn(&FakeState) -> bool) {
                 let deadline = Instant::now() + Duration::from_secs(10);
                 loop {
                     if cond(&lock(&self.state)) {
@@ -3336,9 +3510,13 @@ mod tests {
             format!(r#"{{"id":"{id}","result":{{"type":"subscription_started"}}}}"#) + "\n"
         }
 
-        /// A running kernel wired to one fake herdr.
-        pub(super) struct RunningKernel {
+        /// A running kernel wired to one fake herdr. Also driven from the
+        /// `WatchAgents` tests (`grpc::agent_ops`), which follow its bus.
+        pub(crate) struct RunningKernel {
             pub events: broadcast::Receiver<MuxEvent>,
+            /// The kernel's pane registry, for mapping a fake herdr pane id to
+            /// the neutral id the kernel publishes.
+            pub panes: Arc<HerdrPaneRegistry>,
             shutdown: watch::Sender<bool>,
             task: tokio::task::JoinHandle<()>,
         }
@@ -3356,7 +3534,7 @@ mod tests {
                 let (shutdown, rx) = watch::channel(false);
                 let task = tokio::spawn(run_tuned(
                     fake.socket.clone(),
-                    panes,
+                    Arc::clone(&panes),
                     control,
                     bus,
                     rx,
@@ -3364,12 +3542,33 @@ mod tests {
                 ));
                 Self {
                     events,
+                    panes,
                     shutdown,
                     task,
                 }
             }
 
-            pub(super) async fn stop(self) {
+            /// [`Self::start`] with the watchdog out of the way, for callers
+            /// outside this module (which cannot name [`Tuning`]).
+            pub(crate) fn start_quiet(fake: &FakeHerdr) -> Self {
+                Self::start(fake, no_probe_tuning())
+            }
+
+            /// Read the bus until the next resync marker, returning everything
+            /// published before it.
+            pub(crate) async fn until_resynced(&mut self) -> Vec<MuxEvent> {
+                let mut seen = Vec::new();
+                loop {
+                    match tokio::time::timeout(Duration::from_secs(10), self.events.recv()).await {
+                        Ok(Ok(MuxEvent::Resynced)) => return seen,
+                        Ok(Ok(ev)) => seen.push(ev),
+                        Ok(Err(e)) => panic!("bus receive failed: {e}"),
+                        Err(_) => panic!("no resync marker within 10s; saw {seen:?}"),
+                    }
+                }
+            }
+
+            pub(crate) async fn stop(self) {
                 let _ = self.shutdown.send(true);
                 let _ = tokio::time::timeout(Duration::from_secs(5), self.task).await;
             }
@@ -3501,7 +3700,13 @@ mod tests {
                     let _ = tx.send(agent_status_line("w1:p1", "blocked"));
                 }
                 match tokio::time::timeout(Duration::from_millis(100), kernel.events.recv()).await {
-                    Ok(Ok(MuxEvent::AgentStatusChanged(ev))) if ev.tab.is_some() => return ev,
+                    // The resync's own (synthetic) re-observation of the
+                    // pane is not the push under test.
+                    Ok(Ok(MuxEvent::AgentStatusChanged(ev)))
+                        if ev.tab.is_some() && !ev.synthetic =>
+                    {
+                        return ev;
+                    }
                     _ => continue,
                 }
             }
@@ -3542,6 +3747,198 @@ mod tests {
         .await
         .expect("a pushed pane closure must reach the bus");
         assert_eq!(closed.pane, 1, "the registry's neutral id for w1:p1");
+        kernel.stop().await;
+    }
+
+    /// A kernel over a socket nobody serves: enough for the pure publish
+    /// paths, which never touch herdr.
+    fn offline_kernel() -> (Kernel, broadcast::Receiver<MuxEvent>) {
+        let socket = PathBuf::from("/nonexistent/muxrd-offline-kernel.sock");
+        let panes = Arc::new(HerdrPaneRegistry::new());
+        let control = Arc::new(HerdrControl::new(
+            socket.clone(),
+            Arc::clone(&panes),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+        let (bus, events) = broadcast::channel(crate::multiplexer::events::EVENT_BUS_CAPACITY);
+        let kernel = Kernel {
+            api_socket: socket,
+            panes,
+            control,
+            bus,
+            last_status: Arc::new(Mutex::new(HashMap::new())),
+            pane_tabs: Arc::new(Mutex::new(HashMap::new())),
+            tuning: Tuning::default(),
+        };
+        (kernel, events)
+    }
+
+    #[test]
+    fn publish_stamps_the_last_observed_tab_on_a_push_lacking_one() {
+        let (kernel, mut events) = offline_kernel();
+        let id = kernel.panes.assign_or_get("w1:p1", "t-w1:p1");
+        lock(&kernel.pane_tabs).insert(id, 42);
+
+        let Pushed::AgentStatus(ev) =
+            classify_pushed(&agent_status_line("w1:p1", "blocked"), &kernel.panes)
+        else {
+            panic!("a status push for a known pane classifies as a status");
+        };
+        assert_eq!(ev.tab, None, "herdr's push names no tab");
+        publish(&kernel, ev);
+
+        match events.try_recv().expect("published") {
+            MuxEvent::AgentStatusChanged(ev) => {
+                assert_eq!(ev.pane, id);
+                assert_eq!(ev.tab, Some(42), "stamped from the pane → tab table");
+                assert_eq!(ev.status, AgentStatus::Blocked);
+            }
+            other => panic!("expected a status event, got {other:?}"),
+        }
+        assert_eq!(
+            lock(&kernel.last_status).get(&id),
+            Some(&AgentStatus::Blocked),
+            "the push is the pane's last-known status"
+        );
+
+        // An event that carries its own tab keeps it; an unknown pane stays
+        // tab-less rather than borrowing another pane's.
+        let mut own = status_ev(id, Some(7));
+        publish(&kernel, own.clone());
+        own.pane = id + 100;
+        own.tab = None;
+        publish(&kernel, own);
+        let tabs: Vec<Option<u64>> = (0..2)
+            .map(|_| match events.try_recv().expect("published") {
+                MuxEvent::AgentStatusChanged(ev) => ev.tab,
+                other => panic!("expected a status event, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(tabs, vec![Some(7), None]);
+    }
+
+    fn status_ev(pane: u32, tab: Option<u64>) -> AgentStatusChanged {
+        AgentStatusChanged {
+            pane,
+            workspace_id: "w1".into(),
+            workspace_name: None,
+            status: AgentStatus::Working,
+            title: None,
+            kind: Some("claude".into()),
+            name: None,
+            tab,
+            synthetic: false,
+        }
+    }
+
+    #[test]
+    fn a_pane_closed_push_forgets_the_pane_and_publishes_pane_closed() {
+        let (kernel, mut events) = offline_kernel();
+        let id = kernel.panes.assign_or_get("w1:p1", "t-w1:p1");
+        let other = kernel.panes.assign_or_get("w1:p2", "t-w1:p2");
+        for pane in [id, other] {
+            lock(&kernel.pane_tabs).insert(pane, 3);
+            lock(&kernel.last_status).insert(pane, AgentStatus::Idle);
+        }
+        let mut subscribed: HashSet<String> = ["w1:p1".to_owned(), "w1:p2".to_owned()]
+            .into_iter()
+            .collect();
+
+        let Pushed::PaneGone {
+            herdr_pane_id,
+            pane,
+        } = classify_pushed(&closed_line("w1:p1"), &kernel.panes)
+        else {
+            panic!("a pane.closed push classifies as a pane gone");
+        };
+        forget_pane(&kernel, &mut subscribed, herdr_pane_id, pane);
+
+        assert_eq!(
+            events.try_recv().expect("published"),
+            MuxEvent::PaneClosed(PaneClosed { pane: id })
+        );
+        assert!(
+            !lock(&kernel.pane_tabs).contains_key(&id),
+            "tab entry dropped"
+        );
+        assert!(
+            !lock(&kernel.last_status).contains_key(&id),
+            "status dropped"
+        );
+        assert!(
+            !subscribed.contains("w1:p1"),
+            "a reused id is treated as new"
+        );
+        assert!(
+            lock(&kernel.pane_tabs).contains_key(&other) && subscribed.contains("w1:p2"),
+            "the other pane is untouched"
+        );
+
+        // A closure for a pane the registry never translated has no neutral id
+        // to announce: it leaves the subscribed set and publishes nothing.
+        subscribed.insert("w1:p9".to_owned());
+        let Pushed::PaneGone {
+            herdr_pane_id,
+            pane,
+        } = classify_pushed(&closed_line("w1:p9"), &kernel.panes)
+        else {
+            panic!("a pane.closed push classifies as a pane gone");
+        };
+        forget_pane(&kernel, &mut subscribed, herdr_pane_id, pane);
+        assert!(!subscribed.contains("w1:p9"));
+        assert!(events.try_recv().is_err(), "nothing published");
+    }
+
+    /// A reconnect of the agent-status connection resyncs against the current
+    /// listing and publishes what moved while it was down: a closure for the
+    /// pane that vanished, the status change of the one that went working, then
+    /// the resync marker. The unchanged pane is not republished.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_status_reconnect_publishes_closures_every_change_then_resynced() {
+        let fake = FakeHerdr::start(FakeState {
+            panes: vec![
+                pane("w1:p1", HerdrAgentStatus::Blocked),
+                pane("w1:p2", HerdrAgentStatus::Idle),
+                pane("w1:p3", HerdrAgentStatus::Idle),
+            ],
+            ..FakeState::default()
+        });
+        let mut kernel = RunningKernel::start(&fake, no_probe_tuning());
+        let first = kernel.until_resynced().await;
+        assert_eq!(
+            first.len(),
+            3,
+            "a fresh kernel republishes every pane: {first:?}"
+        );
+        let id = |hid: &str| kernel.panes.id_for_herdr_pane(hid).expect("registered");
+        let (p2, p3) = (id("w1:p2"), id("w1:p3"));
+
+        fake.with(|s| {
+            s.panes = vec![
+                pane("w1:p1", HerdrAgentStatus::Blocked),
+                pane("w1:p2", HerdrAgentStatus::Working),
+            ];
+            // Dropping the push channel ends the fake's agent-status connection:
+            // the kernel reads EOF, backs off, reconnects and resyncs.
+            s.status_tx = None;
+        });
+        let after = kernel.until_resynced().await;
+
+        assert_eq!(after.len(), 2, "one closure and one change: {after:?}");
+        assert_eq!(after[0], MuxEvent::PaneClosed(PaneClosed { pane: p3 }));
+        match &after[1] {
+            MuxEvent::AgentStatusChanged(ev) => {
+                assert_eq!(ev.pane, p2);
+                assert_eq!(ev.status, AgentStatus::Working);
+                assert!(ev.synthetic);
+                assert_eq!(ev.tab, Some(1), "the listing's tab");
+            }
+            other => panic!("expected the status change, got {other:?}"),
+        }
+        fake.with(|s| {
+            assert_eq!(s.status_subscribes.len(), 2, "exactly one reconnect");
+            assert_eq!(s.lifecycle_subscribes, 1, "connection A stayed up");
+        });
         kernel.stop().await;
     }
 

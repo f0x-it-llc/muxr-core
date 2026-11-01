@@ -137,6 +137,8 @@ pub use types::{
     MAX_CLIENT_INSTANCE_ID_LEN, RelayControl, RelayViewState, ServerFrameStream, ViewStateEntry,
     ViewStateRegistry, next_attach_arrival,
 };
+// The session-token re-check cadence, shared with `WatchAgents` (`grpc::agent_ops`).
+pub(crate) use types::TOKEN_RECHECK_INTERVAL;
 
 // ─── Process-wide attach eviction registry ────────────────────────────────────
 
