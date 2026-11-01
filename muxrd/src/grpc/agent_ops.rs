@@ -36,7 +36,8 @@
 //!   stream** — and the answer is diffed whole-row against what the stream
 //!   holds: a `changed` per differing row, a `removed_pane_id` per row that left
 //!   the inventory. So a transition reaches the client as its status at once and
-//!   as the exact `ListAgents` row within one window; the later message wins.
+//!   as the exact `ListAgents` row once the next re-read lands (reads are spaced
+//!   a window apart, so that is a floor, not a bound); the later message wins.
 //! - A `PaneClosed` for a held pane becomes `removed_pane_id`.
 //! - The bus is lossy: a receiver that lagged, or a `Resynced` marker (the herdr
 //!   event kernel reconnected and re-observed everything), gets a fresh

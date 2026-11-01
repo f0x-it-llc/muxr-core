@@ -904,8 +904,9 @@ message AgentEvent {
     // replacing all client state.
     AgentList snapshot        = 1;
     // One agent's complete current state (insert or replace by pane_id). A
-    // transition may arrive as two `changed` messages: the status first, the
-    // reconciled row within 250 ms; the later one is authoritative.
+    // transition may arrive as two `changed` messages: the status first, then
+    // the reconciled row once the server's next backend re-read completes
+    // (re-reads are spaced at least 250 ms apart); the later one is authoritative.
     AgentMsg  changed         = 2;
     // The agent in this pane is gone (pane closed, or its agent exited).
     uint32    removed_pane_id = 3;
