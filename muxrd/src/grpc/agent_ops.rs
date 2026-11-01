@@ -1370,10 +1370,21 @@ pub(super) mod tests {
         let inv = Arc::clone(inv);
         Arc::new(move || {
             inv.calls.lock().unwrap().push(Instant::now());
-            let failing = inv
-                .fail_next
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
-                .is_ok();
+            let failing = loop {
+                let left = inv.fail_next.load(Ordering::SeqCst);
+                if left == 0 {
+                    break false;
+                }
+                let swap = inv.fail_next.compare_exchange(
+                    left,
+                    left - 1,
+                    Ordering::SeqCst,
+                    Ordering::SeqCst,
+                );
+                if swap.is_ok() {
+                    break true;
+                }
+            };
             if failing {
                 anyhow::bail!("agents: daemon unreachable at /run/stub.sock");
             }
