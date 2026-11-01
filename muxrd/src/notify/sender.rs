@@ -429,6 +429,10 @@ async fn run_notifier<T: RelayTransport>(
                         // layout moving is neither attention-worthy nor
                         // something a push payload could usefully carry.
                     }
+                    Ok(MuxEvent::PaneClosed(_)) => {
+                        // Not a notification source either: a pane going away
+                        // needs nobody's attention.
+                    }
                     Err(RecvError::Lagged(n)) => {
                         log::warn!("notify: event bus lagged, dropped {n} event(s)");
                     }
@@ -510,6 +514,9 @@ mod tests {
             workspace_name: Some("main".into()),
             status,
             title: Some("claude".into()),
+            kind: Some("claude".into()),
+            name: None,
+            tab: Some(3),
             synthetic,
         }
     }

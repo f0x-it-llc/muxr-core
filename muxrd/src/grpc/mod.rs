@@ -1,8 +1,9 @@
 //! grpc — tonic service implementation of the Muxr gRPC API.
 //!
 //! Surface: `GetVersion`, `Login` (public, no bearer), `AttachTerminal` (bidi
-//! relay), `ListSessions`/`GetLayout`/`GetSpaces`/`ListAgents` (typed reads), and
-//! the pane/tab/session/space mutating ops.
+//! relay), `ListSessions`/`GetLayout`/`GetSpaces`/`ListAgents` (typed reads),
+//! `WatchAgents` (server-streaming read over the internal event bus), and the
+//! pane/tab/session/space mutating ops.
 //!
 //! Auth note: `Login` and `GetVersion` are **public** (no bearer required).
 //! Every other RPC requires a valid bearer token injected by the tower layer in
@@ -96,6 +97,12 @@ pub struct MuxrService {
     /// [`MuxrService::with_push_device_store`] (tests point it at a temp
     /// path instead of the real data dir).
     push_devices: crate::notify::devices::PushDeviceStore,
+    /// The internal agent-event bus (`multiplexer::events`), when one exists —
+    /// only a server driving herdr runs the event kernel that feeds it.
+    /// `WatchAgents` subscribes a receiver per stream; `GetVersion` advertises
+    /// `"agents-stream"` only when it is set. `None` by default; set via
+    /// [`MuxrService::with_event_bus`], the same builder seam as the relay URL.
+    event_bus: Option<crate::multiplexer::events::EventBus>,
 }
 
 impl Default for MuxrService {
@@ -129,6 +136,7 @@ impl MuxrService {
             ),
             notify_relay_url: None,
             push_devices: crate::notify::devices::PushDeviceStore::new(),
+            event_bus: None,
         }
     }
 
@@ -156,6 +164,7 @@ impl MuxrService {
             backends,
             notify_relay_url: None,
             push_devices: crate::notify::devices::PushDeviceStore::new(),
+            event_bus: None,
         }
     }
 
@@ -180,6 +189,19 @@ impl MuxrService {
         push_devices: crate::notify::devices::PushDeviceStore,
     ) -> Self {
         self.push_devices = push_devices;
+        self
+    }
+
+    /// Hand this service the internal agent-event bus (see the `event_bus` field
+    /// doc). Builder-style, chainable like [`MuxrService::with_notify_relay_url`];
+    /// `bin/muxrd.rs` creates the bus before the service so both the event
+    /// kernel and `WatchAgents` share it.
+    #[must_use]
+    pub fn with_event_bus(
+        mut self,
+        event_bus: Option<crate::multiplexer::events::EventBus>,
+    ) -> Self {
+        self.event_bus = event_bus;
         self
     }
 
@@ -508,6 +530,16 @@ impl Muxr for MuxrService {
         request: Request<SessionRef>,
     ) -> Result<Response<AgentList>, Status> {
         self.list_agents_impl(request).await
+    }
+
+    type WatchAgentsStream = agent_ops::AgentEventStream;
+
+    /// Stream a session's agents: one snapshot, then deltas. Read-only allowed.
+    async fn watch_agents(
+        &self,
+        request: Request<SessionRef>,
+    ) -> Result<Response<Self::WatchAgentsStream>, Status> {
+        self.watch_agents_impl(request).await
     }
 
     // ── Push-notification device registry ───────────────────────────────────

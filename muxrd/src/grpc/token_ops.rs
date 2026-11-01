@@ -74,6 +74,12 @@ impl MuxrService {
         if self.backends.iter().any(|(_, b)| b.supports_agents()) {
             capabilities.push("agents".to_owned());
         }
+        // Additive capability flag — WatchAgents delivers live changes, which
+        // needs the internal event bus (herdr's event kernel feeds it). Without
+        // one the stream only sends its snapshot and ends, so clients poll.
+        if self.event_bus.is_some() {
+            capabilities.push("agents-stream".to_owned());
+        }
 
         let info = VersionInfo {
             server_version: SERVER_VERSION.to_owned(),
@@ -411,6 +417,40 @@ mod tests {
         assert!(
             caps.iter().any(|c| c == "mouse-input"),
             "existing flags kept"
+        );
+    }
+
+    // ── "agents-stream" capability ───────────────────────────────────────────
+
+    /// No event bus → no live agent feed → no `agents-stream`, even with an
+    /// agents backend served.
+    #[tokio::test]
+    async fn without_an_event_bus_agents_stream_is_not_advertised() {
+        let service = MuxrService::with_backends(BackendSet::single(
+            BackendKind::Herdr,
+            Arc::new(crate::grpc::agent_ops::tests::AgentsBackend::default()),
+        ));
+        let caps = capabilities(&service).await;
+        assert!(
+            !caps.iter().any(|c| c == "agents-stream"),
+            "no bus must not advertise agents-stream: {caps:?}"
+        );
+        assert!(caps.iter().any(|c| c == "agents"), "ListAgents still works");
+    }
+
+    /// A bus handed to the service → `agents-stream` advertised.
+    #[tokio::test]
+    async fn with_an_event_bus_agents_stream_is_advertised() {
+        let (bus, _rx) = tokio::sync::broadcast::channel(4);
+        let service = MuxrService::with_backends(BackendSet::single(
+            BackendKind::Herdr,
+            Arc::new(crate::grpc::agent_ops::tests::AgentsBackend::default()),
+        ))
+        .with_event_bus(Some(bus));
+        let caps = capabilities(&service).await;
+        assert!(
+            caps.iter().any(|c| c == "agents-stream"),
+            "a bus must advertise agents-stream: {caps:?}"
         );
     }
 }
