@@ -121,6 +121,26 @@ service Muxr {
   // INTERNAL.
   rpc ListAgents(SessionRef) returns (AgentList);
 
+  // Watch every agent in a session, session-wide across all of its spaces. A
+  // read: permitted for read-only sessions, like ListAgents, and NOT
+  // relay-routed. The stream opens with one snapshot (exactly what ListAgents
+  // would answer), then carries deltas: a `changed` per agent whose state moved
+  // (the agent's whole current AgentMsg, not a diff) and a `removed_pane_id`
+  // when an agent's pane closes or its agent leaves the inventory. A server
+  // that fell behind its own event feed, or whose feed reconnected to the
+  // backend, sends a fresh `snapshot`, which replaces everything the client
+  // holds. A backend without an agent concept (e.g. zellij) sends the empty
+  // snapshot and ends the stream; a server with no live agent event feed sends
+  // its one snapshot and ends (poll ListAgents when "agents-stream" is absent).
+  // Only SessionRef.session is read. Errors are ListAgents' own, before the
+  // first message. After it, a failed backend re-read never ends the stream:
+  // the server keeps what it already sent and retries in the next window. The
+  // session token is re-validated every 30 s, even while the client is not
+  // reading, and a revoked one ends the stream with UNAUTHENTICATED; otherwise
+  // the stream ends only when the client goes away or the server stops.
+  // Advertised by the "agents-stream" capability.
+  rpc WatchAgents(SessionRef) returns (stream AgentEvent);
+
   // ─── Phase F: token management ─────────────────────────────────────────────
   // Wraps the same zellij `web_authentication_tokens` ops the CLI uses. All
   // require bearer auth and are ADMIN-gated: read-only session tokens are
@@ -184,6 +204,8 @@ message VersionInfo {
   //   "agents" — at least one served backend reports agents: ListAgents can
   //     return entries, PaneMsg.agent and SessionInfo.agents may be set.
   //     Absent = ListAgents answers empty and those fields stay unset.
+  //   "agents-stream" — WatchAgents delivers live agent changes. Absent = poll
+  //     ListAgents instead (WatchAgents only sends its snapshot and ends).
   // Clients must ignore unknown values.
   repeated string capabilities = 5;
   // The push-notification relay URL clients should register devices with.
@@ -872,4 +894,21 @@ message AgentList {
   repeated AgentMsg agents  = 1;
   // Counts over `agents`. Always set, even when `agents` is empty.
   AgentSummary      summary = 2;
+}
+
+// One WatchAgents message.
+message AgentEvent {
+  oneof kind {
+    // The whole inventory, as ListAgents answers it. Always the first message;
+    // sent again after the server fell behind or its event feed reconnected,
+    // replacing all client state.
+    AgentList snapshot        = 1;
+    // One agent's complete current state (insert or replace by pane_id). A
+    // transition may arrive as two `changed` messages: the status first, then
+    // the reconciled row once the server's next backend re-read completes
+    // (re-reads are spaced at least 250 ms apart); the later one is authoritative.
+    AgentMsg  changed         = 2;
+    // The agent in this pane is gone (pane closed, or its agent exited).
+    uint32    removed_pane_id = 3;
+  }
 }

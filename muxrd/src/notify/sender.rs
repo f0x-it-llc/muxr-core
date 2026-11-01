@@ -429,6 +429,15 @@ async fn run_notifier<T: RelayTransport>(
                         // layout moving is neither attention-worthy nor
                         // something a push payload could usefully carry.
                     }
+                    Ok(MuxEvent::PaneClosed(_)) => {
+                        // Not a notification source either: a pane going away
+                        // needs nobody's attention.
+                    }
+                    Ok(MuxEvent::Resynced) => {
+                        // A marker for consumers that mirror state. Whatever the
+                        // resync re-observed already arrived as status events,
+                        // and the trigger filter decided those.
+                    }
                     Err(RecvError::Lagged(n)) => {
                         log::warn!("notify: event bus lagged, dropped {n} event(s)");
                     }
@@ -510,6 +519,9 @@ mod tests {
             workspace_name: Some("main".into()),
             status,
             title: Some("claude".into()),
+            kind: Some("claude".into()),
+            name: None,
+            tab: Some(3),
             synthetic,
         }
     }
@@ -608,8 +620,18 @@ mod tests {
 
     #[test]
     fn non_trigger_status_builds_nothing() {
-        assert!(build_content(&ev(AgentStatus::Working, false), "normal").is_none());
-        assert!(build_content(&ev(AgentStatus::Idle, false), "normal").is_none());
+        for synthetic in [false, true] {
+            for status in [
+                AgentStatus::Working,
+                AgentStatus::Idle,
+                AgentStatus::Unknown,
+            ] {
+                assert!(
+                    build_content(&ev(status, synthetic), "normal").is_none(),
+                    "{status:?} (synthetic: {synthetic}) is never a notification"
+                );
+            }
+        }
     }
 
     #[test]
@@ -699,6 +721,55 @@ mod tests {
             0,
             "a 404/410 must prune the device from the registry"
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn a_resync_republishing_every_status_notifies_only_the_blocked_one() {
+        // The kernel's resync republishes EVERY changed status (all five), the
+        // closures it pruned, and a closing marker; only the blocked pane may
+        // reach a device.
+        let path = temp_store_path("resync");
+        let store = PushDeviceStore::at_path(path.clone());
+        store.upsert(device("phone-a", 'a')).unwrap();
+        let transport = MockTransport::new(SendOutcome::Ok);
+        let calls = transport.calls();
+
+        let (bus, _) = broadcast::channel(crate::multiplexer::events::EVENT_BUS_CAPACITY);
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let task = tokio::spawn(run_notifier(
+            bus.subscribe(),
+            shutdown_rx,
+            store.clone(),
+            transport,
+            "normal".to_owned(),
+        ));
+        bus.send(MuxEvent::PaneClosed(
+            crate::multiplexer::events::PaneClosed { pane: 4 },
+        ))
+        .unwrap();
+        for status in [
+            AgentStatus::Working,
+            AgentStatus::Idle,
+            AgentStatus::Unknown,
+            AgentStatus::Done,
+            AgentStatus::Blocked,
+        ] {
+            bus.send(MuxEvent::AgentStatusChanged(ev(status, true)))
+                .unwrap();
+        }
+        bus.send(MuxEvent::Resynced).unwrap();
+        // Closing the bus ends the notifier once it has drained every event.
+        drop(bus);
+        tokio::time::timeout(Duration::from_secs(5), task)
+            .await
+            .expect("the notifier stops once the bus closes")
+            .expect("the notifier task does not panic");
+        drop(shutdown_tx);
+
+        let calls = calls.lock().unwrap();
+        assert_eq!(calls.len(), 1, "only the blocked pane notifies: {calls:?}");
+        assert_eq!(calls[0].1.kind, "agent_blocked");
         let _ = std::fs::remove_file(&path);
     }
 

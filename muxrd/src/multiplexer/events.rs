@@ -6,9 +6,15 @@
 //! is the shared foundation for the notifications notifier (task 05) and the
 //! future agents screen — both are just *consumers* of this same bus.
 //!
-//! Two event families ride it today: [`AgentStatusChanged`], which a consumer may
-//! act on directly because a status is a level, and [`LayoutChanged`], which is
-//! purely a hint to re-query. Neither is guaranteed delivery.
+//! Four event families ride it today: [`AgentStatusChanged`], which a consumer
+//! may act on directly because a status is a level, [`PaneClosed`], which tells a
+//! consumer to forget a pane, [`LayoutChanged`], which is purely a hint to
+//! re-query, and [`MuxEvent::Resynced`], which marks the end of a post-reconnect
+//! resync so a consumer mirroring state can re-read it whole. None is guaranteed
+//! delivery.
+//!
+//! Consumers: the push notifier ([`notify::sender`](crate::notify::sender)) and
+//! the `WatchAgents` stream (`grpc::agent_ops`), each on its own receiver.
 //!
 //! ## Design notes
 //!
@@ -54,6 +60,16 @@ pub struct AgentStatusChanged {
     pub status: AgentStatus,
     /// Pane / agent title, when herdr carries one.
     pub title: Option<String>,
+    /// Agent kind — herdr's canonical `agent` label, else its `display_agent` —
+    /// when the source carries either. `None` means "not carried here", not "no
+    /// agent": a consumer that needs it re-reads the inventory.
+    pub kind: Option<String>,
+    /// User-facing agent name, when the source carries one.
+    pub name: Option<String>,
+    /// Neutral tab id (registry-translated) of the tab holding the pane, when
+    /// known: the resync reads it off the pane listing, and a push inherits the
+    /// kernel's last observation for that pane.
+    pub tab: Option<u64>,
     /// `true` when emitted by the post-reconnect resync (a re-observation of
     /// current state), `false` for a live pushed transition.
     pub synthetic: bool,
@@ -79,6 +95,16 @@ pub struct LayoutChanged {
     pub tab: u64,
 }
 
+/// A pane closed or exited, so any agent it ran is gone with it.
+///
+/// Published by the herdr event kernel for a pane its registry knows; a pane
+/// muxrd never translated has no neutral id to announce and is not published.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PaneClosed {
+    /// Neutral pane id (registry-translated from herdr's opaque `pane_id`).
+    pub pane: u32,
+}
+
 /// A neutral event published on the internal bus.
 ///
 /// An enum so the notifier / agents-screen consumers can grow to further herdr
@@ -90,6 +116,16 @@ pub enum MuxEvent {
     AgentStatusChanged(AgentStatusChanged),
     /// A tab's pane layout changed. Advisory — see [`LayoutChanged`].
     LayoutChanged(LayoutChanged),
+    /// A pane closed or exited. See [`PaneClosed`].
+    PaneClosed(PaneClosed),
+    /// The herdr event kernel finished a post-reconnect resync: everything it
+    /// re-observed (closures, status changes) has been published before this.
+    /// Published once per resync, successful or not, because events pushed
+    /// while the agent-status subscription was down are lost either way. A
+    /// consumer that mirrors state re-reads it whole; one that only reacts to
+    /// transitions (the push notifier) ignores it. The bus is fed by the one
+    /// kernel serving herdr's single session, so it names nothing.
+    Resynced,
 }
 
 /// The producer half of the internal event bus. The event kernel holds one and
@@ -110,6 +146,9 @@ mod tests {
             workspace_name: Some("main".into()),
             status: AgentStatus::Blocked,
             title: Some("claude".into()),
+            kind: Some("claude".into()),
+            name: None,
+            tab: Some(4),
             synthetic: false,
         });
         tx.send(ev.clone()).expect("a subscriber exists");
@@ -132,12 +171,35 @@ mod tests {
             workspace_name: None,
             status: AgentStatus::Working,
             title: None,
+            kind: None,
+            name: None,
+            tab: None,
             synthetic: false,
         });
         tx.send(layout.clone()).expect("a subscriber exists");
         tx.send(status.clone()).expect("a subscriber exists");
         assert_eq!(rx.try_recv().expect("layout event"), layout);
         assert_eq!(rx.try_recv().expect("status event"), status);
+    }
+
+    #[test]
+    fn bus_carries_pane_closures_alongside_agent_status() {
+        let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let mut rx = tx.subscribe();
+        let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
+        tx.send(closed.clone()).expect("a subscriber exists");
+        assert_eq!(rx.try_recv().expect("closure event"), closed);
+    }
+
+    #[test]
+    fn bus_carries_the_resync_marker_after_what_the_resync_published() {
+        let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
+        let mut rx = tx.subscribe();
+        let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
+        tx.send(closed.clone()).expect("a subscriber exists");
+        tx.send(MuxEvent::Resynced).expect("a subscriber exists");
+        assert_eq!(rx.try_recv().expect("closure event"), closed);
+        assert_eq!(rx.try_recv().expect("resync marker"), MuxEvent::Resynced);
     }
 
     #[test]
@@ -152,6 +214,9 @@ mod tests {
             workspace_name: None,
             status: AgentStatus::Done,
             title: None,
+            kind: None,
+            name: None,
+            tab: None,
             synthetic: true,
         });
         assert!(tx.send(ev).is_err(), "no receivers → Err, not a panic");
