@@ -753,9 +753,20 @@ async fn serve(
     // and the control-socket listener (StatusInfo.push_device_count).
     let push_devices = muxrd::notify::devices::PushDeviceStore::new();
 
+    // The internal agent-event bus exists only when herdr is present (its event
+    // kernel is the sole producer). Created BEFORE the service so `WatchAgents`
+    // subscribes to the very bus the kernel and the notifier use below; a
+    // zellij-only server creates none, and WatchAgents then answers its empty
+    // snapshot and ends. The initial receiver is dropped at once — publishing
+    // with no receiver is a recoverable no-op, exactly as before.
+    let event_bus: Option<muxrd::multiplexer::events::EventBus> = herdr_backend
+        .as_ref()
+        .map(|_| tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY).0);
+
     let service = MuxrService::with_backends(backends)
         .with_notify_relay_url(notify_relay_url.clone())
-        .with_push_device_store(push_devices.clone());
+        .with_push_device_store(push_devices.clone())
+        .with_event_bus(event_bus.clone());
 
     // Retained inputs for the task-05 outbound notifier, spawned in the herdr
     // branch below AFTER `spawn_listener` consumes the originals. Built only when
@@ -794,15 +805,13 @@ async fn serve(
 
     // ── herdr event kernel (task 01) ─────────────────────────────────────────
     // When a herdr backend is present, spawn the persistent `events.subscribe`
-    // consumer, publishing agent-status transitions onto a process-local
-    // broadcast bus. The bus handle is kept in scope so the notifications
-    // notifier (task 05) can consume it later; today it has no consumer and the
-    // kernel's sends are simply dropped. A zellij-only server spawns nothing and
-    // creates no bus (zero behaviour change).
-    let _event_bus: Option<muxrd::multiplexer::events::EventBus> = match herdr_backend {
-        Some(backend) => {
-            let (bus, _rx0) =
-                tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY);
+    // consumer, publishing agent-status transitions onto the process-local
+    // broadcast bus created above. Its consumers are the outbound notifier
+    // (below) and every live `WatchAgents` stream (through the service). A
+    // zellij-only server spawns nothing and has no bus.
+    let _event_bus: Option<muxrd::multiplexer::events::EventBus> = match (herdr_backend, event_bus)
+    {
+        (Some(backend), Some(bus)) => {
             muxrd::multiplexer::spawn_event_kernel(
                 backend.as_ref(),
                 bus.clone(),
@@ -838,7 +847,7 @@ async fn serve(
 
             Some(bus)
         }
-        None => None,
+        _ => None,
     };
 
     let transport_desc = match cert_mode {
