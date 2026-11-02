@@ -83,9 +83,10 @@ pub enum ResizeDir {
 /// [`MuxSender::toggle_fullscreen`].
 ///
 /// This is the *resolved* context — the relay (P1.03) derives it either from the
-/// client-supplied hint or from a live `pane_is_floating_with_visibility` query
-/// before calling the sender, so the sender itself performs no IPC query. It is
-/// the neutral mirror of the relay's `FloatingHint`.
+/// client-supplied hint or from a live [`PaneFullscreenContext`] query before
+/// calling the sender, so the sender itself performs no IPC query. It is the
+/// neutral mirror of the relay's `FloatingHint`, plus the tab-level fullscreen
+/// flag only the live query can supply.
 ///
 /// [`MuxSender::toggle_fullscreen`]: super::MuxSender::toggle_fullscreen
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +97,80 @@ pub struct FullscreenHint {
     pub floating_visible: bool,
     /// The target is the currently-focused, visible floating pane.
     pub is_focused_floating: bool,
+    /// The target's tab ALREADY has a fullscreen pane
+    /// ([`TabSnapshot::fullscreen_active`], a tab-level flag). The zellij
+    /// sender then exits by toggling the relay client's own active pane, with
+    /// no focus move: zellij computes the per-pane `is_fullscreen` per client,
+    /// so the pane id a caller names may not be the fullscreened one, and
+    /// focusing it first would move the fullscreen onto it. `false` when
+    /// unknown (a client-supplied hint carries no tab state).
+    pub tab_fullscreen: bool,
+}
+
+/// Live, backend-reported context for a fullscreen toggle on one pane, read by
+/// `MuxBackend::pane_fullscreen_context` in a single query.
+///
+/// The relay resolves it into either a refusal (unknown pane, hidden floating
+/// pane) or a [`FullscreenHint`]. A backend that cannot report a field leaves
+/// it at the permissive value the trait default documents.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PaneFullscreenContext {
+    /// The pane exists in the session.
+    pub exists: bool,
+    /// The pane is a floating pane.
+    pub is_floating: bool,
+    /// Floating panes are visible in the pane's tab.
+    pub floating_visible: bool,
+    /// The floating pane holding focus in the pane's tab, if any.
+    pub focused_floating: Option<PaneRef>,
+    /// The pane's tab already has a fullscreen pane.
+    pub tab_fullscreen: bool,
+}
+
+impl PaneFullscreenContext {
+    /// The context of a pane the backend does not report.
+    pub fn not_found() -> Self {
+        Self {
+            exists: false,
+            is_floating: false,
+            floating_visible: false,
+            focused_floating: None,
+            tab_fullscreen: false,
+        }
+    }
+
+    /// Resolve `pane`'s context from a [`LayoutSnapshot`]. The pane is looked
+    /// up in every tab; the floating visibility, focused floating pane and
+    /// fullscreen flag are then read from the tab that HOLDS it — not from the
+    /// tab the snapshot marks active, which zellij reports as a union across
+    /// every attached client.
+    pub fn from_snapshot(snapshot: &LayoutSnapshot, pane: PaneRef) -> Self {
+        for tab in &snapshot.tabs {
+            let Some(target) = tab
+                .panes
+                .iter()
+                .find(|p| p.id == pane.id && p.is_plugin == pane.is_plugin)
+            else {
+                continue;
+            };
+            let focused_floating = tab
+                .panes
+                .iter()
+                .find(|p| p.is_floating && p.is_focused)
+                .map(|p| PaneRef {
+                    id: p.id,
+                    is_plugin: p.is_plugin,
+                });
+            return Self {
+                exists: true,
+                is_floating: target.is_floating,
+                floating_visible: tab.floating_panes_visible,
+                focused_floating,
+                tab_fullscreen: tab.fullscreen_active,
+            };
+        }
+        Self::not_found()
+    }
 }
 
 // ─── Layout snapshot ────────────────────────────────────────────────────────────

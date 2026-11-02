@@ -7,13 +7,16 @@ use tonic::Streaming;
 
 use tokio::sync::mpsc;
 
-use crate::multiplexer::{FullscreenHint, MuxBackend, MuxMouseKind, MuxSender};
+use crate::multiplexer::{
+    FullscreenHint, MuxBackend, MuxMouseKind, MuxSender, PaneFullscreenContext, PaneRef,
+};
 use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
 use super::reader::ShutdownGuard;
 use super::types::{
-    AttachLease, ControlRegistry, FLOAT_QUERY_TIMEOUT, InFlightQuery, MAX_INPUT_FRAME_BYTES,
-    QueryReply, QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL, ViewStateRegistry,
+    AttachLease, ControlRegistry, FLOAT_QUERY_TIMEOUT, FloatingHint, InFlightQuery,
+    MAX_INPUT_FRAME_BYTES, QueryReply, QueryTx, RelayControl, TOKEN_RECHECK_INTERVAL,
+    ViewStateRegistry,
 };
 
 /// How often the inbound loop checks whether the reader thread has exited.
@@ -277,82 +280,41 @@ pub(crate) async fn inbound_loop(
                     }
                     let _ = reply.send(result);
                 }
-                Some(RelayControl::ToggleFullscreen { pane, hint }) => {
+                Some(RelayControl::ToggleFullscreen { pane, hint, reply }) => {
                     // A read-only token never reaches here: `read_only_denies`
                     // dropped this control above, because fullscreen rewrites the
                     // layout every client on the tab sees.
-                    // Resolve the floating context: (is_floating,
-                    // floating_visible, is_focused_floating).
                     //
-                    // Bug 2c: prefer the CLIENT HINT — the mobile client
-                    // already polls all three, so a hint lets us skip a
-                    // synchronous IPC query on this select-loop hot path
-                    // (the query stalled input forwarding + the bearer
-                    // recheck for a whole round trip, and spawned yet another
-                    // ephemeral client on the shared session).
-                    //
-                    // FALLBACK (no hint — keyboard-driven / hint-less
-                    // callers): a live query through the backend so an
-                    // out-of-band SHOW/HIDE is reflected immediately (M4
-                    // behaviour). HANG FIX (BE-HANG) preserved: the blocking
-                    // query runs in spawn_blocking wrapped in
-                    // tokio::time::timeout so a stalled socket can never wedge
-                    // the loop; on timeout we skip the toggle rather than hang.
-                    let resolved = match hint {
-                        Some(h) => FullscreenHint {
-                            is_floating: h.target_is_floating,
-                            floating_visible: h.floating_visible,
-                            is_focused_floating: h.target_is_focused_floating,
-                        },
-                        None => {
-                            let backend = backend.clone();
-                            let s = session.clone();
-                            let query_fut = tokio::task::spawn_blocking(move || {
-                                backend.pane_is_floating_with_visibility(&s, pane)
-                            });
-                            match tokio::time::timeout(FLOAT_QUERY_TIMEOUT, query_fut).await {
-                                Ok(join_result) => {
-                                    let (f, v, focused) = join_result
-                                        .unwrap_or(Ok((false, false, None)))
-                                        .unwrap_or((false, false, None));
-                                    FullscreenHint {
-                                        is_floating: f,
-                                        floating_visible: v,
-                                        is_focused_floating: focused == Some(pane),
-                                    }
-                                }
-                                Err(_elapsed) => {
-                                    log::warn!(
-                                        "relay inbound [{session}]: floating-pane query \
-                                         timed out after {FLOAT_QUERY_TIMEOUT:?} — \
-                                         skipping ToggleFullscreen to avoid wedging the loop"
-                                    );
-                                    // Degrade: skip the toggle rather than hang.
-                                    // The user can retry; the session is not frozen.
-                                    continue;
+                    // `toggle_fullscreen_once` resolves the target (client hint
+                    // or live query), REFUSES an unknown or hidden floating
+                    // pane without sending anything, and otherwise sends the
+                    // backend's action sequence. Every outcome is replied so
+                    // the gRPC handler answers ok:false on a refusal instead of
+                    // a fire-and-forget ok:true.
+                    let outcome =
+                        toggle_fullscreen_once(&mut *sender, &backend, &session, pane, hint).await;
+                    if let Ok(applied) = &outcome {
+                        // The relay updates its OWN view state from the SAME
+                        // resolved hint (key by connection_id so concurrent
+                        // relays each update their own slot):
+                        //   - hide path → focus is handed back to an untracked
+                        //     tiled pane → None;
+                        //   - exit path (tab already fullscreen) → no focus move
+                        //     was sent, so the tracked pane is left as it was;
+                        //   - fill / enter path → this client now focuses `pane`.
+                        if let Some(mut entry) = view_state.get_mut(&connection_id) {
+                            match toggle_focus_effect(applied) {
+                                ToggleFocusEffect::Cleared => entry.state.focused_pane = None,
+                                ToggleFocusEffect::Unchanged => {}
+                                ToggleFocusEffect::Focused => {
+                                    entry.state.focused_pane = Some(pane)
                                 }
                             }
                         }
-                    };
-
-                    // The fill-vs-hide-vs-tiled action sequence is
-                    // backend-specific and lives behind `toggle_fullscreen`
-                    // (the zellij impl in `multiplexer::zellij`). The relay
-                    // updates its OWN view state from the SAME resolved hint:
-                    //   - hide path (floating, visible, focused) → focus is
-                    //     handed back to an untracked tiled pane → None;
-                    //   - fill path / tiled path → this client now focuses
-                    //     `pane` → Some(pane).
-                    let is_hide = resolved.is_floating
-                        && resolved.floating_visible
-                        && resolved.is_focused_floating;
-                    if let Err(e) = sender.toggle_fullscreen(pane, resolved) {
-                        log::warn!("relay inbound [{session}]: ToggleFullscreen failed: {e:#}");
-                    } else {
-                        // Key by connection_id so concurrent relays each update their own slot.
-                        if let Some(mut entry) = view_state.get_mut(&connection_id) {
-                            entry.state.focused_pane = if is_hide { None } else { Some(pane) };
-                        }
+                    }
+                    if let Some(reply) = reply {
+                        // The receiver may be gone (RPC timed out) — harmless.
+                        let _ = reply.send(outcome.map(|_| ()));
                     }
                 }
 
@@ -509,11 +471,14 @@ fn floored_resize(r: &crate::proto::Resize) -> (u16, u16) {
 /// purpose: a new control variant has to state which side of the boundary it
 /// falls on before it compiles.
 ///
-/// A *denied* control that carried a reply channel would have that channel
-/// dropped by [`gate_control`], which the waiting RPC sees as a cancelled
-/// receiver rather than an error. The one denied control carries none; a future
-/// denied variant that does must be refused in its own arm, with an explicit
-/// reply, instead of here.
+/// A *denied* control that carried a reply channel has that channel dropped by
+/// [`gate_control`], which the waiting RPC sees as a cancelled receiver rather
+/// than an error. The one denied control, `ToggleFullscreen`, carries an
+/// optional reply; its RPC handler (`grpc/pane_ops.rs`) reads a cancelled
+/// receiver as "nothing was applied" and answers `ok:false`, and in practice a
+/// read-only caller is rejected at the RPC gate before routing. A future denied
+/// variant whose caller cannot treat a cancelled receiver that way must be
+/// refused in its own arm, with an explicit reply, instead of here.
 fn read_only_denies(cmd: &RelayControl) -> Option<&'static str> {
     match cmd {
         RelayControl::SwitchTab(_)
@@ -537,6 +502,188 @@ fn gate_control(cmd: Option<RelayControl>, read_only: bool, session: &str) -> Op
         return None;
     }
     Some(cmd)
+}
+
+// ─── Fullscreen toggle ───────────────────────────────────────────────────────
+
+/// `"pane 27"` / `"plugin pane 3"` — the target as named in a refusal message.
+fn pane_label(pane: PaneRef) -> String {
+    if pane.is_plugin {
+        format!("plugin pane {}", pane.id)
+    } else {
+        format!("pane {}", pane.id)
+    }
+}
+
+/// The refusal for a hidden floating target. Acting on one is what dropped the
+/// relay on the device gate: making it fill needs the floating layer shown,
+/// and zellij answers the relay's own `ShowFloatingPanes` with `Exit`.
+fn hidden_floating_refusal(pane: PaneRef) -> String {
+    format!(
+        "{} is a hidden floating pane; fullscreen applies to tiled panes",
+        pane_label(pane)
+    )
+}
+
+/// Resolve a LIVE backend context into the hint to apply, or a refusal.
+///
+/// Refused, with no action sent: a pane the backend does not report, and a
+/// floating pane whose floating layer is hidden. Everything else keeps its
+/// existing path — a visible focused floating pane hides the layer, a visible
+/// unfocused one is resized to fill, a tiled one enters fullscreen — except
+/// that a tiled target whose tab is ALREADY fullscreen carries
+/// `tab_fullscreen`, which makes the sender exit by toggling the relay
+/// client's active pane instead of refocusing the named pane.
+fn resolve_live_context(
+    pane: PaneRef,
+    ctx: PaneFullscreenContext,
+) -> Result<FullscreenHint, String> {
+    if !ctx.exists {
+        return Err(format!("{} not found", pane_label(pane)));
+    }
+    if ctx.is_floating && !ctx.floating_visible {
+        return Err(hidden_floating_refusal(pane));
+    }
+    Ok(FullscreenHint {
+        is_floating: ctx.is_floating,
+        floating_visible: ctx.floating_visible,
+        is_focused_floating: ctx.is_floating && ctx.focused_floating == Some(pane),
+        tab_fullscreen: ctx.tab_fullscreen,
+    })
+}
+
+/// Resolve a CLIENT-SUPPLIED hint (Bug 2c) into the hint to apply, or a
+/// refusal. A hint cannot say whether the pane exists or whether its tab is
+/// already fullscreen, so `tab_fullscreen` stays `false` (the enter sequence);
+/// a hint that attests a hidden floating target is refused like a live one.
+fn resolve_client_hint(pane: PaneRef, hint: FloatingHint) -> Result<FullscreenHint, String> {
+    if hint.target_is_floating && !hint.floating_visible {
+        return Err(hidden_floating_refusal(pane));
+    }
+    Ok(FullscreenHint {
+        is_floating: hint.target_is_floating,
+        floating_visible: hint.floating_visible,
+        is_focused_floating: hint.target_is_focused_floating,
+        tab_fullscreen: false,
+    })
+}
+
+/// Resolve the toggle target: the client hint when one is attested, otherwise
+/// a live [`MuxBackend::pane_fullscreen_context`] query.
+///
+/// Bug 2c: prefer the CLIENT HINT — it skips a synchronous IPC query on the
+/// select-loop hot path. FALLBACK (no hint): the live query, so out-of-band
+/// state is reflected immediately (M4). HANG FIX (BE-HANG) preserved: the
+/// blocking query runs in `spawn_blocking` under [`FLOAT_QUERY_TIMEOUT`], so a
+/// stalled socket can never wedge the loop. A query that times out or fails
+/// sends nothing and answers an error — it no longer degrades to the tiled
+/// sequence, which could move the fullscreen onto the wrong pane. The caller
+/// gets a generic message; the cause goes to the log.
+async fn resolve_toggle_target(
+    backend: &Arc<dyn MuxBackend>,
+    session: &str,
+    pane: PaneRef,
+    hint: Option<FloatingHint>,
+) -> Result<FullscreenHint, String> {
+    if let Some(h) = hint {
+        return resolve_client_hint(pane, h);
+    }
+    let query_backend = backend.clone();
+    let s = session.to_owned();
+    let query_fut =
+        tokio::task::spawn_blocking(move || query_backend.pane_fullscreen_context(&s, pane));
+    match tokio::time::timeout(FLOAT_QUERY_TIMEOUT, query_fut).await {
+        Ok(Ok(Ok(ctx))) => resolve_live_context(pane, ctx),
+        Ok(Ok(Err(e))) => {
+            log::warn!(
+                "relay inbound [{session}]: live pane query for {pane:?} failed — \
+                 skipping ToggleFullscreen: {e:#}"
+            );
+            Err(format!(
+                "could not read the live state of {}; fullscreen skipped",
+                pane_label(pane)
+            ))
+        }
+        Ok(Err(join_err)) => {
+            log::warn!(
+                "relay inbound [{session}]: live pane query for {pane:?} panicked — \
+                 skipping ToggleFullscreen: {join_err}"
+            );
+            Err(format!(
+                "could not read the live state of {}; fullscreen skipped",
+                pane_label(pane)
+            ))
+        }
+        Err(_elapsed) => {
+            log::warn!(
+                "relay inbound [{session}]: live pane query timed out after \
+                 {FLOAT_QUERY_TIMEOUT:?} — skipping ToggleFullscreen to avoid wedging the loop"
+            );
+            // Degrade: skip the toggle rather than hang. The user can retry;
+            // the session is not frozen.
+            Err(format!(
+                "live state of {} timed out; fullscreen skipped",
+                pane_label(pane)
+            ))
+        }
+    }
+}
+
+/// One fullscreen toggle: resolve the target, then — unless it was refused —
+/// send the backend's action sequence through `sender`. Returns the applied
+/// hint (the caller derives its view-state update from it) or the message the
+/// RPC answers `ok:false` with. A refusal sends nothing.
+async fn toggle_fullscreen_once(
+    sender: &mut dyn MuxSender,
+    backend: &Arc<dyn MuxBackend>,
+    session: &str,
+    pane: PaneRef,
+    hint: Option<FloatingHint>,
+) -> Result<FullscreenHint, String> {
+    let resolved = match resolve_toggle_target(backend, session, pane, hint).await {
+        Ok(resolved) => resolved,
+        Err(refusal) => {
+            log::info!("relay inbound [{session}]: ToggleFullscreen refused: {refusal}");
+            return Err(refusal);
+        }
+    };
+    // The hide / fill / exit / enter action sequence is backend-specific and
+    // lives behind `toggle_fullscreen` (the zellij impl in `multiplexer::zellij`).
+    if let Err(e) = sender.toggle_fullscreen(pane, resolved) {
+        log::warn!("relay inbound [{session}]: ToggleFullscreen failed: {e:#}");
+        return Err(format!(
+            "fullscreen toggle for {} could not be sent",
+            pane_label(pane)
+        ));
+    }
+    Ok(resolved)
+}
+
+/// What an applied toggle does to this relay's tracked focused pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToggleFocusEffect {
+    /// Hide path: focus went back to an untracked tiled pane.
+    Cleared,
+    /// Exit path: no focus move was sent.
+    Unchanged,
+    /// Fill / enter path: the relay client now focuses the target.
+    Focused,
+}
+
+/// Map an applied hint to its [`ToggleFocusEffect`] — the same decision the
+/// zellij sender makes when it picks the action sequence.
+fn toggle_focus_effect(applied: &FullscreenHint) -> ToggleFocusEffect {
+    if applied.is_floating {
+        if applied.floating_visible && applied.is_focused_floating {
+            ToggleFocusEffect::Cleared
+        } else {
+            ToggleFocusEffect::Focused
+        }
+    } else if applied.tab_fullscreen {
+        ToggleFocusEffect::Unchanged
+    } else {
+        ToggleFocusEffect::Focused
+    }
 }
 
 // ─── Token re-validation ──────────────────────────────────────────────────────
@@ -844,6 +991,9 @@ mod tests {
         tab_switches: Arc<Mutex<Vec<u64>>>,
         /// When set, `go_to_tab` panics — exercises `run_sender_op`'s JoinError path.
         panic_on_tab: bool,
+        /// Every `toggle_fullscreen` call with its resolved hint, recorded for
+        /// the fullscreen resolution tests (empty ⇒ no action was sent).
+        toggles: Arc<Mutex<Vec<(PaneRef, FullscreenHint)>>>,
     }
 
     impl FakeSender {
@@ -859,6 +1009,7 @@ mod tests {
                 inputs: Arc::new(Mutex::new(Vec::new())),
                 tab_switches: Arc::new(Mutex::new(Vec::new())),
                 panic_on_tab: false,
+                toggles: Arc::new(Mutex::new(Vec::new())),
             }
         }
     }
@@ -884,7 +1035,8 @@ mod tests {
         fn focus_pane(&mut self, _pane: PaneRef) -> anyhow::Result<()> {
             Ok(())
         }
-        fn toggle_fullscreen(&mut self, _p: PaneRef, _h: FullscreenHint) -> anyhow::Result<()> {
+        fn toggle_fullscreen(&mut self, p: PaneRef, h: FullscreenHint) -> anyhow::Result<()> {
+            self.toggles.lock().unwrap().push((p, h));
             Ok(())
         }
         fn send_input_chars(&mut self, text: &str) -> anyhow::Result<()> {
@@ -919,6 +1071,7 @@ mod tests {
                 inputs: self.inputs.clone(),
                 tab_switches: self.tab_switches.clone(),
                 panic_on_tab: self.panic_on_tab,
+                toggles: self.toggles.clone(),
             })
         }
     }
@@ -1217,6 +1370,7 @@ mod tests {
         RelayControl::ToggleFullscreen {
             pane: PaneRef::terminal(1),
             hint: None,
+            reply: None,
         }
     }
 
@@ -1386,8 +1540,19 @@ mod tests {
         }
     }
 
-    #[derive(Debug)]
-    struct NoBackend;
+    /// A backend whose only live answer is the fullscreen context: `ctx` is
+    /// what `pane_fullscreen_context` returns (`Err` carries the message), and
+    /// every other method is unreachable in these tests.
+    #[derive(Debug, Default)]
+    struct NoBackend {
+        ctx: Option<Result<PaneFullscreenContext, String>>,
+    }
+
+    impl NoBackend {
+        fn with_context(ctx: PaneFullscreenContext) -> Self {
+            NoBackend { ctx: Some(Ok(ctx)) }
+        }
+    }
 
     impl MuxBackend for NoBackend {
         fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
@@ -1463,6 +1628,17 @@ mod tests {
         ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
             unimplemented!()
         }
+        fn pane_fullscreen_context(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<PaneFullscreenContext> {
+            match &self.ctx {
+                Some(Ok(ctx)) => Ok(*ctx),
+                Some(Err(message)) => Err(anyhow::anyhow!(message.clone())),
+                None => unimplemented!(),
+            }
+        }
         fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
             unimplemented!()
         }
@@ -1490,6 +1666,23 @@ mod tests {
     /// Spawn a real `inbound_loop` + reader thread. The reader runs `script`,
     /// then parks `park` and sees its stream close.
     fn spawn_rig(script: Vec<MuxServerMsg>, park: Duration, client_ends: bool) -> Rig {
+        spawn_rig_with(
+            script,
+            park,
+            client_ends,
+            NoBackend::default(),
+            FakeSender::plain(),
+        )
+    }
+
+    /// [`spawn_rig`] with a chosen backend and relay sender.
+    fn spawn_rig_with(
+        script: Vec<MuxServerMsg>,
+        park: Duration,
+        client_ends: bool,
+        backend: NoBackend,
+        sender: FakeSender,
+    ) -> Rig {
         let clients = crate::client_count::SessionClients::new();
         let client_guard = clients.attach("s");
         let control: ControlRegistry = Arc::new(dashmap::DashMap::new());
@@ -1540,8 +1733,8 @@ mod tests {
         };
         let task = tokio::spawn(inbound_loop(
             inbound,
-            Box::new(FakeSender::plain()),
-            Arc::new(NoBackend),
+            Box::new(sender),
+            Arc::new(backend),
             guard,
             "s".into(),
             "conn-1".into(),
@@ -1664,5 +1857,268 @@ mod tests {
         );
         drop(successor);
         drop(rig.outbound);
+    }
+
+    // ─── Fullscreen toggle resolution ────────────────────────────────────────
+    //
+    // `toggle_fullscreen_once` is driven with a backend that answers a fixed
+    // live context and the recording `FakeSender`: `toggles` empty ⇒ no action
+    // was sent. The action SEQUENCE each applied hint produces (toggle only vs
+    // focus + toggle, hide, fill) is pinned in `multiplexer::zellij`'s tests.
+
+    fn live(
+        exists: bool,
+        floating: bool,
+        visible: bool,
+        focused_floating: Option<PaneRef>,
+        tab_fullscreen: bool,
+    ) -> PaneFullscreenContext {
+        PaneFullscreenContext {
+            exists,
+            is_floating: floating,
+            floating_visible: visible,
+            focused_floating,
+            tab_fullscreen,
+        }
+    }
+
+    /// Run one hint-less toggle against `ctx`; returns the outcome and every
+    /// `toggle_fullscreen` call the sender saw.
+    async fn toggle_against(
+        ctx: Result<PaneFullscreenContext, String>,
+        pane: PaneRef,
+        hint: Option<FloatingHint>,
+    ) -> (
+        Result<FullscreenHint, String>,
+        Vec<(PaneRef, FullscreenHint)>,
+    ) {
+        let backend: Arc<dyn MuxBackend> = Arc::new(NoBackend { ctx: Some(ctx) });
+        let mut sender = FakeSender::plain();
+        let toggles = sender.toggles.clone();
+        let outcome = toggle_fullscreen_once(&mut sender, &backend, "s", pane, hint).await;
+        let calls = toggles.lock().unwrap().clone();
+        (outcome, calls)
+    }
+
+    /// Tab already fullscreen → applied with `tab_fullscreen`, which the zellij
+    /// sender turns into the active-pane toggle ONLY (no focus action), and the
+    /// relay's tracked focus is left alone.
+    #[tokio::test]
+    async fn tab_fullscreen_resolves_to_the_exit_toggle() {
+        let pane = PaneRef::terminal(11);
+        let (outcome, calls) =
+            toggle_against(Ok(live(true, false, false, None, true)), pane, None).await;
+        let applied = outcome.expect("applied");
+        assert!(applied.tab_fullscreen && !applied.is_floating);
+        assert_eq!(calls, vec![(pane, applied)]);
+        assert_eq!(toggle_focus_effect(&applied), ToggleFocusEffect::Unchanged);
+    }
+
+    /// Tiled pane on a tab that is not fullscreen → the enter sequence (focus
+    /// + toggle), and the relay now tracks the pane as focused.
+    #[tokio::test]
+    async fn tiled_not_fullscreen_resolves_to_the_enter_sequence() {
+        let pane = PaneRef::terminal(11);
+        let (outcome, calls) =
+            toggle_against(Ok(live(true, false, false, None, false)), pane, None).await;
+        let applied = outcome.expect("applied");
+        assert_eq!(
+            applied,
+            FullscreenHint {
+                is_floating: false,
+                floating_visible: false,
+                is_focused_floating: false,
+                tab_fullscreen: false,
+            }
+        );
+        assert_eq!(calls, vec![(pane, applied)]);
+        assert_eq!(toggle_focus_effect(&applied), ToggleFocusEffect::Focused);
+    }
+
+    /// Hidden floating pane → refused with the card's message; NO action sent.
+    #[tokio::test]
+    async fn hidden_floating_pane_is_refused_without_any_action() {
+        let pane = PaneRef::terminal(27);
+        let (outcome, calls) =
+            toggle_against(Ok(live(true, true, false, None, false)), pane, None).await;
+        assert_eq!(
+            outcome.unwrap_err(),
+            "pane 27 is a hidden floating pane; fullscreen applies to tiled panes"
+        );
+        assert!(calls.is_empty(), "a refusal must send nothing: {calls:?}");
+    }
+
+    /// Unknown pane → refused; NO action sent.
+    #[tokio::test]
+    async fn unknown_pane_is_refused_without_any_action() {
+        let pane = PaneRef::terminal(20);
+        let (outcome, calls) =
+            toggle_against(Ok(PaneFullscreenContext::not_found()), pane, None).await;
+        assert_eq!(outcome.unwrap_err(), "pane 20 not found");
+        assert!(calls.is_empty(), "a refusal must send nothing: {calls:?}");
+
+        let (outcome, _) = toggle_against(
+            Ok(PaneFullscreenContext::not_found()),
+            PaneRef::plugin(4),
+            None,
+        )
+        .await;
+        assert_eq!(outcome.unwrap_err(), "plugin pane 4 not found");
+    }
+
+    /// Visible, focused floating pane → the hide path (unchanged behaviour);
+    /// focus goes back to an untracked tiled pane.
+    #[tokio::test]
+    async fn visible_focused_floating_resolves_to_the_hide_path() {
+        let pane = PaneRef::terminal(5);
+        let (outcome, calls) =
+            toggle_against(Ok(live(true, true, true, Some(pane), false)), pane, None).await;
+        let applied = outcome.expect("applied");
+        assert!(applied.is_floating && applied.floating_visible && applied.is_focused_floating);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(toggle_focus_effect(&applied), ToggleFocusEffect::Cleared);
+    }
+
+    /// Visible floating pane that another floating pane holds focus over → the
+    /// fill path (unchanged behaviour).
+    #[tokio::test]
+    async fn visible_unfocused_floating_resolves_to_the_fill_path() {
+        let pane = PaneRef::terminal(5);
+        let other = Some(PaneRef::terminal(6));
+        let (outcome, calls) =
+            toggle_against(Ok(live(true, true, true, other, false)), pane, None).await;
+        let applied = outcome.expect("applied");
+        assert!(applied.is_floating && applied.floating_visible && !applied.is_focused_floating);
+        assert_eq!(calls.len(), 1);
+        assert_eq!(toggle_focus_effect(&applied), ToggleFocusEffect::Focused);
+    }
+
+    /// A failed live query no longer degrades to the tiled sequence (which
+    /// could move the fullscreen onto the wrong pane): nothing is sent and the
+    /// caller gets a generic message, not the backend's error text.
+    #[tokio::test]
+    async fn failed_live_query_sends_nothing() {
+        let pane = PaneRef::terminal(3);
+        let (outcome, calls) = toggle_against(Err("socket gone".to_owned()), pane, None).await;
+        let message = outcome.unwrap_err();
+        assert_eq!(
+            message,
+            "could not read the live state of pane 3; fullscreen skipped"
+        );
+        assert!(calls.is_empty());
+    }
+
+    /// A client hint skips the live query (the backend is never asked) and is
+    /// trusted for the floating paths; a hint attesting a hidden floating
+    /// target is refused just like a live one.
+    #[tokio::test]
+    async fn client_hint_skips_the_query_and_refuses_hidden_floating() {
+        let backend: Arc<dyn MuxBackend> = Arc::new(NoBackend::default()); // query ⇒ panic
+        let pane = PaneRef::terminal(8);
+
+        let mut sender = FakeSender::plain();
+        let toggles = sender.toggles.clone();
+        let hidden = FloatingHint {
+            target_is_floating: true,
+            floating_visible: false,
+            target_is_focused_floating: false,
+        };
+        let outcome = toggle_fullscreen_once(&mut sender, &backend, "s", pane, Some(hidden)).await;
+        assert_eq!(
+            outcome.unwrap_err(),
+            "pane 8 is a hidden floating pane; fullscreen applies to tiled panes"
+        );
+        assert!(toggles.lock().unwrap().is_empty());
+
+        let tiled = FloatingHint {
+            target_is_floating: false,
+            floating_visible: false,
+            target_is_focused_floating: false,
+        };
+        let applied = toggle_fullscreen_once(&mut sender, &backend, "s", pane, Some(tiled))
+            .await
+            .expect("hinted tiled toggle applies");
+        assert!(!applied.tab_fullscreen, "a hint carries no tab state");
+        assert_eq!(toggles.lock().unwrap().len(), 1);
+    }
+
+    /// End to end through the real `inbound_loop`: a routed toggle on a hidden
+    /// floating pane is answered on its reply channel with the refusal, the
+    /// sender sees nothing, and the relay stays up.
+    #[tokio::test]
+    async fn routed_toggle_replies_with_the_refusal_and_keeps_the_relay_up() {
+        let sender = FakeSender::plain();
+        let toggles = sender.toggles.clone();
+        let rig = spawn_rig_with(
+            vec![],
+            Duration::from_millis(1500),
+            false,
+            NoBackend::with_context(live(true, true, false, None, false)),
+            sender,
+        );
+        let ctrl = rig.control.get("conn-1").unwrap().sender.clone();
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        ctrl.send(RelayControl::ToggleFullscreen {
+            pane: PaneRef::terminal(27),
+            hint: None,
+            reply: Some(reply_tx),
+        })
+        .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("reply within 5s")
+            .expect("reply sent");
+        assert_eq!(
+            reply.unwrap_err(),
+            "pane 27 is a hidden floating pane; fullscreen applies to tiled panes"
+        );
+        assert!(toggles.lock().unwrap().is_empty());
+        assert!(
+            !rig.task.is_finished(),
+            "a refusal must not tear the relay down"
+        );
+        // The scripted reader ends after its park; the relay then tears down on
+        // its own (reader-exit watch).
+        assert_torn_down(rig, "after refusal").await;
+    }
+
+    /// End to end: an applied routed toggle replies `Ok` and updates this
+    /// relay's tracked focus from the same resolved hint.
+    #[tokio::test]
+    async fn routed_toggle_replies_ok_and_tracks_focus() {
+        let rig = spawn_rig_with(
+            vec![],
+            Duration::from_millis(1500),
+            false,
+            NoBackend::with_context(live(true, false, false, None, false)),
+            FakeSender::plain(),
+        );
+        rig.view_state.insert(
+            "conn-1".into(),
+            super::super::ViewStateEntry {
+                session: "s".into(),
+                state: Default::default(),
+            },
+        );
+        let ctrl = rig.control.get("conn-1").unwrap().sender.clone();
+
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+        ctrl.send(RelayControl::ToggleFullscreen {
+            pane: PaneRef::terminal(4),
+            hint: None,
+            reply: Some(reply_tx),
+        })
+        .unwrap();
+        let reply = tokio::time::timeout(Duration::from_secs(5), reply_rx)
+            .await
+            .expect("reply within 5s")
+            .expect("reply sent");
+        assert_eq!(reply, Ok(()));
+        assert_eq!(
+            rig.view_state.get("conn-1").unwrap().state.focused_pane,
+            Some(PaneRef::terminal(4))
+        );
+        assert_torn_down(rig, "after applied toggle").await;
     }
 }

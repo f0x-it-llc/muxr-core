@@ -19,6 +19,45 @@ use super::helpers::{
 /// client pushing an unbounded write into the session IPC channel.
 const MAX_WRITE_TO_PANE_BYTES: usize = 1024 * 1024;
 
+/// How long a routed `TogglePaneFullscreen` waits for the relay's outcome.
+/// Covers the relay arm's own live-query bound (`FLOAT_QUERY_TIMEOUT`, 12 s)
+/// plus queueing behind other controls, so the relay's own timeout reply
+/// normally arrives first.
+const TOGGLE_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Turn the relay's reply to a routed `ToggleFullscreen` into the RPC's ack.
+///
+/// - `Ok(())` → `ok:true` with the routing `info`;
+/// - `Err(message)` → `ok:false` with the relay's refusal or failure message
+///   (`"pane 20 not found"`, `"pane 27 is a hidden floating pane; …"`);
+/// - a cancelled receiver (the relay dropped the command: teardown, or the
+///   read-only gate) → `ok:false`, since nothing was applied;
+/// - no reply within [`TOGGLE_REPLY_TIMEOUT`] → `ok:false`.
+async fn await_toggle_reply(
+    reply_rx: tokio::sync::oneshot::Receiver<Result<(), String>>,
+    info: String,
+) -> ProtoAck {
+    let refused = |error: String| ProtoAck {
+        ok: false,
+        error,
+        info: String::new(),
+    };
+    match tokio::time::timeout(TOGGLE_REPLY_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(()))) => ProtoAck {
+            ok: true,
+            error: String::new(),
+            info,
+        },
+        Ok(Ok(Err(message))) => refused(message),
+        Ok(Err(_cancelled)) => {
+            refused("relay connection dropped the fullscreen toggle before applying it".to_owned())
+        }
+        Err(_elapsed) => {
+            refused("timed out waiting for the relay to apply the fullscreen toggle".to_owned())
+        }
+    }
+}
+
 impl MuxrService {
     // ── Pane ops (D1) ─────────────────────────────────────────────────────────
 
@@ -261,15 +300,36 @@ impl MuxrService {
         // asserts "writable caller" with no link to that gate, so removing or
         // relaxing the gate would silently restore the writable-session
         // fallback for a read-only caller, with nothing to catch it.
+        //
+        // The relay REPLIES with the toggle's outcome: it refuses an unknown or
+        // hidden floating pane (and a live query that failed) without sending
+        // any action, and that refusal must reach the caller as ok:false — a
+        // fire-and-forget ok:true would tell the app a toggle happened.
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         if let Some(resp) = try_route_control(
             &self.control,
             &target.session,
             &connection_id,
             read_only,
-            crate::relay::RelayControl::ToggleFullscreen { pane, hint },
+            crate::relay::RelayControl::ToggleFullscreen {
+                pane,
+                hint,
+                reply: Some(reply_tx),
+            },
         ) {
-            log::info!("TogglePaneFullscreen: routed via relay client (session='{session}')");
-            return Ok(resp);
+            let routed = resp.into_inner();
+            if !routed.ok {
+                // Fail-closed routing ack (no matching connection): nothing was
+                // queued, so there is no reply to wait for.
+                return Ok(Response::new(routed));
+            }
+            let ack = await_toggle_reply(reply_rx, routed.info).await;
+            log::info!(
+                "TogglePaneFullscreen: routed via relay client (session='{session}') ok={} {}",
+                ack.ok,
+                ack.error
+            );
+            return Ok(Response::new(ack));
         }
         run_action("TogglePaneFullscreen", move || {
             backend.toggle_pane_fullscreen(&session, pane)
@@ -629,5 +689,108 @@ mod tests {
             .expect_err("TogglePaneFullscreen must stay refused for read-only sessions");
         assert_eq!(err.code(), Code::PermissionDenied);
         assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    // ─── TogglePaneFullscreen: the relay's reply becomes the ack ─────────────
+
+    /// Register a writable relay `conn-fs` on `zellij:test`; returns its
+    /// control receiver.
+    fn relay_for_toggle(service: &MuxrService) -> mpsc::UnboundedReceiver<RelayControl> {
+        let (tx, rx) = mpsc::unbounded_channel::<RelayControl>();
+        service.control.insert(
+            "conn-fs".to_owned(),
+            ControlEntry {
+                session: "zellij:test".to_owned(),
+                sender: tx,
+                read_only: false,
+            },
+        );
+        rx
+    }
+
+    fn routed_toggle_req(pane_id: u32) -> Request<ToggleFullscreenReq> {
+        let mut req = Request::new(ToggleFullscreenReq {
+            target: Some(PaneTarget {
+                session: "zellij:test".to_owned(),
+                pane_id,
+                is_plugin: false,
+                connection_id: "conn-fs".to_owned(),
+            }),
+            target_is_floating: false,
+            floating_visible: false,
+            target_is_focused_floating: false,
+            has_floating_hint: false,
+        });
+        req.extensions_mut().insert(SessionReadOnly(false));
+        req
+    }
+
+    /// Play the relay: take the routed toggle and answer it with `outcome`
+    /// (`None` drops the reply unanswered, as a tearing-down relay would).
+    fn answer_toggle(
+        mut rx: mpsc::UnboundedReceiver<RelayControl>,
+        outcome: Option<Result<(), String>>,
+    ) -> tokio::task::JoinHandle<u32> {
+        tokio::spawn(async move {
+            match rx.recv().await {
+                Some(RelayControl::ToggleFullscreen { pane, reply, .. }) => {
+                    let reply = reply.expect("the RPC must attach a reply channel");
+                    if let Some(outcome) = outcome {
+                        reply.send(outcome).unwrap();
+                    }
+                    pane.id
+                }
+                other => panic!("unexpected command: {other:?}"),
+            }
+        })
+    }
+
+    /// A relay refusal (unknown pane / hidden floating pane) reaches the
+    /// caller as `ok:false` with the relay's message — not a routed `ok:true`.
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_relay_refusal_answers_ok_false() {
+        let service = service();
+        let relay = answer_toggle(
+            relay_for_toggle(&service),
+            Some(Err("pane 20 not found".to_owned())),
+        );
+        let ack = service
+            .toggle_pane_fullscreen_impl(routed_toggle_req(20))
+            .await
+            .expect("a refusal is an ack, not a Status")
+            .into_inner();
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "pane 20 not found");
+        assert_eq!(relay.await.unwrap(), 20);
+    }
+
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_applied_by_relay_answers_ok_true() {
+        let service = service();
+        let relay = answer_toggle(relay_for_toggle(&service), Some(Ok(())));
+        let ack = service
+            .toggle_pane_fullscreen_impl(routed_toggle_req(4))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(ack.ok, "applied toggle must succeed: {}", ack.error);
+        assert!(ack.info.contains("routed via relay client"), "{}", ack.info);
+        assert_eq!(relay.await.unwrap(), 4);
+    }
+
+    /// The relay dropped the command without answering: nothing was applied,
+    /// so the caller must not be told it was.
+    #[tokio::test]
+    async fn toggle_pane_fullscreen_unanswered_by_relay_answers_ok_false() {
+        let service = service();
+        let relay = answer_toggle(relay_for_toggle(&service), None);
+        let ack = service
+            .toggle_pane_fullscreen_impl(routed_toggle_req(4))
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(!ack.ok);
+        assert!(ack.error.contains("dropped"), "{}", ack.error);
+        relay.await.unwrap();
     }
 }

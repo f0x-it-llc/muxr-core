@@ -321,6 +321,19 @@ pub fn toggle_pane_floating(session: &str, pane: PaneId) -> Result<ActionAck> {
 /// tab-global fullscreen (`TabInfo.is_fullscreen_active` / `PaneInfo.is_fullscreen`
 /// report either), and the two toggles interleave: a plain toggle issued while
 /// no-UI fullscreen is active switches to plain fullscreen rather than exiting.
+///
+/// **Per-client caveat.** `TabInfo.is_fullscreen_active` is tab-level, but
+/// zellij 0.45.1 computes `PaneInfo.is_fullscreen` PER CLIENT
+/// (`is_focused && fullscreen_is_active()`, zellij-server
+/// `panes/tiled_panes/mod.rs`): a layout read through another client (this
+/// ephemeral CLI path reports the last active client's view) can flag a
+/// different pane than the one a given viewer sees fullscreened. This
+/// ephemeral path addresses the pane directly (`…ByPaneId`, no refocus), so it
+/// toggles exactly the named pane. The relay path instead reads the tab-level
+/// flag and, when the tab is already fullscreen, exits by toggling its own
+/// client's ACTIVE pane with no focus move (`multiplexer::zellij`'s
+/// `fullscreen_actions`) — focusing the named pane first is what moved the
+/// fullscreen onto the wrong pane.
 pub fn toggle_pane_fullscreen(session: &str, pane: PaneId) -> Result<ActionAck> {
     send_action(
         session,

@@ -228,6 +228,34 @@ pub fn query_list_tabs_json(session: &str) -> Result<String> {
     Ok(json)
 }
 
+/// Parse a `ListTabs` JSON payload into a `ListTabsResponse`, tolerating a tab
+/// object that omits `position`.
+///
+/// `TabInfo.position` is a required field of the foreign `zellij_utils` struct,
+/// so it cannot carry `#[serde(default)]`; instead each object without a
+/// `position` gets its array index — the display order zellij sorts the list
+/// by (`collect_tab_list`) — before the typed decode. Every other field stays
+/// required, so a payload of a different shape (a `ListPanes` array has no
+/// `name`) still fails to parse rather than decoding into default tabs.
+///
+/// This is the single `ListTabs` decode: [`query_session_size`],
+/// [`pane_is_floating_with_visibility`] and the layout parse
+/// (`multiplexer::zellij::parse_zellij_layout`) all go through it.
+pub(crate) fn parse_list_tabs_json(json: &str) -> Result<zellij_utils::data::ListTabsResponse> {
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    for (index, value) in values.iter_mut().enumerate() {
+        if let Some(tab) = value.as_object_mut()
+            && !tab.contains_key("position")
+        {
+            tab.insert("position".to_owned(), serde_json::Value::from(index));
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(anyhow::Error::from))
+        .collect()
+}
+
 /// Query `ListPanes` for a session and return the JSON string.
 ///
 /// Caller parses into `Vec<PaneListEntry>` using `serde_json::from_str`.
@@ -276,8 +304,7 @@ pub fn query_session_size(session: &str) -> Result<(u16, u16)> {
     let json = query_list_tabs_json(session)
         .with_context(|| format!("query_session_size: session '{session}'"))?;
 
-    use zellij_utils::data::ListTabsResponse;
-    let tabs: ListTabsResponse = serde_json::from_str(&json)
+    let tabs = parse_list_tabs_json(&json)
         .with_context(|| format!("query_session_size: parse ListTabs JSON for '{session}'"))?;
 
     let tab = tabs
@@ -340,7 +367,7 @@ pub fn pane_is_floating_with_visibility(
     session: &str,
     pane: zellij_utils::data::PaneId,
 ) -> Result<(bool, bool, Option<zellij_utils::data::PaneId>)> {
-    use zellij_utils::data::{ListPanesResponse, ListTabsResponse, PaneId};
+    use zellij_utils::data::{ListPanesResponse, PaneId};
 
     let (want_id, want_plugin) = match pane {
         PaneId::Terminal(id) => (id, false),
@@ -363,7 +390,7 @@ pub fn pane_is_floating_with_visibility(
     // values for tiled panes).
     let (floating_visible, focused_floating) = if is_floating {
         let tabs_json = query_list_tabs_json(session)?;
-        let tabs: ListTabsResponse = serde_json::from_str(&tabs_json).with_context(|| {
+        let tabs = parse_list_tabs_json(&tabs_json).with_context(|| {
             format!("pane_is_floating_with_visibility: parse ListTabs for '{session}'")
         })?;
         let active_tab = tabs.iter().find(|t| t.active).or_else(|| tabs.first());

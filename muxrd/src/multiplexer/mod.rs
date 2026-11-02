@@ -41,9 +41,9 @@ mod zellij;
 
 pub use types::{
     ActionAck, AgentMark, AgentSnapshot, AgentStatus, AgentSummary, FullscreenHint, LayoutSnapshot,
-    MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, PaneSnapshot, ResizeDir, ResizeKind,
-    ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession, UnknownSpace,
-    sort_agents,
+    MuxEvent, MuxMouseKind, MuxServerMsg, PaneFullscreenContext, PaneRef, PaneSnapshot, ResizeDir,
+    ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession,
+    UnknownSpace, sort_agents,
 };
 pub use zellij::ZellijBackend;
 
@@ -395,6 +395,34 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
         session: &str,
         pane: PaneRef,
     ) -> anyhow::Result<(bool, bool, Option<PaneRef>)>;
+
+    /// Live fullscreen-toggle context for `pane`: whether it exists, its
+    /// floating state, and whether its tab is already fullscreen. The relay's
+    /// hint-less `ToggleFullscreen` arm uses it to refuse a target it must not
+    /// act on and to choose the exit-vs-enter action sequence.
+    ///
+    /// The default derives the context from
+    /// [`Self::pane_is_floating_with_visibility`] and reports the permissive
+    /// value for what that query cannot see — `exists: true` (never refuse) and
+    /// `tab_fullscreen: false` (the focus-then-toggle sequence) — so a backend
+    /// with neither notion (herdr) keeps its prior behaviour exactly. The zellij
+    /// backend overrides it from one `ListTabs` + `ListPanes` read. Blocking —
+    /// call from `spawn_blocking`.
+    fn pane_fullscreen_context(
+        &self,
+        session: &str,
+        pane: PaneRef,
+    ) -> anyhow::Result<PaneFullscreenContext> {
+        let (is_floating, floating_visible, focused_floating) =
+            self.pane_is_floating_with_visibility(session, pane)?;
+        Ok(PaneFullscreenContext {
+            exists: true,
+            is_floating,
+            floating_visible,
+            focused_floating,
+            tab_fullscreen: false,
+        })
+    }
 
     // ── Attach (the relay seam) ─────────────────────────────────────────────
 

@@ -30,6 +30,12 @@ pub struct FloatingHint {
     pub target_is_focused_floating: bool,
 }
 
+/// Reply channel of [`RelayControl::ToggleFullscreen`]: `Ok(())` once the
+/// action sequence was sent, `Err(message)` when the relay refused the target
+/// (unknown pane, hidden floating pane), could not read the live pane state, or
+/// failed to send — the message becomes the RPC's `ok:false` error.
+pub type ToggleFullscreenReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+
 /// Control command routed to a live relay's AttachClient connection
 /// (W2.0a/b spike). Sent by the unary `GoToTab`/`FocusPane` RPCs through the
 /// per-session [`ControlRegistry`] so the action targets the *rendering* client
@@ -58,19 +64,25 @@ pub enum RelayControl {
     },
     /// Toggle fullscreen (or floating-fill) for a specific pane.
     ///
-    /// The relay resolves the floating context (from `hint` or a live
-    /// `MuxBackend::pane_is_floating_with_visibility` query) into a neutral
-    /// `FullscreenHint` and calls `MuxSender::toggle_fullscreen`, which owns the
-    /// fill-vs-hide-vs-tiled action sequence (backend-specific; the zellij impl
-    /// lives in `multiplexer::zellij`).
+    /// The relay resolves the context (from `hint` or a live
+    /// `MuxBackend::pane_fullscreen_context` query) into either a REFUSAL — the
+    /// pane does not exist, or is a hidden floating pane — or a neutral
+    /// `FullscreenHint`, and for the latter calls `MuxSender::toggle_fullscreen`,
+    /// which owns the hide / fill / exit / enter action sequence
+    /// (backend-specific; the zellij impl lives in `multiplexer::zellij`).
     ///
     /// `hint` (Bug 2c): client-supplied floating context so the relay can skip a
-    /// synchronous `pane_is_floating_with_visibility` IPC query on the hot path.
-    /// `None` → the relay falls back to a live query (keyboard-driven / hint-less
-    /// callers).
+    /// synchronous IPC query on the hot path. `None` → the relay falls back to a
+    /// live query (keyboard-driven / hint-less callers); only that query knows
+    /// whether the pane exists and whether its tab is already fullscreen.
+    ///
+    /// `reply`: the outcome, so the gRPC handler can answer `ok:false` with the
+    /// refusal or failure instead of a fire-and-forget `ok:true`. `None` for a
+    /// caller that does not wait.
     ToggleFullscreen {
         pane: PaneRef,
         hint: Option<FloatingHint>,
+        reply: Option<ToggleFullscreenReply>,
     },
     /// Query the current tab+pane layout over this relay's existing persistent
     /// connection (B-QUERY, BE-LAYOUT; FX-QUERY redesign).
@@ -514,11 +526,12 @@ pub(crate) type QueryTx = std::sync::mpsc::Sender<InFlightQuery>;
 #[allow(dead_code)]
 pub(crate) const FS_SETTLE_MS: u64 = 250;
 
-/// Backstop timeout for the live-state floating-pane visibility query in the
-/// `ToggleFullscreen` arm (BE-HANG). The per-recv socket timeout in
-/// `query_session` (`RECV_TIMEOUT` = 5 s) is the first line of defence; this
-/// outer bound covers two IPC round-trips plus codec overhead. On timeout the
-/// arm degrades to a no-op rather than wedging the `select!` loop.
+/// Backstop timeout for the live pane-context query in the `ToggleFullscreen`
+/// arm (BE-HANG). The per-recv socket timeout in `query_session`
+/// (`RECV_TIMEOUT` = 5 s) is the first line of defence; this outer bound covers
+/// two IPC round-trips plus codec overhead. On timeout the arm sends no action
+/// and replies with an error (the RPC answers `ok:false`) rather than wedging
+/// the `select!` loop.
 ///
 /// (FX-QUERY: hoisted to module level from the former block-local const for
 /// consistency with the other timeout constants. The layout query no longer has
