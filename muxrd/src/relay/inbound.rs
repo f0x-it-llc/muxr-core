@@ -697,11 +697,14 @@ struct AppliedToggle {
 /// | floating, layer hidden                   | —              | refused (hidden floating) |
 /// | floating, visible, the focused floating  | required       | HIDE: `ToggleFloatingPanes` |
 /// | floating, visible, not focused           | none           | FILL: [focus] + coordinates |
-/// | tiled, tab already fullscreen            | required       | EXIT: toggle only |
-/// | tiled, tab not fullscreen                | none           | ENTER: [focus] + toggle |
+/// | tiled, tab already fullscreen            | required       | EXIT: focus(relay's own pane) + toggle |
+/// | tiled, tab not fullscreen                | none           | ENTER: focus(target) + toggle |
 ///
-/// "Required" is [`require_relay_tab`]. `[focus]` (`FocusPaneByPaneId`, which
-/// switches tabs itself) is skipped when [`target_is_relay_focus`] holds.
+/// "Required" is [`require_relay_tab`]. `[focus]` is `FocusPaneByPaneId`, which
+/// switches tabs itself; the fill path skips it when [`target_is_relay_focus`]
+/// holds, the tiled paths never do (the toggle needs this client's active-pane
+/// entry). The exit's focus lands on the relay's tracked focused pane, never
+/// the caller's target; without one the exit is refused (tab-aware backends).
 fn resolve_live_context(
     pane: PaneRef,
     ctx: PaneFullscreenContext,
@@ -931,6 +934,12 @@ async fn toggle_fullscreen_once(
         );
         return Err(abandoned_message(pane));
     }
+    log::info!(
+        "relay inbound [{session}]: ToggleFullscreen {pane:?} resolved: send={:?} hint={:?} \
+         view={view:?}",
+        resolved.pane,
+        resolved.hint
+    );
     // The hide / fill / exit / enter action sequence is backend-specific and
     // lives behind `toggle_fullscreen` (the zellij impl in `multiplexer::zellij`).
     if let Err(e) = sender.toggle_fullscreen(resolved.pane, resolved.hint) {

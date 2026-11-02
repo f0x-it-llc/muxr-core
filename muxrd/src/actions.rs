@@ -24,12 +24,12 @@
 //! point it returns an [`ActionAck`].  This is robust across every op: ops that
 //! emit no Log (the common mutation case) still terminate on UnblockInputThread.
 //!
-//! **Caveat — the AttachClient terminator.**  Like the C1 query path, we must do
-//! a minimal `AttachClient` handshake first (the server won't route Log replies
-//! to an un-attached client in 0.45.1).  But `AttachClient` is itself a routed
-//! client message, so it produces its *own* `UnblockInputThread`.  We therefore
-//! skip exactly one `UnblockInputThread` (the attach's) before arming the
-//! terminator logic for the action.
+//! **No `AttachClient`.** Like the query path, this connection never attaches:
+//! a throwaway attached client joins the first client's active tab and
+//! refocuses/resizes it, which unsets an active fullscreen (see
+//! `crate::query`). A non-attached CLI client gets the same `Log`/`LogError`
+//! replies and the same `UnblockInputThread` terminator as `zellij action …`,
+//! and exactly one of them, since no attach precedes the action.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -38,7 +38,6 @@ use anyhow::{Context, Result, bail};
 use zellij_utils::data::PaneId;
 use zellij_utils::input::actions::Action;
 use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext, ServerToClientMsg};
-use zellij_utils::pane_size::Size;
 
 /// Maximum number of messages to drain while waiting for the action terminator.
 const DRAIN_LIMIT: usize = 500;
@@ -63,8 +62,8 @@ pub struct ActionAck {
 
 /// Send a (mutating) [`Action`] to a named session and await its completion ack.
 ///
-/// Opens a short-lived cli-client IPC connection, performs the minimal
-/// `AttachClient` handshake required by 0.45.1, sends the action with
+/// Opens a short-lived cli-client IPC connection (no `AttachClient`
+/// handshake — see the module docs), sends the action with
 /// `is_cli_client=true`, then drains messages until the action's
 /// `UnblockInputThread` terminator — mapping any `Log`/`LogError` replies into
 /// an [`ActionAck`].
@@ -88,34 +87,16 @@ pub fn send_action(session: &str, action: Action) -> Result<ActionAck> {
     let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(stream);
     let mut receiver = sender.get_receiver::<ServerToClientMsg>();
 
-    // ── Minimal AttachClient handshake ───────────────────────────────────────
-    // Required (see C1 findings): the server won't route Log replies to an
-    // un-attached client.  This attach is itself routed and yields its own
-    // UnblockInputThread, which we skip below before arming the action ack.
-    //
-    // FA: attach at a NEUTRAL-LARGE size (not 24×80) so this ephemeral action
-    // client never becomes the smallest client on whichever tab it lands on
-    // and shrinks a real client's geometry. Since 0.45.1 zellij recomputes a
-    // tab's size from only the clients currently focused on that tab (no more
-    // session-wide minimum), so a large neutral attach's blast radius is just
-    // that one tab rather than the whole session. See `crate::query::NEUTRAL_ATTACH_*`.
-    use zellij_utils::input::cli_assets::CliAssets;
-    let cli_assets = CliAssets {
-        terminal_window_size: Size {
-            rows: crate::query::NEUTRAL_ATTACH_ROWS as usize,
-            cols: crate::query::NEUTRAL_ATTACH_COLS as usize,
-        },
-        ..Default::default()
-    };
-    sender
-        .send_client_msg(ClientToServerMsg::AttachClient {
-            cli_assets,
-            tab_position_to_focus: None,
-            pane_to_focus: None,
-            is_web_client: false,
-        })
-        .context("send_action: failed to send AttachClient")?;
-
+    // ── No attach handshake ─────────────────────────────────────────────────
+    // This connection is a CLI client, exactly like `zellij action …`
+    // (`zellij-client/src/cli_client.rs`): it never sends `AttachClient`. An
+    // attached client — even a throwaway one — is added to the first client's
+    // active tab (`Screen::add_client` → `Tab::add_client`), which refocuses
+    // and resizes that tab: on a tab in fullscreen the attach UNSETS the
+    // fullscreen as a side effect (device gate 4, verified live against zellij
+    // 0.45.1 through `crate::query`). The server answers a non-attached CLI
+    // client's `Action` with `Log`/`LogError` and the `UnblockInputThread`
+    // terminator just as it answers the real CLI.
     // ── Send the action ──────────────────────────────────────────────────────
     sender
         .send_client_msg(ClientToServerMsg::Action {
@@ -127,10 +108,9 @@ pub fn send_action(session: &str, action: Action) -> Result<ActionAck> {
         .context("send_action: failed to send Action")?;
 
     // ── Drain until the action's UnblockInputThread terminator ───────────────
-    // We expect TWO UnblockInputThread messages: the first terminates the
-    // AttachClient, the second terminates our Action.  Log/LogError replies for
-    // the action arrive *before* the second terminator.
-    let mut skipped_attach_unblock = false;
+    // Exactly ONE UnblockInputThread terminates our Action (there is no attach
+    // to terminate first). Log/LogError replies for the action arrive *before*
+    // it.
     let mut info_lines: Vec<String> = Vec::new();
     let mut error_lines: Vec<String> = Vec::new();
 
@@ -147,26 +127,22 @@ pub fn send_action(session: &str, action: Action) -> Result<ActionAck> {
         };
         match msg {
             ServerToClientMsg::UnblockInputThread => {
-                if skipped_attach_unblock {
-                    // Second terminator → the action is done.
-                    let error = if error_lines.is_empty() {
-                        None
-                    } else {
-                        Some(error_lines.join("\n"))
-                    };
-                    let info = if info_lines.is_empty() {
-                        None
-                    } else {
-                        Some(info_lines.join("\n"))
-                    };
-                    return Ok(ActionAck {
-                        ok: error.is_none(),
-                        error,
-                        info,
-                    });
-                }
-                // First terminator → belonged to the AttachClient; arm for the action.
-                skipped_attach_unblock = true;
+                // The terminator → the action is done.
+                let error = if error_lines.is_empty() {
+                    None
+                } else {
+                    Some(error_lines.join("\n"))
+                };
+                let info = if info_lines.is_empty() {
+                    None
+                } else {
+                    Some(info_lines.join("\n"))
+                };
+                return Ok(ActionAck {
+                    ok: error.is_none(),
+                    error,
+                    info,
+                });
             }
             ServerToClientMsg::Log { lines } => {
                 log::trace!("send_action: Log({} lines)", lines.len());

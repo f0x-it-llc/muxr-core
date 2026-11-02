@@ -515,6 +515,7 @@ impl MuxSender for ZellijMuxSender {
         // floating target; the former inline copies in
         // `relay/helpers.rs`/`relay/inbound.rs` are retired.
         for action in fullscreen_actions(to_pane_id(pane), hint) {
+            log::info!("zellij relay: fullscreen sequence → {action:?}");
             self.0.send_action_as_self(action)?;
         }
         Ok(())
@@ -614,7 +615,15 @@ impl MuxReceiver for ZellijMuxReceiver {
                     name: connect_to_session.name.unwrap_or_default(),
                 })
             }
-            // UnblockInputThread / Connected / QueryTerminalSize / LogError /
+            // An action's error reply: surfaced in the log, no remote semantics.
+            // Expected on every fullscreen exit (`FocusPaneByPaneId` on the
+            // relay's own, already-focused pane answers "already focused"), so
+            // info rather than warn.
+            ServerToClientMsg::LogError { lines } => {
+                log::info!("zellij relay: LogError: {}", lines.join(" | "));
+                MuxServerMsg::Other
+            }
+            // UnblockInputThread / Connected / QueryTerminalSize /
             // PaneRenderUpdate / … — no remote-client semantics; the relay drains
             // them while preserving its per-message loop cadence.
             _ => MuxServerMsg::Other,
