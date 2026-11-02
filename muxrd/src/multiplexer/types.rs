@@ -105,14 +105,36 @@ pub struct FullscreenHint {
     /// focusing it first would move the fullscreen onto it. `false` when
     /// unknown (a client-supplied hint carries no tab state).
     pub tab_fullscreen: bool,
+    /// The target is ALREADY the relay client's own focused pane (the relay's
+    /// tracked focus), so the enter and fill sequences send no focus move
+    /// before the toggle / coordinates: the relay is on the target's tab with
+    /// the target focused. zellij reports per-pane focus and `is_fullscreen`
+    /// as a union over clients, so a caller may name a pane other than the
+    /// relay's focus; only when the names agree is the refocus redundant.
+    /// `false` keeps the focus move (the target differs, or the relay does not
+    /// know its focus). Ignored by the hide and exit sequences, which never
+    /// move focus.
+    pub target_is_relay_focus: bool,
 }
 
 /// Live, backend-reported context for a fullscreen toggle on one pane, read by
 /// `MuxBackend::pane_fullscreen_context` in a single query.
 ///
 /// The relay resolves it into either a refusal (unknown pane, hidden floating
-/// pane) or a [`FullscreenHint`]. A backend that cannot report a field leaves
-/// it at the permissive value the trait default documents.
+/// pane, an exit or floating hide whose tab is not — or not known to be — the
+/// relay's own tab) or a [`FullscreenHint`]. A backend that cannot report a
+/// field leaves it at the permissive value the trait default documents.
+///
+/// **Which tab the relay is on.** The exit toggle (`ToggleFocusNoUiFullscreen`
+/// on an already-fullscreen tab) and the floating hide (`ToggleFloatingPanes`)
+/// act on the relay client's ACTIVE tab, not on the named pane's tab, so the
+/// relay only applies them when the target's [`Self::tab_id`] is the tab it
+/// is itself on. That tab comes from the relay's OWN evidence, never from the
+/// backend's union flags: the tab holding its tracked focused pane
+/// ([`Self::relay_focus_tab_id`]), else the tab its own last move landed on
+/// (the relay's tracked active tab — evidence only after this connection's own
+/// move landed). When the backend reports tab ids but the relay has neither,
+/// the exit and hide are refused; [`Self::tab_active`] never decides.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PaneFullscreenContext {
     /// The pane exists in the session.
@@ -125,17 +147,23 @@ pub struct PaneFullscreenContext {
     pub focused_floating: Option<PaneRef>,
     /// The pane's tab already has a fullscreen pane.
     pub tab_fullscreen: bool,
-    /// Id of the tab that holds the pane (`None` when unknown).
+    /// Id of the tab that holds the pane. `None` when the backend reports no
+    /// tab ids (herdr, the trait default) — the one case in which the relay
+    /// stays permissive about which tab it is on.
     pub tab_id: Option<u64>,
     /// The holding tab's raw `active` flag. zellij reports it as a UNION —
-    /// "some attached client has this tab active" — so it is only the last
-    /// resort for "is this the relay's active tab"; see
-    /// [`Self::relay_focus_tab_id`].
+    /// "some attached client has this tab active" — so it says nothing about
+    /// THIS relay's tab and never allows an exit or a hide on its own; it is
+    /// reported for diagnostics only.
     pub tab_active: bool,
     /// Id of the tab holding the relay's tracked focused pane (the
     /// `relay_focus` passed to the query), when that pane was found. The
     /// relay's own focus is the most direct evidence of which tab IT has
-    /// active, since zellij's `active` flag is not per client.
+    /// active, since zellij's `active` flag is not per client. `None` when the
+    /// relay tracks no focus OR its tracked focus no longer exists; in the
+    /// latter case the relay treats its tab as unknown rather than falling
+    /// back to an older tracked tab (closing the last pane of a tab moves the
+    /// client to another tab).
     pub relay_focus_tab_id: Option<u64>,
 }
 

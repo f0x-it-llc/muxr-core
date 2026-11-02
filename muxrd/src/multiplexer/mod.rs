@@ -406,10 +406,14 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     /// The default derives the context from
     /// [`Self::pane_is_floating_with_visibility`] and reports the permissive
     /// value for what that query cannot see — `exists: true` (never refuse),
-    /// `tab_fullscreen: false` (the focus-then-toggle sequence), no tab ids and
-    /// `tab_active: true` — so a backend with none of these notions (herdr)
-    /// keeps its prior behaviour exactly. The zellij backend overrides it from
-    /// one `ListTabs` + `ListPanes` read. Blocking — call from `spawn_blocking`.
+    /// `tab_fullscreen: false` (the focus-then-toggle sequence) and NO tab ids
+    /// (`tab_id: None`, which is what keeps the relay's "is the target on my
+    /// own tab" gate permissive; `tab_active` is diagnostic only) — so a
+    /// backend with none of these notions (herdr) keeps its prior behaviour
+    /// exactly. A backend that reports `tab_id` opts into the relay's
+    /// fail-closed tab gate: an exit or floating hide whose tab the relay
+    /// cannot place is refused. The zellij backend overrides it from one
+    /// `ListTabs` + `ListPanes` read. Blocking — call from `spawn_blocking`.
     fn pane_fullscreen_context(
         &self,
         session: &str,

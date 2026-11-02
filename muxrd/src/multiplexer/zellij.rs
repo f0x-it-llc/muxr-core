@@ -210,6 +210,15 @@ fn json_head(json: &str) -> &str {
 /// (`FocusPaneByPaneId`: `LogError` for an unknown or already-focused pane) or
 /// not at all (`ToggleFloatingPanes`, `ChangeFloatingPaneCoordinates`,
 /// `ToggleFocusNoUiFullscreen`).
+///
+/// **Tab of the relay client.** `ToggleFloatingPanes` and
+/// `ToggleFocusNoUiFullscreen` act on the relay client's ACTIVE tab (zellij
+/// `screen.rs` `active_tab_and_connected_client_id`), whatever pane the caller
+/// named; the relay therefore resolves to the hide and exit paths only after
+/// placing the target on its own tab. `FocusPaneByPaneId` switches the client
+/// to the target's tab itself, so the fill and enter paths need no such gate —
+/// and when the target is already the relay's tracked focus
+/// ([`FullscreenHint::target_is_relay_focus`]) that focus move is skipped.
 fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
     use zellij_utils::data::FloatingPaneCoordinates;
     use zellij_utils::input::layout::PercentOrFixed;
@@ -238,13 +247,16 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
                 pinned: None,
                 borderless: Some(true),
             };
-            vec![
-                Action::FocusPaneByPaneId { pane_id },
-                Action::ChangeFloatingPaneCoordinates {
-                    pane_id,
-                    coordinates,
-                },
-            ]
+            // No focus move when the target already holds the relay's focus.
+            let mut actions = Vec::with_capacity(2);
+            if !hint.target_is_relay_focus {
+                actions.push(Action::FocusPaneByPaneId { pane_id });
+            }
+            actions.push(Action::ChangeFloatingPaneCoordinates {
+                pane_id,
+                coordinates,
+            });
+            actions
         }
     } else if hint.tab_fullscreen {
         // Exit path: the tab already has a fullscreen pane. Toggle THIS client's
@@ -264,11 +276,17 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
         // Enter path: focus then active-pane NO-UI fullscreen toggle (parity with
         // `actions::toggle_pane_fullscreen`). No-UI covers the tab-bar/status-bar
         // plugin panes too and drops the pane frame, so the pane owns the whole
-        // display rather than the viewport between the bars.
-        vec![
-            Action::FocusPaneByPaneId { pane_id },
-            Action::ToggleFocusNoUiFullscreen,
-        ]
+        // display rather than the viewport between the bars. When the target is
+        // already the relay client's focused pane the focus move is redundant
+        // and only the toggle is sent.
+        if hint.target_is_relay_focus {
+            vec![Action::ToggleFocusNoUiFullscreen]
+        } else {
+            vec![
+                Action::FocusPaneByPaneId { pane_id },
+                Action::ToggleFocusNoUiFullscreen,
+            ]
+        }
     }
 }
 
@@ -868,7 +886,52 @@ mod tests {
             floating_visible: visible,
             is_focused_floating: focused,
             tab_fullscreen,
+            target_is_relay_focus: false,
         }
+    }
+
+    /// [`hint`] for a target that is already the relay's tracked focus.
+    fn focused_hint(floating: bool, visible: bool, focused: bool) -> FullscreenHint {
+        FullscreenHint {
+            target_is_relay_focus: true,
+            ..hint(floating, visible, focused, false)
+        }
+    }
+
+    /// Target already the relay's focus → the enter sequence is the toggle
+    /// alone and the fill sequence the coordinates alone: no
+    /// `FocusPaneByPaneId` in either.
+    #[test]
+    fn target_already_focused_skips_the_focus_move() {
+        let enter = fullscreen_actions(PaneId::Terminal(3), focused_hint(false, false, false));
+        assert_eq!(enter, vec![Action::ToggleFocusNoUiFullscreen]);
+
+        let fill = fullscreen_actions(PaneId::Terminal(5), focused_hint(true, true, false));
+        assert_eq!(fill.len(), 1, "{fill:?}");
+        assert!(
+            matches!(
+                fill[0],
+                Action::ChangeFloatingPaneCoordinates {
+                    pane_id: PaneId::Terminal(5),
+                    ..
+                }
+            ),
+            "{fill:?}"
+        );
+
+        // Hide and exit never move focus, flag or not.
+        assert_eq!(
+            fullscreen_actions(PaneId::Terminal(5), focused_hint(true, true, true)),
+            vec![Action::ToggleFloatingPanes]
+        );
+        let exit = FullscreenHint {
+            target_is_relay_focus: true,
+            ..hint(false, false, false, true)
+        };
+        assert_eq!(
+            fullscreen_actions(PaneId::Terminal(3), exit),
+            vec![Action::ToggleFocusNoUiFullscreen]
+        );
     }
 
     /// Tab already fullscreen → ONLY the active-pane toggle; no
@@ -934,16 +997,21 @@ mod tests {
             for visible in [false, true] {
                 for focused in [false, true] {
                     for tab_fullscreen in [false, true] {
-                        let h = hint(floating, visible, focused, tab_fullscreen);
-                        for action in fullscreen_actions(PaneId::Terminal(1), h) {
-                            assert!(
-                                !matches!(
-                                    action,
-                                    Action::ShowFloatingPanes { .. }
-                                        | Action::HideFloatingPanes { .. }
-                                ),
-                                "{h:?} sent {action:?}"
-                            );
+                        for target_is_relay_focus in [false, true] {
+                            let h = FullscreenHint {
+                                target_is_relay_focus,
+                                ..hint(floating, visible, focused, tab_fullscreen)
+                            };
+                            for action in fullscreen_actions(PaneId::Terminal(1), h) {
+                                assert!(
+                                    !matches!(
+                                        action,
+                                        Action::ShowFloatingPanes { .. }
+                                            | Action::HideFloatingPanes { .. }
+                                    ),
+                                    "{h:?} sent {action:?}"
+                                );
+                            }
                         }
                     }
                 }

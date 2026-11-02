@@ -32,9 +32,13 @@ pub struct FloatingHint {
 
 /// Reply channel of [`RelayControl::ToggleFullscreen`]: `Ok(())` once the
 /// action sequence was sent, `Err(message)` when the relay refused the target
-/// (unknown pane, hidden floating pane, fullscreen tab that is not the relay's
-/// active tab), could not read the live pane state, or failed to send — the
-/// message becomes the RPC's `ok:false` error.
+/// (unknown pane, hidden floating pane, an exit or floating hide on a tab that
+/// is not — or is not known to be — the relay's own tab), could not read the
+/// live pane state, or failed to send — the message becomes the RPC's
+/// `ok:false` error. The relay checks the channel before acting: once its
+/// receiver is closed (the RPC's reply timeout fired, or the caller went away)
+/// the toggle is skipped with nothing sent, since the RPC has already answered
+/// `ok:false`.
 pub type ToggleFullscreenReply = tokio::sync::oneshot::Sender<Result<(), String>>;
 
 /// Control command routed to a live relay's AttachClient connection
@@ -67,20 +71,28 @@ pub enum RelayControl {
     ///
     /// The relay resolves the context (from `hint` or a live
     /// `MuxBackend::pane_fullscreen_context` query) into either a REFUSAL — the
-    /// pane does not exist, is a hidden floating pane, or sits on an
-    /// already-fullscreen tab that is not this relay's active tab — or a neutral
-    /// `FullscreenHint`, and for the latter calls `MuxSender::toggle_fullscreen`,
-    /// which owns the hide / fill / exit / enter action sequence
-    /// (backend-specific; the zellij impl lives in `multiplexer::zellij`).
+    /// pane does not exist, is a hidden floating pane, or is the target of an
+    /// exit (its tab is already fullscreen) or a floating hide (it is the
+    /// visible, focused floating pane) on a tab that is not this relay's own,
+    /// or whose tab the relay cannot place while the backend reports tab ids —
+    /// or a neutral `FullscreenHint`, and for the latter calls
+    /// `MuxSender::toggle_fullscreen`, which owns the hide / fill / exit /
+    /// enter action sequence (backend-specific; the zellij impl lives in
+    /// `multiplexer::zellij`). The exit and hide act on the relay client's
+    /// ACTIVE tab, which is why they are gated; the enter and fill focus the
+    /// target first (switching tabs), unless the target already is the relay's
+    /// tracked focus.
     ///
     /// `hint` (Bug 2c): client-supplied floating context so the relay can skip a
     /// synchronous IPC query on the hot path. `None` → the relay falls back to a
     /// live query (keyboard-driven / hint-less callers); only that query knows
-    /// whether the pane exists and whether its tab is already fullscreen.
+    /// whether the pane exists, whether its tab is already fullscreen and which
+    /// tab holds it — so a hint that attests the hide path is re-resolved live.
     ///
     /// `reply`: the outcome, so the gRPC handler can answer `ok:false` with the
     /// refusal or failure instead of a fire-and-forget `ok:true`. `None` for a
-    /// caller that does not wait.
+    /// caller that does not wait. A command whose `reply` receiver is already
+    /// closed is skipped without sending anything.
     ToggleFullscreen {
         pane: PaneRef,
         hint: Option<FloatingHint>,
@@ -117,11 +129,22 @@ pub enum RelayControl {
 ///
 /// `get_layout` uses this to OVERRIDE `TabMsg.active` and `PaneMsg.is_focused`
 /// with per-relay-client values, giving single-client correctness for the mobile
-/// user regardless of desktop clients.
+/// user regardless of desktop clients. The relay's fullscreen toggle uses it to
+/// decide whether a target sits on THIS client's own tab.
+///
+/// **Tracking rule: a tracked tab is evidence only after this connection's own
+/// move landed.** Every applied move records its destination: SwitchTab its tab
+/// (focus cleared); FocusPane its pane, with `active_tab` set to `None` (the
+/// focus move may switch tabs and the arm does no layout read); an enter / fill
+/// toggle the target and the target's tab (`None` for a client-hinted one); a
+/// floating hide clears the focus and keeps the tab it was verified on;
+/// SwitchSpace clears both. So an `active_tab` never outlives the move that set
+/// it, and both fields agree whenever both are set.
 #[derive(Debug, Clone, Default)]
 pub struct RelayViewState {
-    /// The tab_id of the currently active tab for this relay client.
-    /// `None` until first confirmed from attach-time query or a SwitchTab.
+    /// The tab_id of the tab this relay client's own last move landed on.
+    /// `None` until a resumed attach seeds it or a SwitchTab / enter / fill /
+    /// hide records it, and again after a FocusPane or SwitchSpace.
     pub active_tab: Option<u64>,
     /// The focused pane for this relay client.
     /// `None` when unknown (e.g. just after a bare tab switch or on init failure).
