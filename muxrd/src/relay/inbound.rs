@@ -676,6 +676,11 @@ enum TabAfter {
 struct AppliedToggle {
     hint: FullscreenHint,
     tab_after: TabAfter,
+    /// The pane the sender is given: the caller's target, except on the exit
+    /// path with a tracked relay focus, where it is that focused pane (the
+    /// fullscreen pane) so the refocus that precedes the toggle never lands on
+    /// a hidden pane and moves the fullscreen there.
+    pane: PaneRef,
 }
 
 /// Resolve a LIVE backend context into the toggle to apply, or a refusal.
@@ -710,6 +715,15 @@ fn resolve_live_context(
     if hide || exit {
         require_relay_tab(pane, &ctx, view)?;
     }
+    // The exit sequence refocuses the relay's OWN fullscreen pane before the
+    // toggle (a bare toggle is a no-op for a client without an active-pane
+    // entry). `require_relay_tab` has just placed the tracked focus on the
+    // target's tab, so it is the fullscreen pane; without a tracked focus the
+    // caller's target (the pane the app shows fullscreen) is the best anchor.
+    let send_pane = match (exit, view.focused_pane) {
+        (true, Some(anchor)) => anchor,
+        _ => pane,
+    };
     let hint = FullscreenHint {
         is_floating: ctx.is_floating,
         floating_visible: ctx.floating_visible,
@@ -726,7 +740,11 @@ fn resolve_live_context(
         Some(tab) => TabAfter::Known(tab),
         None => TabAfter::Unchanged,
     };
-    Ok(AppliedToggle { hint, tab_after })
+    Ok(AppliedToggle {
+        hint,
+        tab_after,
+        pane: send_pane,
+    })
 }
 
 /// Whether a client hint resolves to the floating HIDE path. A hint cannot
@@ -765,6 +783,7 @@ fn resolve_client_hint(
         } else {
             TabAfter::Unknown
         },
+        pane,
     })
 }
 
@@ -905,7 +924,7 @@ async fn toggle_fullscreen_once(
     }
     // The hide / fill / exit / enter action sequence is backend-specific and
     // lives behind `toggle_fullscreen` (the zellij impl in `multiplexer::zellij`).
-    if let Err(e) = sender.toggle_fullscreen(pane, resolved.hint) {
+    if let Err(e) = sender.toggle_fullscreen(resolved.pane, resolved.hint) {
         log::warn!("relay inbound [{session}]: ToggleFullscreen failed: {e:#}");
         return Err(format!(
             "fullscreen toggle for {} could not be sent",
@@ -2265,8 +2284,9 @@ mod tests {
     }
 
     /// Exit on a fullscreen tab that IS the relay's active tab (located via the
-    /// relay's tracked focused pane) → the exit toggle only, and the query was
-    /// asked to locate exactly that focused pane.
+    /// relay's tracked focused pane) → the exit toggle is sent against the
+    /// relay's OWN focused pane (the fullscreen pane), not the caller's
+    /// target, and the query was asked to locate exactly that focused pane.
     #[tokio::test]
     async fn exit_on_the_relays_active_fullscreen_tab_toggles_only() {
         let pane = PaneRef::terminal(11);
@@ -2283,17 +2303,19 @@ mod tests {
         let (outcome, calls, asked) = toggle_against_view(Ok(ctx), pane, view).await;
         let applied = outcome.expect("applied");
         assert!(applied.tab_fullscreen);
-        assert_eq!(calls, vec![(pane, applied)]);
+        assert_eq!(calls, vec![(focus, applied)]);
         assert_eq!(asked, vec![Some(focus)]);
 
-        // No tracked focus: the relay's tracked active tab decides.
+        // No tracked focus: the relay's tracked active tab decides, and the
+        // caller's target is the anchor the sender refocuses.
         let ctx = PaneFullscreenContext {
             tab_active: false,
             ..live(true, false, false, None, true)
         };
         let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, RELAY_ON_TAB_2).await;
-        assert!(outcome.expect("applied").tab_fullscreen);
-        assert_eq!(calls.len(), 1);
+        let applied = outcome.expect("applied");
+        assert!(applied.tab_fullscreen);
+        assert_eq!(calls, vec![(pane, applied)]);
     }
 
     /// Exit on a fullscreen tab that is NOT the relay's active tab → refused,
@@ -2859,8 +2881,8 @@ mod tests {
     }
 
     /// Tab already fullscreen → applied with `tab_fullscreen`, which the zellij
-    /// sender turns into the active-pane toggle ONLY (no focus action), and the
-    /// relay's tracked focus is left alone.
+    /// sender turns into a refocus of the anchor pane plus the active-pane
+    /// toggle, and the relay's tracked focus is left alone.
     #[tokio::test]
     async fn tab_fullscreen_resolves_to_the_exit_toggle() {
         let pane = PaneRef::terminal(11);

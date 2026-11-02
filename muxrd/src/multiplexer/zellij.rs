@@ -216,9 +216,16 @@ fn json_head(json: &str) -> &str {
 /// `screen.rs` `active_tab_and_connected_client_id`), whatever pane the caller
 /// named; the relay therefore resolves to the hide and exit paths only after
 /// placing the target on its own tab. `FocusPaneByPaneId` switches the client
-/// to the target's tab itself, so the fill and enter paths need no such gate —
-/// and when the target is already the relay's tracked focus
-/// ([`FullscreenHint::target_is_relay_focus`]) that focus move is skipped.
+/// to the target's tab itself, so the fill and enter paths need no such gate;
+/// the fill path skips that focus move when the target is already the relay's
+/// tracked focus ([`FullscreenHint::target_is_relay_focus`]).
+///
+/// **Active-pane entry.** `ToggleFocusNoUiFullscreen` reads the relay client's
+/// entry in the tab's per-client active-pane map and is a no-op without one;
+/// `FocusPaneByPaneId` is what inserts it. Both tiled paths therefore always
+/// lead with the focus move — on exit aimed at the relay's own fullscreen pane
+/// (`pane_id` is that anchor, not the caller's target), which zellij refocuses
+/// without unsetting fullscreen.
 fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
     use zellij_utils::data::FloatingPaneCoordinates;
     use zellij_utils::input::layout::PercentOrFixed;
@@ -259,34 +266,31 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
             actions
         }
     } else if hint.tab_fullscreen {
-        // Exit path: the tab already has a fullscreen pane. Toggle THIS client's
-        // active pane only, with no focus move. zellij computes the per-pane
-        // `PaneInfo.is_fullscreen` per client (`is_focused &&
-        // fullscreen_is_active()`), so when the caller's layout came from another
-        // client's view the pane it names may not be the fullscreened one;
-        // focusing it first would make zellij move the fullscreen onto it
-        // instead of exiting. The toggle acts on the relay client's ACTIVE tab,
-        // so the relay only resolves to this path when the target's tab IS that
-        // tab; a fullscreen tab elsewhere is refused upstream ("switch to it
-        // first") rather than chased with GoToTab, an action that may complete
-        // with a bare exit status and so drop the client like
-        // Show/HideFloatingPanes.
-        vec![Action::ToggleFocusNoUiFullscreen]
+        // Exit path: the tab already has a fullscreen pane. The relay passes
+        // its OWN fullscreen pane as `pane_id` (never the caller's target):
+        // refocusing the fullscreen pane itself does not unset fullscreen
+        // (zellij `tiled_panes::focus_pane` unsets only for a pane in
+        // `panes_to_hide`), but it DOES insert this client's entry in the tab's
+        // per-client active-pane map — and `ToggleFocusNoUiFullscreen` is a
+        // no-op for a client without one (`toggle_active_pane_no_ui_fullscreen`
+        // reads `active_panes.get(client)`). A bare toggle therefore left the
+        // phone stuck in fullscreen on the device; focus first, then toggle.
+        vec![
+            Action::FocusPaneByPaneId { pane_id },
+            Action::ToggleFocusNoUiFullscreen,
+        ]
     } else {
         // Enter path: focus then active-pane NO-UI fullscreen toggle (parity with
         // `actions::toggle_pane_fullscreen`). No-UI covers the tab-bar/status-bar
         // plugin panes too and drops the pane frame, so the pane owns the whole
-        // display rather than the viewport between the bars. When the target is
-        // already the relay client's focused pane the focus move is redundant
-        // and only the toggle is sent.
-        if hint.target_is_relay_focus {
-            vec![Action::ToggleFocusNoUiFullscreen]
-        } else {
-            vec![
-                Action::FocusPaneByPaneId { pane_id },
-                Action::ToggleFocusNoUiFullscreen,
-            ]
-        }
+        // display rather than the viewport between the bars. The focus move is
+        // never skipped, even when the target already holds the relay's focus:
+        // it is what guarantees this client's active-pane entry exists for the
+        // toggle (see the exit path above).
+        vec![
+            Action::FocusPaneByPaneId { pane_id },
+            Action::ToggleFocusNoUiFullscreen,
+        ]
     }
 }
 
@@ -898,13 +902,19 @@ mod tests {
         }
     }
 
-    /// Target already the relay's focus → the enter sequence is the toggle
-    /// alone and the fill sequence the coordinates alone: no
-    /// `FocusPaneByPaneId` in either.
+    /// Target already the relay's focus → the tiled sequences STILL lead with
+    /// `FocusPaneByPaneId` (it is what guarantees this client's active-pane
+    /// entry for the toggle); only the fill and hide paths never move focus.
     #[test]
-    fn target_already_focused_skips_the_focus_move() {
+    fn target_already_focused_still_focuses_before_the_toggle() {
+        let focus_then_toggle = vec![
+            Action::FocusPaneByPaneId {
+                pane_id: PaneId::Terminal(3),
+            },
+            Action::ToggleFocusNoUiFullscreen,
+        ];
         let enter = fullscreen_actions(PaneId::Terminal(3), focused_hint(false, false, false));
-        assert_eq!(enter, vec![Action::ToggleFocusNoUiFullscreen]);
+        assert_eq!(enter, focus_then_toggle);
 
         let fill = fullscreen_actions(PaneId::Terminal(5), focused_hint(true, true, false));
         assert_eq!(fill.len(), 1, "{fill:?}");
@@ -919,7 +929,7 @@ mod tests {
             "{fill:?}"
         );
 
-        // Hide and exit never move focus, flag or not.
+        // Hide never moves focus, flag or not.
         assert_eq!(
             fullscreen_actions(PaneId::Terminal(5), focused_hint(true, true, true)),
             vec![Action::ToggleFloatingPanes]
@@ -930,16 +940,25 @@ mod tests {
         };
         assert_eq!(
             fullscreen_actions(PaneId::Terminal(3), exit),
-            vec![Action::ToggleFocusNoUiFullscreen]
+            focus_then_toggle
         );
     }
 
-    /// Tab already fullscreen → ONLY the active-pane toggle; no
-    /// `FocusPaneByPaneId`, which would move the fullscreen to the named pane.
+    /// Tab already fullscreen → refocus the anchor pane (the relay's own
+    /// fullscreen pane), then the active-pane toggle. A bare toggle is a no-op
+    /// for a client without an active-pane entry (the device-gate-3 hang).
     #[test]
-    fn tab_fullscreen_exits_with_the_toggle_only() {
+    fn tab_fullscreen_exits_by_refocusing_then_toggling() {
         let actions = fullscreen_actions(PaneId::Terminal(3), hint(false, false, false, true));
-        assert_eq!(actions, vec![Action::ToggleFocusNoUiFullscreen]);
+        assert_eq!(
+            actions,
+            vec![
+                Action::FocusPaneByPaneId {
+                    pane_id: PaneId::Terminal(3)
+                },
+                Action::ToggleFocusNoUiFullscreen,
+            ]
+        );
     }
 
     /// Tiled pane on a tab that is not fullscreen → focus, then toggle.

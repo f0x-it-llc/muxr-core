@@ -99,21 +99,25 @@ pub struct FullscreenHint {
     pub is_focused_floating: bool,
     /// The target's tab ALREADY has a fullscreen pane
     /// ([`TabSnapshot::fullscreen_active`], a tab-level flag). The zellij
-    /// sender then exits by toggling the relay client's own active pane, with
-    /// no focus move: zellij computes the per-pane `is_fullscreen` per client,
-    /// so the pane id a caller names may not be the fullscreened one, and
-    /// focusing it first would move the fullscreen onto it. `false` when
-    /// unknown (a client-supplied hint carries no tab state).
+    /// sender then exits by refocusing the pane it is given and toggling the
+    /// relay client's active pane. The relay passes its OWN tracked focused
+    /// pane (the fullscreen one) rather than the caller's target: zellij
+    /// reports per-pane `is_fullscreen` as a union over clients, so the pane a
+    /// caller names may not be the fullscreened one, and focusing a hidden pane
+    /// would move the fullscreen onto it. The refocus is kept because the
+    /// toggle is a no-op for a client without an active-pane entry. `false`
+    /// when unknown (a client-supplied hint carries no tab state).
     pub tab_fullscreen: bool,
     /// The target is ALREADY the relay client's own focused pane (the relay's
-    /// tracked focus), so the enter and fill sequences send no focus move
-    /// before the toggle / coordinates: the relay is on the target's tab with
-    /// the target focused. zellij reports per-pane focus and `is_fullscreen`
-    /// as a union over clients, so a caller may name a pane other than the
-    /// relay's focus; only when the names agree is the refocus redundant.
-    /// `false` keeps the focus move (the target differs, or the relay does not
-    /// know its focus). Ignored by the hide and exit sequences, which never
-    /// move focus.
+    /// tracked focus): the relay is on the target's tab with the target
+    /// focused. The fill sequence then sends no focus move before the
+    /// coordinates. zellij reports per-pane focus and `is_fullscreen` as a
+    /// union over clients, so a caller may name a pane other than the relay's
+    /// focus; only when the names agree is the refocus redundant. `false`
+    /// keeps the focus move (the target differs, or the relay does not know
+    /// its focus). The tiled enter and exit sequences always focus first (the
+    /// active-pane toggle needs this client's active-pane entry), and the hide
+    /// sequence never moves focus; both ignore the flag.
     pub target_is_relay_focus: bool,
 }
 
