@@ -566,6 +566,10 @@ fn other_tab_refusal(pane: PaneRef) -> String {
 /// tracked tab from its own last move). Fail closed: the union `active` flag
 /// is not evidence of which tab this client is on.
 const RELAY_TAB_UNKNOWN: &str = "relay tab unknown; switch to the pane's tab first";
+/// Refusal for an exit while the relay tracks no focused pane: the exit
+/// sequence refocuses the relay's own fullscreen pane, and the caller's target
+/// is not a safe stand-in (see `resolve_live_context`).
+const RELAY_FOCUS_UNKNOWN: &str = "relay focus unknown; tap the fullscreen pane first";
 
 /// What this relay knows of its OWN view, copied out of its `ViewStateEntry`
 /// (B-FOCUS) for the fullscreen resolution.
@@ -641,11 +645,10 @@ fn require_relay_tab(
     }
 }
 
-/// Whether the enter / fill sequence may skip its focus move: the target is
-/// already this relay's tracked focused pane. A TILED target keeps the focus
-/// move while its tab's floating layer is visible — zellij then keeps the
-/// client's active pane on the floating layer, so the toggle alone could land
-/// on a floating pane instead of the target.
+/// Whether the target is already this relay's tracked focused pane (the
+/// zellij fill sequence then skips its focus move; the tiled sequences always
+/// refocus). A TILED target does not count while its tab's floating layer is
+/// visible — zellij then keeps the client's active pane on the floating layer.
 fn target_is_relay_focus(
     pane: PaneRef,
     is_floating: bool,
@@ -677,9 +680,10 @@ struct AppliedToggle {
     hint: FullscreenHint,
     tab_after: TabAfter,
     /// The pane the sender is given: the caller's target, except on the exit
-    /// path with a tracked relay focus, where it is that focused pane (the
-    /// fullscreen pane) so the refocus that precedes the toggle never lands on
-    /// a hidden pane and moves the fullscreen there.
+    /// path, where it is the relay's tracked focused pane (the fullscreen pane)
+    /// so the refocus that precedes the toggle never lands on a hidden pane and
+    /// moves the fullscreen there. Only a backend without tab ids exits on the
+    /// caller's target.
     pane: PaneRef,
 }
 
@@ -718,10 +722,15 @@ fn resolve_live_context(
     // The exit sequence refocuses the relay's OWN fullscreen pane before the
     // toggle (a bare toggle is a no-op for a client without an active-pane
     // entry). `require_relay_tab` has just placed the tracked focus on the
-    // target's tab, so it is the fullscreen pane; without a tracked focus the
-    // caller's target (the pane the app shows fullscreen) is the best anchor.
-    let send_pane = match (exit, view.focused_pane) {
-        (true, Some(anchor)) => anchor,
+    // target's tab, so it is the fullscreen pane. Without a tracked focus the
+    // exit is refused rather than anchored on the caller's target: zellij flags
+    // `is_fullscreen` as a union over clients, so the target may be a HIDDEN
+    // pane, and refocusing one unsets fullscreen before the toggle re-enters it
+    // there (the device-gate-2 symptom). A backend without tab ids (herdr) has
+    // no per-client active pane to miss and stays permissive on the target.
+    let send_pane = match (exit, view.focused_pane, ctx.tab_id) {
+        (true, Some(anchor), _) => anchor,
+        (true, None, Some(_)) => return Err(RELAY_FOCUS_UNKNOWN.to_owned()),
         _ => pane,
     };
     let hint = FullscreenHint {
@@ -2287,8 +2296,9 @@ mod tests {
     /// relay's tracked focused pane) → the exit toggle is sent against the
     /// relay's OWN focused pane (the fullscreen pane), not the caller's
     /// target, and the query was asked to locate exactly that focused pane.
+    /// Without a tracked focus the exit is refused with nothing sent.
     #[tokio::test]
-    async fn exit_on_the_relays_active_fullscreen_tab_toggles_only() {
+    async fn exit_refocuses_the_relays_own_fullscreen_pane_not_the_callers_target() {
         let pane = PaneRef::terminal(11);
         let focus = PaneRef::terminal(12);
         let ctx = PaneFullscreenContext {
@@ -2306,16 +2316,45 @@ mod tests {
         assert_eq!(calls, vec![(focus, applied)]);
         assert_eq!(asked, vec![Some(focus)]);
 
-        // No tracked focus: the relay's tracked active tab decides, and the
-        // caller's target is the anchor the sender refocuses.
+        // No tracked focus (the relay is on the tab, by its tracked active tab):
+        // refused — the caller's target is not a safe anchor to refocus.
         let ctx = PaneFullscreenContext {
             tab_active: false,
             ..live(true, false, false, None, true)
         };
         let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, RELAY_ON_TAB_2).await;
-        let applied = outcome.expect("applied");
+        assert_eq!(outcome, Err(RELAY_FOCUS_UNKNOWN.to_owned()));
+        assert!(calls.is_empty());
+    }
+
+    /// An exit while the relay tracks no focused pane is refused with nothing
+    /// sent, whichever way the relay's tab is known; a tap (tracked focus on
+    /// the fullscreen pane) then lets the same exit through, anchored on it.
+    #[tokio::test]
+    async fn exit_with_no_tracked_focus_is_refused() {
+        let target = PaneRef::terminal(24);
+        let anchor = PaneRef::terminal(39);
+        let ctx = PaneFullscreenContext {
+            tab_active: false,
+            ..live(true, false, false, None, true)
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), target, RELAY_ON_TAB_2).await;
+        assert_eq!(outcome, Err(RELAY_FOCUS_UNKNOWN.to_owned()));
+        assert!(calls.is_empty());
+
+        let ctx = PaneFullscreenContext {
+            relay_focus_tab_id: Some(2),
+            tab_active: false,
+            ..live(true, false, false, None, true)
+        };
+        let view = RelayTabView {
+            focused_pane: Some(anchor),
+            active_tab: Some(2),
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), target, view).await;
+        let applied = outcome.expect("applied once the relay tracks its focus");
         assert!(applied.tab_fullscreen);
-        assert_eq!(calls, vec![(pane, applied)]);
+        assert_eq!(calls, vec![(anchor, applied)]);
     }
 
     /// Exit on a fullscreen tab that is NOT the relay's active tab → refused,
@@ -2548,10 +2587,22 @@ mod tests {
         assert_eq!(state.focused_pane, None);
         assert_eq!(state.active_tab, Some(3));
 
-        // Exit on tab 3 (now fullscreen): allowed, the exit toggle alone.
+        // Exit on tab 3 (now fullscreen): the tab gate passes on the recorded
+        // tab, but the hide cleared the tracked focus, so the exit is refused
+        // until a tap on the fullscreen pane records it again.
         let exit = PaneFullscreenContext {
             tab_id: Some(3),
             ..live(true, false, false, None, true)
+        };
+        let (outcome, calls, _) =
+            toggle_against_view(Ok(exit), target, RelayTabView::of(&state)).await;
+        assert_eq!(outcome, Err(RELAY_FOCUS_UNKNOWN.to_owned()));
+        assert!(calls.is_empty());
+
+        state.focused_pane = Some(target);
+        let exit = PaneFullscreenContext {
+            relay_focus_tab_id: Some(3),
+            ..exit
         };
         let (outcome, calls, _) =
             toggle_against_view(Ok(exit), target, RelayTabView::of(&state)).await;
@@ -2886,8 +2937,15 @@ mod tests {
     #[tokio::test]
     async fn tab_fullscreen_resolves_to_the_exit_toggle() {
         let pane = PaneRef::terminal(11);
-        let (outcome, calls) =
-            toggle_against(Ok(live(true, false, false, None, true)), pane, None).await;
+        let ctx = PaneFullscreenContext {
+            relay_focus_tab_id: Some(2),
+            ..live(true, false, false, None, true)
+        };
+        let view = RelayTabView {
+            focused_pane: Some(pane),
+            active_tab: Some(2),
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, view).await;
         let applied = outcome.expect("applied");
         assert!(applied.tab_fullscreen && !applied.is_floating);
         assert_eq!(calls, vec![(pane, applied)]);
