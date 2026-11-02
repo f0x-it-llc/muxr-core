@@ -41,9 +41,9 @@ mod zellij;
 
 pub use types::{
     ActionAck, AgentMark, AgentSnapshot, AgentStatus, AgentSummary, FullscreenHint, LayoutSnapshot,
-    MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, PaneSnapshot, ResizeDir, ResizeKind,
-    ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession, UnknownSpace,
-    sort_agents,
+    MuxEvent, MuxMouseKind, MuxServerMsg, PaneFullscreenContext, PaneRef, PaneSnapshot, ResizeDir,
+    ResizeKind, ResumeTarget, ResumedView, ScrollDir, SpaceSnapshot, TabSnapshot, UnknownSession,
+    UnknownSpace, sort_agents,
 };
 pub use zellij::ZellijBackend;
 
@@ -395,6 +395,45 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
         session: &str,
         pane: PaneRef,
     ) -> anyhow::Result<(bool, bool, Option<PaneRef>)>;
+
+    /// Live fullscreen-toggle context for `pane`: whether it exists, its
+    /// floating state, whether its tab is already fullscreen, and which tab
+    /// holds it (and holds `relay_focus`, the calling relay's tracked focused
+    /// pane, so the relay can tell whether the target is on ITS active tab).
+    /// The relay's hint-less `ToggleFullscreen` arm uses it to refuse a target
+    /// it must not act on and to choose the exit-vs-enter action sequence.
+    ///
+    /// The default derives the context from
+    /// [`Self::pane_is_floating_with_visibility`] and reports the permissive
+    /// value for what that query cannot see — `exists: true` (never refuse),
+    /// `tab_fullscreen: false` (the focus-then-toggle sequence) and NO tab ids
+    /// (`tab_id: None`, which is what keeps the relay's "is the target on my
+    /// own tab" gate permissive; `tab_active` is diagnostic only) — so a
+    /// backend with none of these notions (herdr) keeps its prior behaviour
+    /// exactly. A backend that reports `tab_id` opts into the relay's
+    /// fail-closed tab gate: an exit or floating hide whose tab the relay
+    /// cannot place is refused. The zellij backend overrides it from one
+    /// `ListTabs` + `ListPanes` read. Blocking — call from `spawn_blocking`.
+    fn pane_fullscreen_context(
+        &self,
+        session: &str,
+        pane: PaneRef,
+        relay_focus: Option<PaneRef>,
+    ) -> anyhow::Result<PaneFullscreenContext> {
+        let _ = relay_focus;
+        let (is_floating, floating_visible, focused_floating) =
+            self.pane_is_floating_with_visibility(session, pane)?;
+        Ok(PaneFullscreenContext {
+            exists: true,
+            is_floating,
+            floating_visible,
+            focused_floating,
+            tab_fullscreen: false,
+            tab_id: None,
+            tab_active: true,
+            relay_focus_tab_id: None,
+        })
+    }
 
     // ── Attach (the relay seam) ─────────────────────────────────────────────
 

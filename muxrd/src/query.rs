@@ -9,15 +9,13 @@
 //! This module implements that flow so `GetLayout` can issue typed IPC queries
 //! without holding a long-lived attachment.
 //!
-//! **Verified on the dev host (C1):** A bare `connect → Action(is_cli_client=true) →
-//! recv` does NOT receive a Log reply in 0.45.1 — the server never delivers Log
-//! to a client that has not completed the `AttachClient` handshake.  We therefore
-//! do a minimal attach first (invisible `is_web_client=false` attach) before
-//! sending the query action, then drain messages until `Log` or a terminal
-//! `Exit`/`ClientExited`.
-//!
-//! _(The research note says it should work without attach; empirical testing shows
-//! it does not — see C1 findings.)_
+//! **No `AttachClient`.** An earlier revision attached a throwaway client
+//! before the query, believing 0.45.1 would not answer otherwise. It does
+//! answer (verified live, device gate 4), and the attach was harmful: an
+//! attached client — even for a few milliseconds — joins the first client's
+//! active tab (`Screen::add_client` → `Tab::add_client`), refocusing and
+//! resizing it; on a tab in fullscreen that UNSETS the fullscreen, so every
+//! fullscreen-state read exited the very fullscreen it was asked about.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -25,25 +23,12 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use zellij_utils::input::actions::Action;
 use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext, ServerToClientMsg};
-use zellij_utils::pane_size::Size;
 
 // Needed for `set_recv_timeout` on `interprocess::local_socket::Stream`.
 // The method is part of the `Stream` trait in the interprocess crate; without
 // this import the method is not in scope even though `ipc_connect` returns that
 // type.
 use interprocess::local_socket::prelude::*;
-
-/// Neutral-large terminal size for ephemeral query/action AttachClients (FA).
-///
-/// zellij sizes a tab from the MINIMUM across the clients currently focused on
-/// that tab (a per-tab minimum since 0.45.1, no longer session-wide). Ephemeral
-/// query/action clients must therefore attach at a size LARGER than any real
-/// client so they never become that minimum and shrink the tab they land on
-/// (which, in single-pane mode, would shrink the fullscreened pane the phone
-/// sees). Modest enough to avoid a giant grid allocation; larger than any phone
-/// viewport.
-pub const NEUTRAL_ATTACH_ROWS: u16 = 100;
-pub const NEUTRAL_ATTACH_COLS: u16 = 320;
 
 /// Maximum number of messages to drain while waiting for the Log reply.
 const LOG_DRAIN_LIMIT: usize = 200;
@@ -70,10 +55,10 @@ const RECV_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Issue a single query [`Action`] to a named session and return the `Log` lines.
 ///
-/// Opens a short-lived IPC connection, performs a minimal `AttachClient`
-/// handshake (required in 0.45.1), sends the action with `is_cli_client=true`,
-/// drains messages until `ServerToClientMsg::Log` (success) or a terminal
-/// condition (error).
+/// Opens a short-lived IPC connection as a CLI client (no `AttachClient`
+/// handshake — see the note in the body), sends the action with
+/// `is_cli_client=true`, drains messages until `ServerToClientMsg::Log`
+/// (success) or a terminal condition (error).
 ///
 /// This is **blocking** — call from a `tokio::task::spawn_blocking` context.
 pub fn query_session(session: &str, action: Action) -> Result<Vec<String>> {
@@ -118,36 +103,16 @@ pub fn query_session(session: &str, action: Action) -> Result<Vec<String>> {
     let mut sender: IpcSenderWithContext<ClientToServerMsg> = IpcSenderWithContext::new(stream);
     let mut receiver = sender.get_receiver::<ServerToClientMsg>();
 
-    // ── Minimal AttachClient handshake ───────────────────────────────────────
-    // In zellij 0.45.1 the server does not route a Log reply to clients that
-    // have not completed the attach handshake.  We send a minimal invisible
-    // attach (web_client=false) to register with the router, then immediately
-    // send the query action.
-    //
-    // FA: attach at a NEUTRAL-LARGE size, NOT 24×80. zellij sizes a tab from the
-    // MINIMUM terminal size across the clients currently focused on that tab
-    // (per-tab since 0.45.1); a 24×80 ephemeral query client would transiently
-    // shrink the tab it lands on (and, in single-pane mode, the fullscreened
-    // pane tracks it → the phone sees a tiny pane). A large size keeps this
-    // transient client from ever becoming that minimum, so it never perturbs
-    // the real client's geometry.
-    use zellij_utils::input::cli_assets::CliAssets;
-    let cli_assets = CliAssets {
-        terminal_window_size: Size {
-            rows: NEUTRAL_ATTACH_ROWS as usize,
-            cols: NEUTRAL_ATTACH_COLS as usize,
-        },
-        ..Default::default()
-    };
-    sender
-        .send_client_msg(ClientToServerMsg::AttachClient {
-            cli_assets,
-            tab_position_to_focus: None,
-            pane_to_focus: None,
-            is_web_client: false,
-        })
-        .context("query: failed to send AttachClient")?;
-
+    // ── No attach handshake ─────────────────────────────────────────────────
+    // This connection is a CLI client, exactly like `zellij action …`
+    // (`zellij-client/src/cli_client.rs`): it never sends `AttachClient`. An
+    // attached client — even a throwaway one — is added to the first client's
+    // active tab (`Screen::add_client` → `Tab::add_client`), which refocuses
+    // and resizes that tab: on a tab in fullscreen the attach UNSETS the
+    // fullscreen as a side effect, so the query read "not fullscreen" and the
+    // relay re-entered fullscreen instead of exiting it (device gate 4, verified
+    // live against zellij 0.45.1). The server answers a non-attached CLI
+    // client's `Action` with `Log`/`LogError` just as it answers the real CLI.
     // ── Send query action ────────────────────────────────────────────────────
     sender
         .send_client_msg(ClientToServerMsg::Action {
@@ -228,6 +193,34 @@ pub fn query_list_tabs_json(session: &str) -> Result<String> {
     Ok(json)
 }
 
+/// Parse a `ListTabs` JSON payload into a `ListTabsResponse`, tolerating a tab
+/// object that omits `position`.
+///
+/// `TabInfo.position` is a required field of the foreign `zellij_utils` struct,
+/// so it cannot carry `#[serde(default)]`; instead each object without a
+/// `position` gets its array index — the display order zellij sorts the list
+/// by (`collect_tab_list`) — before the typed decode. Every other field stays
+/// required, so a payload of a different shape (a `ListPanes` array has no
+/// `name`) still fails to parse rather than decoding into default tabs.
+///
+/// This is the single `ListTabs` decode: [`query_session_size`],
+/// [`pane_is_floating_with_visibility`] and the layout parse
+/// (`multiplexer::zellij::parse_zellij_layout`) all go through it.
+pub(crate) fn parse_list_tabs_json(json: &str) -> Result<zellij_utils::data::ListTabsResponse> {
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    for (index, value) in values.iter_mut().enumerate() {
+        if let Some(tab) = value.as_object_mut()
+            && !tab.contains_key("position")
+        {
+            tab.insert("position".to_owned(), serde_json::Value::from(index));
+        }
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(anyhow::Error::from))
+        .collect()
+}
+
 /// Query `ListPanes` for a session and return the JSON string.
 ///
 /// Caller parses into `Vec<PaneListEntry>` using `serde_json::from_str`.
@@ -276,8 +269,7 @@ pub fn query_session_size(session: &str) -> Result<(u16, u16)> {
     let json = query_list_tabs_json(session)
         .with_context(|| format!("query_session_size: session '{session}'"))?;
 
-    use zellij_utils::data::ListTabsResponse;
-    let tabs: ListTabsResponse = serde_json::from_str(&json)
+    let tabs = parse_list_tabs_json(&json)
         .with_context(|| format!("query_session_size: parse ListTabs JSON for '{session}'"))?;
 
     let tab = tabs
@@ -340,7 +332,7 @@ pub fn pane_is_floating_with_visibility(
     session: &str,
     pane: zellij_utils::data::PaneId,
 ) -> Result<(bool, bool, Option<zellij_utils::data::PaneId>)> {
-    use zellij_utils::data::{ListPanesResponse, ListTabsResponse, PaneId};
+    use zellij_utils::data::{ListPanesResponse, PaneId};
 
     let (want_id, want_plugin) = match pane {
         PaneId::Terminal(id) => (id, false),
@@ -363,7 +355,7 @@ pub fn pane_is_floating_with_visibility(
     // values for tiled panes).
     let (floating_visible, focused_floating) = if is_floating {
         let tabs_json = query_list_tabs_json(session)?;
-        let tabs: ListTabsResponse = serde_json::from_str(&tabs_json).with_context(|| {
+        let tabs = parse_list_tabs_json(&tabs_json).with_context(|| {
             format!("pane_is_floating_with_visibility: parse ListTabs for '{session}'")
         })?;
         let active_tab = tabs.iter().find(|t| t.active).or_else(|| tabs.first());
