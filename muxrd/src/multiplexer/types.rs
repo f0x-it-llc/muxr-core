@@ -125,6 +125,18 @@ pub struct PaneFullscreenContext {
     pub focused_floating: Option<PaneRef>,
     /// The pane's tab already has a fullscreen pane.
     pub tab_fullscreen: bool,
+    /// Id of the tab that holds the pane (`None` when unknown).
+    pub tab_id: Option<u64>,
+    /// The holding tab's raw `active` flag. zellij reports it as a UNION —
+    /// "some attached client has this tab active" — so it is only the last
+    /// resort for "is this the relay's active tab"; see
+    /// [`Self::relay_focus_tab_id`].
+    pub tab_active: bool,
+    /// Id of the tab holding the relay's tracked focused pane (the
+    /// `relay_focus` passed to the query), when that pane was found. The
+    /// relay's own focus is the most direct evidence of which tab IT has
+    /// active, since zellij's `active` flag is not per client.
+    pub relay_focus_tab_id: Option<u64>,
 }
 
 impl PaneFullscreenContext {
@@ -136,6 +148,9 @@ impl PaneFullscreenContext {
             floating_visible: false,
             focused_floating: None,
             tab_fullscreen: false,
+            tab_id: None,
+            tab_active: false,
+            relay_focus_tab_id: None,
         }
     }
 
@@ -143,8 +158,21 @@ impl PaneFullscreenContext {
     /// up in every tab; the floating visibility, focused floating pane and
     /// fullscreen flag are then read from the tab that HOLDS it — not from the
     /// tab the snapshot marks active, which zellij reports as a union across
-    /// every attached client.
-    pub fn from_snapshot(snapshot: &LayoutSnapshot, pane: PaneRef) -> Self {
+    /// every attached client. `relay_focus` (the relay's tracked focused pane)
+    /// is located in the same snapshot to fill [`Self::relay_focus_tab_id`].
+    pub fn from_snapshot(
+        snapshot: &LayoutSnapshot,
+        pane: PaneRef,
+        relay_focus: Option<PaneRef>,
+    ) -> Self {
+        let tab_of = |wanted: PaneRef| {
+            snapshot.tabs.iter().find(|tab| {
+                tab.panes
+                    .iter()
+                    .any(|p| p.id == wanted.id && p.is_plugin == wanted.is_plugin)
+            })
+        };
+        let relay_focus_tab_id = relay_focus.and_then(tab_of).map(|tab| tab.tab_id);
         for tab in &snapshot.tabs {
             let Some(target) = tab
                 .panes
@@ -167,6 +195,9 @@ impl PaneFullscreenContext {
                 floating_visible: tab.floating_panes_visible,
                 focused_floating,
                 tab_fullscreen: tab.fullscreen_active,
+                tab_id: Some(tab.tab_id),
+                tab_active: tab.active,
+                relay_focus_tab_id,
             };
         }
         Self::not_found()

@@ -397,22 +397,26 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     ) -> anyhow::Result<(bool, bool, Option<PaneRef>)>;
 
     /// Live fullscreen-toggle context for `pane`: whether it exists, its
-    /// floating state, and whether its tab is already fullscreen. The relay's
-    /// hint-less `ToggleFullscreen` arm uses it to refuse a target it must not
-    /// act on and to choose the exit-vs-enter action sequence.
+    /// floating state, whether its tab is already fullscreen, and which tab
+    /// holds it (and holds `relay_focus`, the calling relay's tracked focused
+    /// pane, so the relay can tell whether the target is on ITS active tab).
+    /// The relay's hint-less `ToggleFullscreen` arm uses it to refuse a target
+    /// it must not act on and to choose the exit-vs-enter action sequence.
     ///
     /// The default derives the context from
     /// [`Self::pane_is_floating_with_visibility`] and reports the permissive
-    /// value for what that query cannot see — `exists: true` (never refuse) and
-    /// `tab_fullscreen: false` (the focus-then-toggle sequence) — so a backend
-    /// with neither notion (herdr) keeps its prior behaviour exactly. The zellij
-    /// backend overrides it from one `ListTabs` + `ListPanes` read. Blocking —
-    /// call from `spawn_blocking`.
+    /// value for what that query cannot see — `exists: true` (never refuse),
+    /// `tab_fullscreen: false` (the focus-then-toggle sequence), no tab ids and
+    /// `tab_active: true` — so a backend with none of these notions (herdr)
+    /// keeps its prior behaviour exactly. The zellij backend overrides it from
+    /// one `ListTabs` + `ListPanes` read. Blocking — call from `spawn_blocking`.
     fn pane_fullscreen_context(
         &self,
         session: &str,
         pane: PaneRef,
+        relay_focus: Option<PaneRef>,
     ) -> anyhow::Result<PaneFullscreenContext> {
+        let _ = relay_focus;
         let (is_floating, floating_visible, focused_floating) =
             self.pane_is_floating_with_visibility(session, pane)?;
         Ok(PaneFullscreenContext {
@@ -421,6 +425,9 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
             floating_visible,
             focused_floating,
             tab_fullscreen: false,
+            tab_id: None,
+            tab_active: true,
+            relay_focus_tab_id: None,
         })
     }
 

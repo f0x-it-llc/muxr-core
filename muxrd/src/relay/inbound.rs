@@ -291,8 +291,27 @@ pub(crate) async fn inbound_loop(
                     // backend's action sequence. Every outcome is replied so
                     // the gRPC handler answers ok:false on a refusal instead of
                     // a fire-and-forget ok:true.
-                    let outcome =
-                        toggle_fullscreen_once(&mut *sender, &backend, &session, pane, hint).await;
+                    //
+                    // This relay's own tracked view tells the resolution which
+                    // tab THIS client has active (zellij's per-tab `active` is a
+                    // union across clients). Copied out so no registry guard is
+                    // held across the await below.
+                    let relay_view = view_state
+                        .get(&connection_id)
+                        .map(|entry| RelayTabView {
+                            focused_pane: entry.state.focused_pane,
+                            active_tab: entry.state.active_tab,
+                        })
+                        .unwrap_or_default();
+                    let outcome = toggle_fullscreen_once(
+                        &mut *sender,
+                        &backend,
+                        &session,
+                        pane,
+                        hint,
+                        relay_view,
+                    )
+                    .await;
                     if let Ok(applied) = &outcome {
                         // The relay updates its OWN view state from the SAME
                         // resolved hint (key by connection_id so concurrent
@@ -525,24 +544,60 @@ fn hidden_floating_refusal(pane: PaneRef) -> String {
     )
 }
 
+/// What this relay knows of its OWN view, copied out of its `ViewStateEntry`
+/// (B-FOCUS) for the fullscreen resolution.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RelayTabView {
+    /// The pane this relay last focused (FocusPane / fill / enter toggle).
+    focused_pane: Option<PaneRef>,
+    /// The tab this relay last switched to (attach-time init / SwitchTab).
+    active_tab: Option<u64>,
+}
+
+/// Whether the target's tab is THIS relay's active tab.
+///
+/// zellij's per-tab `active` flag is a union ("some client has it active"),
+/// so the relay's own view decides first: the tab holding its tracked focused
+/// pane (located in the same live read, so a cross-tab FocusPane is
+/// reflected), then its tracked active tab. Only when the relay knows neither,
+/// or the backend reports no tab ids, does the union flag answer.
+fn target_on_relay_active_tab(ctx: &PaneFullscreenContext, view: RelayTabView) -> bool {
+    match (ctx.relay_focus_tab_id.or(view.active_tab), ctx.tab_id) {
+        (Some(relay_tab), Some(target_tab)) => relay_tab == target_tab,
+        _ => ctx.tab_active,
+    }
+}
+
 /// Resolve a LIVE backend context into the hint to apply, or a refusal.
 ///
-/// Refused, with no action sent: a pane the backend does not report, and a
-/// floating pane whose floating layer is hidden. Everything else keeps its
+/// Refused, with no action sent: a pane the backend does not report, a
+/// floating pane whose floating layer is hidden, and a tiled pane whose tab is
+/// ALREADY fullscreen but is not this relay's active tab — the exit toggle
+/// acts on the relay client's active tab, so it would fullscreen the relay's
+/// active pane there instead (and chasing the target with GoToTab risks an
+/// exit-status reply that drops the client). Everything else keeps its
 /// existing path — a visible focused floating pane hides the layer, a visible
-/// unfocused one is resized to fill, a tiled one enters fullscreen — except
-/// that a tiled target whose tab is ALREADY fullscreen carries
-/// `tab_fullscreen`, which makes the sender exit by toggling the relay
-/// client's active pane instead of refocusing the named pane.
+/// unfocused one is resized to fill, a tiled one enters fullscreen (its
+/// FocusPaneByPaneId switches tabs itself) — and a tiled target on the
+/// relay's own, already-fullscreen tab carries `tab_fullscreen`, which makes
+/// the sender exit by toggling the relay client's active pane instead of
+/// refocusing the named pane.
 fn resolve_live_context(
     pane: PaneRef,
     ctx: PaneFullscreenContext,
+    view: RelayTabView,
 ) -> Result<FullscreenHint, String> {
     if !ctx.exists {
         return Err(format!("{} not found", pane_label(pane)));
     }
     if ctx.is_floating && !ctx.floating_visible {
         return Err(hidden_floating_refusal(pane));
+    }
+    if !ctx.is_floating && ctx.tab_fullscreen && !target_on_relay_active_tab(&ctx, view) {
+        return Err(format!(
+            "{} is in another tab; switch to it first",
+            pane_label(pane)
+        ));
     }
     Ok(FullscreenHint {
         is_floating: ctx.is_floating,
@@ -584,16 +639,19 @@ async fn resolve_toggle_target(
     session: &str,
     pane: PaneRef,
     hint: Option<FloatingHint>,
+    view: RelayTabView,
 ) -> Result<FullscreenHint, String> {
     if let Some(h) = hint {
         return resolve_client_hint(pane, h);
     }
     let query_backend = backend.clone();
     let s = session.to_owned();
-    let query_fut =
-        tokio::task::spawn_blocking(move || query_backend.pane_fullscreen_context(&s, pane));
+    let relay_focus = view.focused_pane;
+    let query_fut = tokio::task::spawn_blocking(move || {
+        query_backend.pane_fullscreen_context(&s, pane, relay_focus)
+    });
     match tokio::time::timeout(FLOAT_QUERY_TIMEOUT, query_fut).await {
-        Ok(Ok(Ok(ctx))) => resolve_live_context(pane, ctx),
+        Ok(Ok(Ok(ctx))) => resolve_live_context(pane, ctx, view),
         Ok(Ok(Err(e))) => {
             log::warn!(
                 "relay inbound [{session}]: live pane query for {pane:?} failed — \
@@ -639,8 +697,9 @@ async fn toggle_fullscreen_once(
     session: &str,
     pane: PaneRef,
     hint: Option<FloatingHint>,
+    view: RelayTabView,
 ) -> Result<FullscreenHint, String> {
-    let resolved = match resolve_toggle_target(backend, session, pane, hint).await {
+    let resolved = match resolve_toggle_target(backend, session, pane, hint, view).await {
         Ok(resolved) => resolved,
         Err(refusal) => {
             log::info!("relay inbound [{session}]: ToggleFullscreen refused: {refusal}");
@@ -1546,11 +1605,16 @@ mod tests {
     #[derive(Debug, Default)]
     struct NoBackend {
         ctx: Option<Result<PaneFullscreenContext, String>>,
+        /// Every `relay_focus` a `pane_fullscreen_context` query was given.
+        seen_relay_focus: Mutex<Vec<Option<PaneRef>>>,
     }
 
     impl NoBackend {
         fn with_context(ctx: PaneFullscreenContext) -> Self {
-            NoBackend { ctx: Some(Ok(ctx)) }
+            NoBackend {
+                ctx: Some(Ok(ctx)),
+                ..NoBackend::default()
+            }
         }
     }
 
@@ -1632,7 +1696,9 @@ mod tests {
             &self,
             _: &str,
             _: PaneRef,
+            relay_focus: Option<PaneRef>,
         ) -> anyhow::Result<PaneFullscreenContext> {
+            self.seen_relay_focus.lock().unwrap().push(relay_focus);
             match &self.ctx {
                 Some(Ok(ctx)) => Ok(*ctx),
                 Some(Err(message)) => Err(anyhow::anyhow!(message.clone())),
@@ -1873,12 +1939,17 @@ mod tests {
         focused_floating: Option<PaneRef>,
         tab_fullscreen: bool,
     ) -> PaneFullscreenContext {
+        // Tab ids unknown to the relay view below by default; `tab_active: true`
+        // so a default (empty) relay view resolves "on the active tab".
         PaneFullscreenContext {
             exists,
             is_floating: floating,
             floating_visible: visible,
             focused_floating,
             tab_fullscreen,
+            tab_id: Some(2),
+            tab_active: true,
+            relay_focus_tab_id: None,
         }
     }
 
@@ -1892,12 +1963,142 @@ mod tests {
         Result<FullscreenHint, String>,
         Vec<(PaneRef, FullscreenHint)>,
     ) {
-        let backend: Arc<dyn MuxBackend> = Arc::new(NoBackend { ctx: Some(ctx) });
+        let (outcome, calls, _) = toggle_with(ctx, pane, hint, RelayTabView::default()).await;
+        (outcome, calls)
+    }
+
+    /// A hint-less [`toggle_with`] under an explicit relay view.
+    async fn toggle_against_view(
+        ctx: Result<PaneFullscreenContext, String>,
+        pane: PaneRef,
+        view: RelayTabView,
+    ) -> (
+        Result<FullscreenHint, String>,
+        Vec<(PaneRef, FullscreenHint)>,
+        Vec<Option<PaneRef>>,
+    ) {
+        toggle_with(ctx, pane, None, view).await
+    }
+
+    /// Run one toggle against `ctx` under `view`; returns the outcome, every
+    /// `toggle_fullscreen` call the sender saw, and every `relay_focus` the
+    /// backend query was asked to locate.
+    async fn toggle_with(
+        ctx: Result<PaneFullscreenContext, String>,
+        pane: PaneRef,
+        hint: Option<FloatingHint>,
+        view: RelayTabView,
+    ) -> (
+        Result<FullscreenHint, String>,
+        Vec<(PaneRef, FullscreenHint)>,
+        Vec<Option<PaneRef>>,
+    ) {
+        let concrete = Arc::new(NoBackend {
+            ctx: Some(ctx),
+            ..NoBackend::default()
+        });
+        let backend: Arc<dyn MuxBackend> = concrete.clone();
         let mut sender = FakeSender::plain();
         let toggles = sender.toggles.clone();
-        let outcome = toggle_fullscreen_once(&mut sender, &backend, "s", pane, hint).await;
+        let outcome = toggle_fullscreen_once(&mut sender, &backend, "s", pane, hint, view).await;
         let calls = toggles.lock().unwrap().clone();
-        (outcome, calls)
+        let asked = concrete.seen_relay_focus.lock().unwrap().clone();
+        (outcome, calls, asked)
+    }
+
+    /// Exit on a fullscreen tab that IS the relay's active tab (located via the
+    /// relay's tracked focused pane) → the exit toggle only, and the query was
+    /// asked to locate exactly that focused pane.
+    #[tokio::test]
+    async fn exit_on_the_relays_active_fullscreen_tab_toggles_only() {
+        let pane = PaneRef::terminal(11);
+        let focus = PaneRef::terminal(12);
+        let ctx = PaneFullscreenContext {
+            relay_focus_tab_id: Some(2),
+            tab_active: false, // the union flag must not override the relay's view
+            ..live(true, false, false, None, true)
+        };
+        let view = RelayTabView {
+            focused_pane: Some(focus),
+            active_tab: Some(9), // stale: the focused pane's tab wins
+        };
+        let (outcome, calls, asked) = toggle_against_view(Ok(ctx), pane, view).await;
+        let applied = outcome.expect("applied");
+        assert!(applied.tab_fullscreen);
+        assert_eq!(calls, vec![(pane, applied)]);
+        assert_eq!(asked, vec![Some(focus)]);
+
+        // No tracked focus: the relay's tracked active tab decides.
+        let ctx = PaneFullscreenContext {
+            tab_active: false,
+            ..live(true, false, false, None, true)
+        };
+        let view = RelayTabView {
+            focused_pane: None,
+            active_tab: Some(2),
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, view).await;
+        assert!(outcome.expect("applied").tab_fullscreen);
+        assert_eq!(calls.len(), 1);
+    }
+
+    /// Exit on a fullscreen tab that is NOT the relay's active tab → refused,
+    /// NO action sent (the toggle would hit the relay's own active tab, and a
+    /// GoToTab to chase the target risks an exit-status reply).
+    #[tokio::test]
+    async fn exit_on_a_fullscreen_tab_that_is_not_the_relays_active_tab_is_refused() {
+        let pane = PaneRef::terminal(11);
+        let refusal = "pane 11 is in another tab; switch to it first";
+
+        // Located via the relay's focused pane (tab 1 ≠ target tab 2).
+        let ctx = PaneFullscreenContext {
+            relay_focus_tab_id: Some(1),
+            ..live(true, false, false, None, true)
+        };
+        let view = RelayTabView {
+            focused_pane: Some(PaneRef::terminal(3)),
+            active_tab: Some(2), // stale: the focused pane's tab wins
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, view).await;
+        assert_eq!(outcome.unwrap_err(), refusal);
+        assert!(calls.is_empty(), "a refusal must send nothing: {calls:?}");
+
+        // Via the relay's tracked active tab.
+        let view = RelayTabView {
+            focused_pane: None,
+            active_tab: Some(1),
+        };
+        let (outcome, calls, _) =
+            toggle_against_view(Ok(live(true, false, false, None, true)), pane, view).await;
+        assert_eq!(outcome.unwrap_err(), refusal);
+        assert!(calls.is_empty());
+
+        // The relay knows neither: the union `active` flag is the last resort.
+        let ctx = PaneFullscreenContext {
+            tab_active: false,
+            ..live(true, false, false, None, true)
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, RelayTabView::default()).await;
+        assert_eq!(outcome.unwrap_err(), refusal);
+        assert!(calls.is_empty());
+    }
+
+    /// The ENTER case on a tab that is not the relay's active one still applies:
+    /// its FocusPaneByPaneId switches tabs itself.
+    #[tokio::test]
+    async fn enter_on_another_tab_still_applies() {
+        let pane = PaneRef::terminal(11);
+        let ctx = PaneFullscreenContext {
+            relay_focus_tab_id: Some(1),
+            ..live(true, false, false, None, false)
+        };
+        let view = RelayTabView {
+            focused_pane: Some(PaneRef::terminal(3)),
+            active_tab: Some(1),
+        };
+        let (outcome, calls, _) = toggle_against_view(Ok(ctx), pane, view).await;
+        assert!(!outcome.expect("applied").tab_fullscreen);
+        assert_eq!(calls.len(), 1);
     }
 
     /// Tab already fullscreen → applied with `tab_fullscreen`, which the zellij
@@ -2023,7 +2224,15 @@ mod tests {
             floating_visible: false,
             target_is_focused_floating: false,
         };
-        let outcome = toggle_fullscreen_once(&mut sender, &backend, "s", pane, Some(hidden)).await;
+        let outcome = toggle_fullscreen_once(
+            &mut sender,
+            &backend,
+            "s",
+            pane,
+            Some(hidden),
+            RelayTabView::default(),
+        )
+        .await;
         assert_eq!(
             outcome.unwrap_err(),
             "pane 8 is a hidden floating pane; fullscreen applies to tiled panes"
@@ -2035,9 +2244,16 @@ mod tests {
             floating_visible: false,
             target_is_focused_floating: false,
         };
-        let applied = toggle_fullscreen_once(&mut sender, &backend, "s", pane, Some(tiled))
-            .await
-            .expect("hinted tiled toggle applies");
+        let applied = toggle_fullscreen_once(
+            &mut sender,
+            &backend,
+            "s",
+            pane,
+            Some(tiled),
+            RelayTabView::default(),
+        )
+        .await
+        .expect("hinted tiled toggle applies");
         assert!(!applied.tab_fullscreen, "a hint carries no tab state");
         assert_eq!(toggles.lock().unwrap().len(), 1);
     }

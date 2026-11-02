@@ -32,8 +32,9 @@ pub struct FloatingHint {
 
 /// Reply channel of [`RelayControl::ToggleFullscreen`]: `Ok(())` once the
 /// action sequence was sent, `Err(message)` when the relay refused the target
-/// (unknown pane, hidden floating pane), could not read the live pane state, or
-/// failed to send — the message becomes the RPC's `ok:false` error.
+/// (unknown pane, hidden floating pane, fullscreen tab that is not the relay's
+/// active tab), could not read the live pane state, or failed to send — the
+/// message becomes the RPC's `ok:false` error.
 pub type ToggleFullscreenReply = tokio::sync::oneshot::Sender<Result<(), String>>;
 
 /// Control command routed to a live relay's AttachClient connection
@@ -66,7 +67,8 @@ pub enum RelayControl {
     ///
     /// The relay resolves the context (from `hint` or a live
     /// `MuxBackend::pane_fullscreen_context` query) into either a REFUSAL — the
-    /// pane does not exist, or is a hidden floating pane — or a neutral
+    /// pane does not exist, is a hidden floating pane, or sits on an
+    /// already-fullscreen tab that is not this relay's active tab — or a neutral
     /// `FullscreenHint`, and for the latter calls `MuxSender::toggle_fullscreen`,
     /// which owns the hide / fill / exit / enter action sequence
     /// (backend-specific; the zellij impl lives in `multiplexer::zellij`).

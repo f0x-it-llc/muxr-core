@@ -253,7 +253,12 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
         // fullscreen_is_active()`), so when the caller's layout came from another
         // client's view the pane it names may not be the fullscreened one;
         // focusing it first would make zellij move the fullscreen onto it
-        // instead of exiting.
+        // instead of exiting. The toggle acts on the relay client's ACTIVE tab,
+        // so the relay only resolves to this path when the target's tab IS that
+        // tab; a fullscreen tab elsewhere is refused upstream ("switch to it
+        // first") rather than chased with GoToTab, an action that may complete
+        // with a bare exit status and so drop the client like
+        // Show/HideFloatingPanes.
         vec![Action::ToggleFocusNoUiFullscreen]
     } else {
         // Enter path: focus then active-pane NO-UI fullscreen toggle (parity with
@@ -407,13 +412,19 @@ impl MuxBackend for ZellijBackend {
         &self,
         session: &str,
         pane: PaneRef,
+        relay_focus: Option<PaneRef>,
     ) -> Result<PaneFullscreenContext> {
         // One ListTabs + ListPanes read through the single layout parse; the
         // pane's OWN tab supplies the floating visibility, focused floating pane
         // and the tab-level `is_fullscreen_active` (not per-client, unlike
-        // `PaneInfo.is_fullscreen`).
+        // `PaneInfo.is_fullscreen`); the same read locates the relay's tracked
+        // focused pane, which tells the relay which tab IT has active.
         let snapshot = self.query_layout(session)?;
-        Ok(PaneFullscreenContext::from_snapshot(&snapshot, pane))
+        Ok(PaneFullscreenContext::from_snapshot(
+            &snapshot,
+            pane,
+            relay_focus,
+        ))
     }
 
     // ── Attach (the relay seam) ─────────────────────────────────────────────
@@ -761,9 +772,18 @@ mod tests {
         panes: &[PaneListEntry],
         pane: PaneRef,
     ) -> PaneFullscreenContext {
+        context_with_focus(tabs, panes, pane, None)
+    }
+
+    fn context_with_focus(
+        tabs: &[TabInfo],
+        panes: &[PaneListEntry],
+        pane: PaneRef,
+        relay_focus: Option<PaneRef>,
+    ) -> PaneFullscreenContext {
         let tabs_json = serde_json::to_string_pretty(tabs).unwrap();
         let snapshot = parse_zellij_layout(&tabs_json, &panes_json(panes)).unwrap();
-        PaneFullscreenContext::from_snapshot(&snapshot, pane)
+        PaneFullscreenContext::from_snapshot(&snapshot, pane, relay_focus)
     }
 
     #[test]
@@ -780,6 +800,37 @@ mod tests {
         assert!(!ctx.is_floating);
         assert!(ctx.tab_fullscreen);
         assert!(!ctx.floating_visible);
+        assert_eq!(ctx.tab_id, Some(1));
+        assert!(!ctx.tab_active, "tab_info marks only position 0 active");
+        assert_eq!(ctx.relay_focus_tab_id, None);
+    }
+
+    /// The same read locates the relay's tracked focused pane, so the relay
+    /// can tell whether the target is on ITS active tab.
+    #[test]
+    fn context_locates_the_relay_focus_tab() {
+        let tabs = [tab_info(0, 0, false, false), tab_info(1, 1, true, false)];
+        let panes = [
+            pane_entry(1, 0, false, true),
+            pane_entry(2, 1, false, false),
+        ];
+        let ctx = context_with_focus(
+            &tabs,
+            &panes,
+            PaneRef::terminal(2),
+            Some(PaneRef::terminal(1)),
+        );
+        assert_eq!(ctx.tab_id, Some(1));
+        assert_eq!(ctx.relay_focus_tab_id, Some(0));
+
+        // A focus pane that no longer exists locates nothing.
+        let gone = context_with_focus(
+            &tabs,
+            &panes,
+            PaneRef::terminal(2),
+            Some(PaneRef::terminal(99)),
+        );
+        assert_eq!(gone.relay_focus_tab_id, None);
     }
 
     #[test]
