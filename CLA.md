@@ -30,7 +30,7 @@ for sale, import and otherwise transfer the Contribution and the project.
 
 ## 4. Why we ask for this
 
-The project is published under the PolyForm Noncommercial License 1.0.0,
+The project is published under the PolyForm Shield License 1.0.0,
 and F0X IT LLC also licenses it commercially. Sections 2 and 3 let us
 include your Contribution in both.
 
