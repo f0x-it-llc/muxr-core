@@ -96,9 +96,9 @@
         <section id="tokens">
           <h2>The CLI route</h2>
           <p>Every wizard step is a <code>muxrd</code> subcommand, for scripted installs. Replace <code>100.x.y.z</code> with your server's address.</p>
-          <p>Create the data directory and a self-signed certificate for that address (<code>--san</code> is repeatable; <code>MUXRD_SAN</code> takes a comma-separated list):</p>
+          <p>Create the data directory (<code>~/.local/share/zellij/muxrd/</code> on Linux) and a self-signed certificate for that address (<code>--san</code> is repeatable; <code>MUXRD_SAN</code> takes a comma-separated list):</p>
           <div class="code-block"><pre><code>muxrd init --san 100.x.y.z</code></pre></div>
-          <p>Start the daemon, detached (the default bind is <code>127.0.0.1:50051</code>, which a phone cannot reach):</p>
+          <p>Start the daemon, detached (<code>MUXRD_BIND</code> also sets the address; the default, <code>127.0.0.1:50051</code>, is unreachable from a phone):</p>
           <div class="code-block"><pre><code>muxrd start --bind 100.x.y.z:50051 --daemonize</code></pre></div>
           <p>Mint a token, a view-only token, and one that stops pairing new devices after 24 hours (<code>--expires-in</code> takes <code>30m</code>, <code>24h</code>, <code>7d</code> or <code>never</code>, the default):</p>
           <div class="code-block"><pre><code>muxrd create-token --name mobile
