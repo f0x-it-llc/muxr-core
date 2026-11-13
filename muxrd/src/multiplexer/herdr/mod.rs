@@ -42,9 +42,9 @@
 //! upstream source, the Apache-2.0 licence, and the fact that it was modified
 //! for muxrd's connection-per-request client (see `api.rs`). herdr's
 //! Apache-2.0 code is included with its license and attribution kept, as
-//! THIRD-PARTY-NOTICES.md records. A file that still
-//! describes itself only as "independently authored" has not been revisited
-//! under the new licence and must not be assumed derived.
+//! THIRD-PARTY-NOTICES.md records. A file that still describes itself only as
+//! "independently authored" has not been revisited since herdr moved to
+//! Apache-2.0 and must not be assumed derived.
 
 pub mod api;
 pub mod backend;
