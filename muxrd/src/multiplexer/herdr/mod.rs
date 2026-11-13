@@ -5,7 +5,7 @@
 //!
 //! # herdr backend — Phase 2 foundation
 //!
-//! This module is the interface boundary between muxrd (MIT) and herdr
+//! This module is the interface boundary between muxrd (PolyForm Noncommercial 1.0.0) and herdr
 //! (Apache-2.0 as of herdr v0.8.0; AGPL-3.0-or-later before that). herdr is a
 //! separate, unmodified, user-installed binary.  muxrd drives it solely
 //! through herdr's **public** Unix-domain sockets:
@@ -40,9 +40,9 @@
 //!
 //! A file whose types are derived this way carries its own header naming the
 //! upstream source, the Apache-2.0 licence, and the fact that it was modified
-//! for muxrd's connection-per-request client (see `api.rs`). MIT and
-//! Apache-2.0 are both permissive and combine freely in one MIT-licensed
-//! crate, so that attribution costs nothing extra. A file that still
+//! for muxrd's connection-per-request client (see `api.rs`). herdr's
+//! Apache-2.0 code is included with its license and attribution kept, as
+//! THIRD-PARTY-NOTICES.md records. A file that still
 //! describes itself only as "independently authored" has not been revisited
 //! under the new licence and must not be assumed derived.
 

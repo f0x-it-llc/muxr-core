@@ -64,8 +64,8 @@ The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the l
 
 ## Links
 
-- **GitHub:** [`f0x-it-llc/muxr-core`](https://github.com/f0x-it-llc/muxr-core) (open-source MIT backend)
+- **GitHub:** [`f0x-it-llc/muxr-core`](https://github.com/f0x-it-llc/muxr-core) (source-available backend, PolyForm Noncommercial 1.0.0)
 - **Server:** Rust gRPC backend and TUI pairing tool (`muxrctl`)
-- **App:** Closed-source [Frust](https://frust.dev)-native mobile/tablet client
+- **App:** [Frust](https://frust.dev)-native mobile/tablet client; its source is published under the same license at https://github.com/f0x-it-llc/muxr-app
 
-The backend is self-hosted and open-source; the Frust-native app is closed-source.
+The backend is self-hosted and source-available.

@@ -22,7 +22,7 @@ if [ -z "${MUXR_DEMO_WELCOMED:-}" ]; then
 
   Welcome to the Muxr demo terminal.
   This is a real, sandboxed shell attached to a real read-only clone of the
-  open-source muxr-core repo: no sudo, no network egress, read-only files,
+  source-available muxr-core repo: no sudo, no network egress, read-only files,
   and everything resets when the demo restarts. Explore freely:
 
     git log --oneline    bat muxrd/src/lib.rs    rg AttachTerminal    tree
