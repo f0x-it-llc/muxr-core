@@ -4,7 +4,7 @@ This document records the attribution obligations for code and techniques incorp
 
 ## Apache-2.0 code in this project
 
-muxr-core is licensed under the PolyForm Noncommercial License 1.0.0. It includes derived code from the herdr project, which is licensed under Apache-2.0. That code stays under Apache-2.0, and its license text and attribution are kept as the Apache license requires.
+muxr-core is licensed under the PolyForm Shield License 1.0.0. It includes derived code from the herdr project, which is licensed under Apache-2.0. That code stays under Apache-2.0, and its license text and attribution are kept as the Apache license requires.
 
 ## herdr
 

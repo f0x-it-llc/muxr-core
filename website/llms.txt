@@ -6,7 +6,7 @@
 - Supported multiplexers: zellij and herdr
 - How it connects: the app talks to muxrd, a self-hosted server daemon, over TLS with token authentication and QR pairing
 - Price: free to download; Muxr Pro is a one-time $9.99 in-app purchase that unlocks more than one server
-- License: source available under the PolyForm Noncommercial License 1.0.0
+- License: source available. The server (muxr-core) is under the PolyForm Shield License 1.0.0: free for any use except providing a competing product. The app (muxr-app) is under the PolyForm Noncommercial License 1.0.0
 - Publisher: F0X IT LLC
 - Coming soon: tmux support, push notifications, voice input and desktop apps
 

@@ -5,7 +5,7 @@
 //!
 //! # herdr backend — Phase 2 foundation
 //!
-//! This module is the interface boundary between muxrd (PolyForm Noncommercial 1.0.0) and herdr
+//! This module is the interface boundary between muxrd (PolyForm Shield 1.0.0) and herdr
 //! (Apache-2.0 as of herdr v0.8.0; AGPL-3.0-or-later before that). herdr is a
 //! separate, unmodified, user-installed binary.  muxrd drives it solely
 //! through herdr's **public** Unix-domain sockets:

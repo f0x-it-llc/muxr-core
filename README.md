@@ -181,11 +181,11 @@ version computation via the anchored `tag_pattern` in `cliff.toml`.
 
 ## License
 
-[PolyForm Noncommercial License 1.0.0](LICENSE)
+[PolyForm Shield License 1.0.0](LICENSE)
 
 Required Notice: Copyright (c) 2026 F0X IT LLC
 
-The software is free to use, modify and share for noncommercial purposes. Commercial use needs a license from F0X IT LLC. Releases up to and including v0.5.2 were published under the MIT License and remain available under it.
+The software is free to use, modify and share for any purpose, including at work, except to provide a product that competes with Muxr. A competing use needs a license from F0X IT LLC. Releases up to and including v0.5.2 were published under the MIT License and remain available under it.
 
 Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLA.md`](CLA.md). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
 Apache-2.0 attribution covering the portions derived from herdr's source.
