@@ -18,6 +18,12 @@ muxr-core is licensed under the MIT License. This project includes derived code 
 
 ---
 
+## Store badges
+
+The files under `website/assets/img/badges/` are trademarks and artwork of Apple Inc. and Google LLC, used under their marketing guidelines, and are not covered by this repository's MIT license.
+
+---
+
 ## Apache-2.0 License Text
 
 The following is the full text of the Apache License, Version 2.0, which applies to the herdr-derived portions of this project:

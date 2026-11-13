@@ -280,6 +280,17 @@ figcaption.shot-caption{ font-size:11.5px; color:var(--fg-dim); text-align:cente
   .js .doc-toc-toggle::after{ transition:none; }
 }
 
+/* ============ store badges / wide shots / trademark note ============ */
+.store-badges{ display:flex; flex-wrap:wrap; gap:16px; margin-top:16px; }
+.hero-cta .store-badges{ flex-basis:100%; margin-top:0; }
+.store-badges a{ display:inline-block; padding:11px; }
+.store-badges img{ height:44px; width:auto; display:block; }
+/* google-play.png is 646x250 with a 564x168 visible badge (41px padding): 44/168 x 250 = 65.5px tall, -10.7px margins trim the padding */
+.store-badges img[src$="google-play.png"]{ height:65.5px; margin:-10.7px; }
+figure.shot.shot-wide{ max-width:100%; }
+.shot-wide .shot-frame{ border-radius:10px; }
+.trademark-note{ font-size:11px; color:var(--fg-dim); margin:0; }
+
 /* ============ device-figure (guide illustrative pairs) ============ */
 .device-figure{ display:grid; grid-template-columns:1fr 260px; gap:40px; align-items:start; margin-top:8px; }
 @media (max-width:860px){
