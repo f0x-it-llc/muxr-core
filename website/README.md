@@ -36,14 +36,14 @@ Design: **Glyph** — a single stylesheet (`assets/css/glyph.css`) shared by eve
 - **`advanced.html`** — Advanced setup: the `muxrctl` dashboard keys, the `muxrd` command-line route, LAN, a public domain, and the Docker dev rig. Linked from `docs.html`, not from the top nav.
 - **`guide.html`** — Usage Guide: gestures, command center, keyboard bar, fullscreen modes, tablet differences, and settings.
 - **`privacy.html`** — Privacy Policy: what the app, site, and optional Muxr Push relay do (and don't) collect. Serves as the Privacy Policy URL required by the Apple App Store and Google Play listings.
-- **`terms.html`** — Terms of Use / End User License Agreement (custom EULA) covering licence, subscription/purchase terms, and disclaimers. Required by the App Store and Play Store as the app's terms/EULA link.
+- **`terms.html`** — Terms of Use / End User License Agreement (custom EULA) covering licence, purchase terms, and disclaimers. Required by the App Store and Play Store as the app's terms/EULA link.
 - **`support.html`** — Support page: contact info, bug reporting, and an FAQ. Serves as the Support URL required by both app stores.
 - **`robots.txt`**, **`sitemap.xml`**, **`llms.txt`** — Crawler and AI-agent files served from the web root (`favicon.png` sits beside them). Keep each `<lastmod>` in `sitemap.xml` and the facts in `llms.txt` in step with page changes.
 - **`assets/`** — Static resources:
-  - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file.
+  - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file. `/assets/` is cached as immutable for 30 days, so every page links it as `glyph.css?v=N`: raise `N` on all pages whenever the stylesheet changes, and give a changed image a new file name.
   - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections, and the phone-width "On this page" toggle/breadcrumb injected into `.doc-sidebar` (paired with glyph.css's `html.js` gating and the `--nav-h` token).
   - `img/logo.svg` — 4-square grid mark (also favicon).
-  - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures, plus the `muxrctl` captures (WebP, 1600 px wide): `muxrctl-wizard-1-welcome.webp`, `muxrctl-wizard-2-network.webp`, `muxrctl-wizard-3-certificate.webp`, `muxrctl-wizard-4-token.webp`, `muxrctl-wizard-5-daemon.webp`, `muxrctl-wizard-6-pair.webp` (on `docs.html`) and `muxrctl-dashboard.webp` (on `advanced.html`); replace by regenerating, never by editing.
+  - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures, plus the `muxrctl` captures (WebP, cropped to the dialog, about 1200 px wide): `wizard-1-welcome.webp`, `wizard-2-network.webp`, `wizard-3-certificate.webp`, `wizard-4-token.webp`, `wizard-5-daemon.webp`, `wizard-6-pair.webp` (on `docs.html`) and `dashboard.webp` (on `advanced.html`); replace by regenerating, never by editing.
 
 All seven pages share the same `.site-nav` header and `.site-footer` footer (Home, Docs, Guide, Support, Privacy, Terms, GitHub).
 
