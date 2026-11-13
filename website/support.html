@@ -135,7 +135,7 @@
             <li><strong>Your server runs the herdr backend.</strong> Push requires herdr's event kernel — a zellij-only <code>muxrd</code> refuses device registration and reports push as unsupported.</li>
             <li><strong>Your server has a relay configured.</strong> <code>muxrd</code>'s <code>notify_relay_url</code> setting (or the <code>MUXRD_NOTIFY_RELAY_URL</code> environment variable) points at the hosted Muxr Push relay by default; setting it empty disables push entirely.</li>
             <li><strong>Your server can reach the relay.</strong> Notifications are sent by <code>muxrd</code> to the relay — not by your phone — so check the server's network and firewall if sends fail. Your phone only contacts the relay once, at registration time. If you're self-hosting <code>muxr-notify</code>, confirm it is running and reachable from the server.</li>
-            <li><strong>The hosted relay currently supports Android devices only</strong> (see the Privacy Policy). It is what a <strong>Muxr Push subscription</strong> pays for; a self-hosted relay is free and needs no subscription.</li>
+            <li><strong>The hosted relay currently supports Android devices only</strong> (see the Privacy Policy). Access to it is part of <strong>Pro</strong>; there is no subscription. You can also self-host the relay.</li>
           </ul>
           <p>See the <a href="privacy.html#push">Privacy Policy's Muxr Push section</a> for what a notification does and doesn't contain.</p>
         </section>
