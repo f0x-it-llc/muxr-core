@@ -1,0 +1,33 @@
+# Muxr
+
+> Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon. It connects over TLS with token authentication and QR pairing.
+
+- Platforms: iPhone, iPad, Android phones and tablets
+- Supported multiplexers: zellij and herdr
+- How it connects: the app talks to muxrd, a self-hosted server daemon, over TLS with token authentication and QR pairing
+- Price: free to download; Muxr Pro is a one-time $9.99 in-app purchase that unlocks more than one server
+- License: source available under the PolyForm Noncommercial License 1.0.0
+- Publisher: F0X IT LLC
+- Coming soon: tmux support, push notifications, voice input and desktop apps
+
+## Docs
+
+- [Quick start](https://muxr.app/docs.html): install muxrd and pair your phone
+- [Advanced setup](https://muxr.app/advanced.html): LAN, public domain, command line and Docker
+- [Usage guide](https://muxr.app/guide.html): gestures, tabs, panes and the key bar
+
+## Get the app
+
+- [App Store](https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967)
+- [Google Play](https://play.google.com/store/apps/details?id=com.it.f0x.muxr)
+
+## Source
+
+- [muxr-core](https://github.com/f0x-it-llc/muxr-core): the muxrd server, muxrctl and the website
+- [muxr-app](https://github.com/f0x-it-llc/muxr-app): the mobile app
+
+## Optional
+
+- [Support](https://muxr.app/support.html)
+- [Privacy](https://muxr.app/privacy.html)
+- [Terms](https://muxr.app/terms.html)
