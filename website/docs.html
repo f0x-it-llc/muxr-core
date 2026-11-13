@@ -3,8 +3,8 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Getting Started — server, tailnet, pairing · Muxr</title>
-  <meta name="description" content="Install muxrd, put it on your Tailscale tailnet, run the muxrctl setup wizard, and scan the pairing QR with the Frust-native Muxr app.">
+  <title>Quick Start — app, server, tailnet, pairing · Muxr</title>
+  <meta name="description" content="Get the Muxr app, install muxrd, reach it over a Tailscale tailnet, run the muxrctl setup wizard and scan the pairing QR.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -52,8 +52,8 @@
 
     <div class="doc-header">
       <span class="eyebrow">Documentation</span>
-      <h1>Getting <span>Started</span></h1>
-      <p class="doc-lead">Install the server, put it on your tailnet, run the setup wizard, scan the QR.</p>
+      <h1>Quick <span>Start</span></h1>
+      <p class="doc-lead">Five steps from a bare server to a terminal on your phone.</p>
     </div>
 
     <div class="doc-layout">
@@ -61,291 +61,69 @@
       <aside class="doc-sidebar" aria-label="On this page">
         <div class="doc-sidebar-title">On this page</div>
         <ol class="doc-nav-list">
-          <li><a class="doc-nav-link" href="#overview">Overview</a></li>
-          <li><a class="doc-nav-link" href="#prerequisites">Prerequisites</a></li>
+          <li><a class="doc-nav-link" href="#app">Get the app</a></li>
           <li><a class="doc-nav-link" href="#install">Install the server</a></li>
-          <li><a class="doc-nav-link" href="#tailscale">Reach it over Tailscale</a></li>
-          <li><a class="doc-nav-link" href="#muxrctl">Set up with muxrctl</a></li>
-          <li><a class="doc-nav-link" href="#tokens">The CLI route</a></li>
-          <li><a class="doc-nav-link" href="#lan">LAN instead of a tailnet</a></li>
-          <li><a class="doc-nav-link" href="#public">Public domain (least recommended)</a></li>
-          <li><a class="doc-nav-link" href="#pair">Pair your device (QR)</a></li>
-          <li><a class="doc-nav-link" href="#docker">Docker dev rig</a></li>
-          <li><a class="doc-nav-link" href="#connect">Connect from the app</a></li>
+          <li><a class="doc-nav-link" href="#tailscale">Reach it over a tailnet</a></li>
+          <li><a class="doc-nav-link" href="#wizard">Run muxrctl</a></li>
+          <li><a class="doc-nav-link" href="#pair">Scan the QR</a></li>
         </ol>
+        <p class="doc-sidebar-title"><a href="advanced.html">Advanced setup →</a></p>
       </aside>
 
       <div class="doc-content">
 
-        <section id="overview">
-          <h2>Overview</h2>
-          <p>Muxr is two pieces that talk to each other over TLS-secured gRPC:</p>
-          <ul>
-            <li><strong>The Muxr app</strong> — a Frust-native client (<a href="https://frust.dev" target="_blank" rel="noopener noreferrer">Frust</a> is a Rust UI framework) for Android and iOS that renders your sessions and sends input.</li>
-            <li><strong><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a></strong> (open-source MIT) — a Rust gRPC backend (<code>muxrd</code>) that relays over your terminal multiplexer's native IPC — <a href="https://zellij.dev/" target="_blank" rel="noopener noreferrer">zellij</a> or <a href="https://herdr.dev/" target="_blank" rel="noopener noreferrer">herdr</a> — plus the setup TUI (dashboard + wizard), <code>muxrctl</code>.</li>
-          </ul>
-          <p>The server speaks the <code>muxr.v1</code> protobuf contract and must be running alongside a <code>zellij</code> or <code>herdr</code> instance on the machine you want to control — at startup it auto-detects whichever backends are available. The app connects over your network to that server.</p>
-          <p>The shortest path from a bare machine to a terminal on your phone is four moves: install the server, put it on a tailnet, run the setup wizard, scan the QR. Each has its own section below, in that order.</p>
-        </section>
-
-        <section id="prerequisites">
-          <h2>Prerequisites</h2>
-          <ul>
-            <li><strong>A terminal multiplexer</strong> — at least one of:
-              <ul>
-                <li><strong>zellij <code>0.45.1</code></strong> on your <code>PATH</code> for the zellij backend. The server validates the version at startup and refuses to start against a mismatched binary; set <code>MUXRD_SKIP_VERSION_CHECK=1</code> to bypass this check in development.</li>
-                <li><strong>herdr <code>0.9.0</code></strong> (wire protocol 22) running for the herdr backend — a separate, unmodified, user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at runtime over the JSON control socket and echoes it back on the handshake, since herdr enforces strict protocol equality and rejects clients that are either older or newer than itself.</li>
-              </ul>
-              muxrd auto-detects whichever are present and serves all available backends simultaneously; pass <code>--backend</code> / <code>MUXRD_BACKEND</code> to restrict to one.</li>
-            <li><strong>Tailscale</strong> on the server and on your phone — the recommended way to reach muxrd (see <a href="#tailscale">Reach it over Tailscale</a>).</li>
-            <li><strong>Rust 1.95</strong> (edition 2024) — required only if building from source.</li>
-            <li><strong>Docker</strong> — optional; use the dev rig instead of building if you prefer (see <a href="#docker">Docker dev rig</a>).</li>
-          </ul>
+        <section id="app">
+          <h2>1. Get the app</h2>
+          <p>Install Muxr on your phone or tablet.</p>
+          <div class="store-badges">
+            <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967" target="_blank" rel="noopener noreferrer"><img src="assets/img/badges/app-store.svg" width="120" height="40" alt="Download on the App Store"></a>
+            <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr" target="_blank" rel="noopener noreferrer"><img src="assets/img/badges/google-play.png" width="646" height="250" alt="Get it on Google Play"></a>
+          </div>
         </section>
 
         <section id="install">
-          <h2>Install the server</h2>
-          <p>The server is the open-source <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer"><code>muxr-core</code></a> project. The quickest install is the release script, which downloads a checksum-verified prebuilt suite for your platform (Linux <code>x86_64</code>/<code>aarch64</code>, macOS <code>aarch64</code>):</p>
+          <h2>2. Install the server</h2>
+          <p>Run this on the machine whose sessions you want to reach:</p>
           <div class="code-block"><pre><code>curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.sh | bash</code></pre></div>
-          <p>Pin a specific release with <code>--version X.Y.Z</code>, or override the install location with <code>MUXR_INSTALL_DIR</code>. Either way you get two binaries:</p>
-          <ul>
-            <li><code>muxrd</code> — the gRPC backend daemon.</li>
-            <li><code>muxrctl</code> — the setup TUI (dashboard + wizard).</li>
-          </ul>
-          <p>Prefer to build from source? Clone the repository:</p>
-          <div class="code-block"><pre><code>git clone https://github.com/f0x-it-llc/muxr-core</code></pre></div>
-          <p>Then compile it with a Rust 1.95+ toolchain, from the clone:</p>
-          <div class="code-block"><pre><code>cargo build --release</code></pre></div>
-          <p>Or use the <a href="#docker">Docker dev rig</a> — it builds and runs both in a container without a local Rust toolchain.</p>
+          <p>It installs <code>muxrd</code>, the server, and <code>muxrctl</code>, its setup TUI.</p>
+          <p>Prerequisite: zellij <code>0.45.1</code> (muxrd refuses a mismatched version) or herdr on the server.</p>
         </section>
 
         <section id="tailscale">
-          <h2>Reach it over Tailscale — recommended</h2>
-          <p>muxrd binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. Something has to carry your phone to the server — in order of preference that's a tailnet (this section), your <a href="#lan">LAN</a>, or, least recommended, a <a href="#public">public domain</a> — and a <a href="https://tailscale.com" target="_blank" rel="noopener noreferrer">Tailscale</a> tailnet is the one we recommend:</p>
-          <ul>
-            <li>Every device in a tailnet can reach every other one by default — <strong>no port forwarding</strong>, no router configuration, nothing exposed publicly.</li>
-            <li>The traffic runs over a private, encrypted network between your own devices.</li>
-            <li>The address is <strong>stable</strong> — it stays with the machine until you remove it from the tailnet, so a paired phone keeps working.</li>
-            <li>It works from mobile data, not just from your own Wi-Fi, so the same pairing follows you out of the house.</li>
-          </ul>
-
+          <h2>3. Reach it over a tailnet</h2>
           <ol>
-            <li><strong>Install Tailscale on the server.</strong> On Linux:
-              <div class="code-block"><pre><code>curl -fsSL https://tailscale.com/install.sh | sh</code></pre></div>
-              On macOS, download it from <a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a>.</li>
-            <li><strong>Sign the server into your tailnet.</strong> This prints a login URL — open it and authenticate:
-              <div class="code-block"><pre><code>sudo tailscale up</code></pre></div></li>
-            <li><strong>Install Tailscale on your phone</strong> from the App Store or Google Play (both are linked from <a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">tailscale.com/download</a>), and sign it into the <strong>same tailnet</strong> as the server.</li>
-            <li><strong>Read the server's tailnet address.</strong> On the server:
-              <div class="code-block"><pre><code>tailscale ip -4</code></pre></div>
-              That <code>100.x.y.z</code> address is what you use everywhere below — as the bind host in the wizard, as the certificate SAN, and as the host the pairing QR advertises.</li>
+            <li>Install <a href="https://tailscale.com/download" target="_blank" rel="noopener noreferrer">Tailscale</a> on the server and on your phone.</li>
+            <li>Sign both into the same tailnet (<code>sudo tailscale up</code> on a Linux server).</li>
+            <li>Note the server's <code>100.x.y.z</code> address: <code>tailscale ip -4</code>.</li>
           </ol>
-
-          <div class="callout callout-note">
-            <div class="callout-title">MagicDNS name — optional</div>
-            <p>With <a href="https://tailscale.com/kb/1081/magicdns" target="_blank" rel="noopener noreferrer">MagicDNS</a> enabled, the machine also answers to <code>&lt;machine&gt;.&lt;tailnet&gt;.ts.net</code>. If you would rather dial that name than the address, add it as an extra Subject Alternative Name so the certificate covers it — <code>MUXRD_SAN</code> takes a comma-separated list, and everything in it is folded into the certificate. Tailscale's <code>tailscale cert</code> can also issue a publicly trusted certificate for that name, which lets the app use ordinary CA trust instead of a pinned fingerprint.</p>
-          </div>
-
           <div class="callout callout-warn">
             <div class="callout-title">Device keys expire after 180 days</div>
-            <p>By default a Tailscale device key expires after 180 days, and the machine drops off the tailnet until you sign it in again — which would cut your phone off from a server you are not sitting in front of. For an always-on server, disable key expiry for that machine in the Tailscale admin console. The rest of Tailscale's documentation lives at <a href="https://tailscale.com/kb" target="_blank" rel="noopener noreferrer">tailscale.com/kb</a>.</p>
+            <p>Disable key expiry for an always-on server in the Tailscale admin console, or it drops off the tailnet.</p>
           </div>
+          <p>Using a <a href="advanced.html#lan">LAN</a> or a <a href="advanced.html#public">public domain</a> instead? Follow Advanced setup for that step, then come back for step 4.</p>
         </section>
 
-        <section id="muxrctl">
-          <h2>Set up with <code>muxrctl</code></h2>
-          <p><code>muxrctl</code> is the setup TUI. It takes no arguments — launch it on the server, over SSH if the machine is headless:</p>
-          <div class="code-block"><pre><code>muxrctl</code></pre></div>
-          <p>On a fresh data directory — no certificate and no tokens — the <strong>setup wizard</strong> opens by itself. If you have set things up before, or you closed the wizard and want it back, press <kbd class="kbd">w</kbd> on the dashboard to reopen it.</p>
-
-          <h3>The setup wizard</h3>
-          <p>The wizard is six steps. A stepper at the top counts them (<strong>Step 1 of 6</strong> … <strong>Step 6 of 6</strong>), a <strong>Back</strong> / <strong>Next</strong> row moves through them — the last step offers <strong>Done</strong> instead of Next — and the footer reminds you of the controls: <code>Esc cancels · Tab moves · Enter presses</code>.</p>
-          <ol>
-            <li><strong>Welcome</strong> — it says what it is about to do and what it found on this machine: whether a certificate is present or absent, how many tokens exist, and whether the daemon is running or stopped. Nothing to fill in; Next moves on.</li>
-            <li><strong>Network</strong> — <em>Bind host</em> (placeholder <code>0.0.0.0</code>), <em>Port</em> (placeholder <code>50051</code>), and a picker of the reachable addresses found on this machine's interfaces. Your <strong>tailnet address is in that picker</strong>, because tailscaled assigns it to a local interface — pick it. The step explains the choice in three lines:
-              <ul>
-                <li><code>127.0.0.1 — only this machine; a phone cannot reach it.</code></li>
-                <li><code>0.0.0.0 — every interface; the QR advertises a real address for you.</code></li>
-                <li><code>A specific IP — only that interface; the QR advertises it. Port: 50051.</code></li>
-              </ul>
-              <p><code>0.0.0.0</code> listens on every interface — including a public one on an internet-facing host — so prefer the concrete tailnet or LAN address, and firewall port <code>50051</code> if you must use it.</p>
-              Binding the tailnet address is the recommended choice: muxrd then listens <em>only</em> on the tailnet, and the pairing QR advertises exactly that address. Next saves the bind address to muxrd's configuration.</li>
-            <li><strong>Certificate</strong> — shows what is being served, the <em>Planned SANs</em> a new certificate would claim (<code>127.0.0.1</code>, <code>localhost</code>, every reachable address, the bind host when it is a concrete one, and anything in <code>MUXRD_SAN</code>), and an <em>Advertised trust</em> control cycling <strong>Auto</strong> / <strong>CA</strong> / <strong>Pin</strong>. It resolves to one of two outcomes, spelled out under the control: <code>tm=pin: the QR carries the SHA-256 fingerprint</code>, or <code>tm=ca: no fingerprint in the QR</code>. If a certificate already exists, replacing it costs every paired phone, so the step makes you tick <strong>Regenerate anyway (every phone must re-pair)</strong> first. Next creates the certificate when there is none.</li>
-            <li><strong>Pairing token</strong> — three controls, each with a sentence under it. <em>Name</em> is optional: <code>A label for the phone or person; a name is generated when empty.</code> The <em>Read-only</em> checkbox: <code>A read-only token can navigate tabs, panes and spaces, scroll and size its own view, but never types or changes the session.</code> <em>Expires</em> cycles <strong>never</strong> / <strong>30 minutes</strong> / <strong>1 hour</strong> / <strong>24 hours</strong> / <strong>7 days</strong>: <code>After the window the token can no longer pair a new device; a live session runs to its own TTL. Only Revoke disconnects a phone; ‘never’ lasts until revoked.</code> Next mints the token.</li>
-            <li><strong>Daemon</strong> — if muxrd is stopped, the step reads <code>Next starts muxrd with the bind address from the Network step.</code>; if it is already up, <code>Already running — Next goes on to pairing.</code> Starting it here runs <code>muxrd start --daemonize</code> with the bind address and SANs you chose, so there is no separate command to remember.</li>
-            <li><strong>Pair your phone</strong> — the pairing QR, with the server it points at and the certificate it pins printed beneath it as <code>Server: &lt;host&gt;:&lt;port&gt;   Cert: &lt;fingerprint&gt;</code>, and the instruction <code>Scan it with the Muxr app to pair this phone.</code> Scan it now: <code>The secret is shown once and stored only as a hash. Scan the QR now, or copy it; you cannot retrieve it later.</code> <strong>Done</strong> closes the wizard.</li>
-          </ol>
-          <p>The host in the QR follows the bind address: a concrete bind host wins outright; with <code>0.0.0.0</code> the code advertises the first concrete <code>MUXRD_SAN</code> entry, and failing that the first reachable IPv4. Bind the tailnet address and the question does not arise.</p>
-
-          <h3>The dashboard</h3>
-          <p>Behind the wizard is the dashboard — five panels that read the live state of the server: <strong>Daemon</strong>, <strong>Network</strong>, <strong>Certificate</strong>, <strong>Tokens</strong> and <strong>Devices</strong>. Click a button or press its key — every key in the footer opens one dialog over it. Inside a dialog the footer switches to that dialog's controls: <kbd class="kbd">Tab</kbd> moves, <kbd class="kbd">Enter</kbd> presses, <kbd class="kbd">Esc</kbd> closes, plus the letters listed below; the focused button is the solid teal one.</p>
-          <table class="data-table">
-            <thead>
-              <tr><th>Key</th><th>Action</th></tr>
-            </thead>
-            <tbody>
-              <tr><td><kbd class="kbd">s</kbd></td><td>start/stop — starts the daemon, or asks to confirm a stop (<kbd class="kbd">y</kbd> confirms): <em>Every attached phone is disconnected until you start it again.</em></td></tr>
-              <tr><td><kbd class="kbd">c</kbd></td><td>config — the bind host, the port and the same address picker the wizard's Network step uses; Save or Cancel.</td></tr>
-              <tr><td><kbd class="kbd">e</kbd></td><td>cert — the serving mode, the full fingerprint, the current versus planned SANs, the advertised-trust control and a <strong>Help</strong> button. <strong>Regenerate…</strong> sits behind a confirm that lists the planned SANs and the re-pair warning. Letters: <kbd class="kbd">h</kbd> help, <kbd class="kbd">g</kbd> regenerate, <kbd class="kbd">r</kbd> refresh, <kbd class="kbd">y</kbd> confirms.</td></tr>
-              <tr><td><kbd class="kbd">t</kbd></td><td>tokens — the token list. <strong>Create…</strong> takes a name, the read-only flag and an expiry; the minted-secret dialog that follows offers <strong>Show pairing QR</strong>. <strong>Revoke…</strong> is behind a confirm: <em>Any phone using it is disconnected and must pair again.</em> Letters: <kbd class="kbd">n</kbd> create, <kbd class="kbd">s</kbd> show QR, <kbd class="kbd">x</kbd> revoke, <kbd class="kbd">r</kbd> refresh, <kbd class="kbd">y</kbd> confirms.</td></tr>
-              <tr><td><kbd class="kbd">d</kbd></td><td>devices — the phones registered for push notifications and the relay they use; <strong>Remove</strong> sits behind a confirm. Letters: <kbd class="kbd">x</kbd> remove, <kbd class="kbd">r</kbd> refresh, <kbd class="kbd">y</kbd> confirms.</td></tr>
-              <tr><td><kbd class="kbd">w</kbd></td><td>wizard — reopens the six-step setup wizard.</td></tr>
-              <tr><td><kbd class="kbd">r</kbd></td><td>refresh — re-reads the server state.</td></tr>
-              <tr><td><kbd class="kbd">q</kbd></td><td>quit.</td></tr>
-            </tbody>
-          </table>
-
-          <div class="callout callout-note">
-            <div class="callout-title">The QR is offered for the token you just minted</div>
-            <p><strong>Show pairing QR</strong> appears on the minted-secret dialog only — the one that opens the moment a token is created. The secret is never stored in plaintext, only as a hash, so the code cannot be rebuilt later for a token you have already dismissed. A token minted on the command line is paired by hand instead: enter the host and paste the secret on the app's Connect screen. If you miss the scan, revoke the token and mint a new one.</p>
-            <p>muxrctl captures the mouse while it runs, so copying text off its screen needs your terminal's selection bypass — Shift-drag, or Option-drag on macOS — and a tmux or zellij in between needs its own mouse mode switched on.</p>
-          </div>
-        </section>
-
-        <section id="tokens">
-          <h2>The CLI route</h2>
-          <p>Everything the wizard does is available as <code>muxrd</code> subcommands, which is what you want for a scripted or configuration-managed install. The examples below assume the tailnet address from <a href="#tailscale">step 4</a>.</p>
-          <p>Initialise the data directory and generate a self-signed certificate that covers your tailnet address:</p>
-          <div class="code-block"><pre><code>muxrd init --san 100.x.y.z</code></pre></div>
-          <p><code>--san</code> is repeatable and takes a DNS name or an IP; <code>MUXRD_SAN</code> accepts the same entries as a comma-separated list. To serve a certificate you already own instead, pass <code>--tls-cert</code> and <code>--tls-key</code>. The data directory is <code>~/.local/share/zellij/muxrd/</code> on Linux.</p>
-          <p>Start the daemon on the tailnet address, detached:</p>
-          <div class="code-block"><pre><code>muxrd start --bind 100.x.y.z:50051 --daemonize</code></pre></div>
-          <p>The bind address also comes from <code>MUXRD_BIND</code>, and defaults to <code>127.0.0.1:50051</code>. Drop <code>--daemonize</code> to run it in the foreground. Restrict it to one multiplexer with <code>--backend</code> / <code>MUXRD_BACKEND</code>. Check on it:</p>
-          <div class="code-block"><pre><code>muxrd status</code></pre></div>
-          <p>And stop it:</p>
-          <div class="code-block"><pre><code>muxrd stop</code></pre></div>
-          <p>Mint a token for a device:</p>
-          <div class="code-block"><pre><code>muxrd create-token --name mobile</code></pre></div>
-          <p>Add <code>--read-only</code> for a view-only token — it can navigate and scroll but never types or changes the session:</p>
-          <div class="code-block"><pre><code>muxrd create-token --name mobile --read-only</code></pre></div>
-          <p>Give it a window with <code>--expires-in</code>, which takes <code>30m</code>, <code>24h</code>, <code>7d</code> or <code>never</code> (the default):</p>
-          <div class="code-block"><pre><code>muxrd create-token --name guest --expires-in 24h</code></pre></div>
-          <p>List what exists:</p>
-          <div class="code-block"><pre><code>muxrd list-tokens</code></pre></div>
-          <p>Revoke one by name:</p>
-          <div class="code-block"><pre><code>muxrd revoke-token mobile</code></pre></div>
-
-          <div class="callout callout-warn">
-            <div class="callout-title">Secret shown once</div>
-            <p>The plaintext token secret is printed only when the token is created; the server keeps nothing but a hash. Copy it immediately — it cannot be retrieved afterwards. If you lose it, revoke the token and create a new one.</p>
-          </div>
-
-          <p>During development, to bypass the zellij version check:</p>
-          <div class="code-block"><pre><code>MUXRD_SKIP_VERSION_CHECK=1 muxrd start</code></pre></div>
-        </section>
-
-        <section id="lan">
-          <h2>LAN instead of a tailnet</h2>
-          <p>If you would rather keep the server on your local network only, bind a LAN address instead of a tailnet one. The rule is the same: the address the phone dials must be in the certificate's SANs, or TLS verification fails.</p>
-          <p>Bind one specific LAN address:</p>
-          <div class="code-block"><pre><code>muxrd start --bind 192.168.0.42:50051</code></pre></div>
-          <p>Or listen on every interface and let the QR pick a real address to advertise:</p>
-          <div class="code-block"><pre><code>muxrd start --bind 0.0.0.0:50051</code></pre></div>
-          <p>On a host with a public interface that also exposes the port to the internet — firewall it.</p>
-          <p>Either way the certificate has to list that LAN address:</p>
-          <div class="code-block"><pre><code>muxrd init --san 192.168.0.42</code></pre></div>
-
-          <div class="callout callout-note">
-            <div class="callout-title">Regenerate, then restart</div>
-            <p>Changing the SANs means a new certificate. Run <code>muxrd init</code> again with <code>--san &lt;your-lan-ip&gt;</code>, or regenerate from <code>muxrctl</code>'s cert dialog, then restart the daemon — and re-pair every phone, because the fingerprint they pinned no longer exists. A LAN address is also only good on that LAN: leave the network and the phone cannot reach the server, which is the problem a tailnet solves.</p>
-          </div>
-        </section>
-
-        <section id="public">
-          <h2>Public domain — least recommended</h2>
-          <p>A public domain puts muxrd on the open internet: anyone who has your DNS name and a token can reach it. The certificate is publicly trusted, the app connects with <strong>Public domain (CA)</strong> trust, and the pairing QR carries <code>tm=ca</code> with no fingerprint. This is how the public demo at <a href="https://demo.muxr.app" target="_blank" rel="noopener noreferrer">demo.muxr.app</a> runs — a read-only sandbox in a hardened container — and it is the right shape only for something you would be comfortable making public. For your own machine, use the <a href="#tailscale">tailnet</a> instead.</p>
-
-          <div class="callout callout-danger">
-            <div class="callout-title">Read this before you expose muxrd</div>
-            <p>A public listener changes the threat model. Before you point a DNS name at muxrd:</p>
-            <ul>
-              <li>Every host on the internet can reach the login endpoint — the bearer token is the only barrier. Use read-only tokens for anyone you do not fully trust, and keep <code>muxrd revoke-token &lt;name&gt;</code> at hand: it is the kill switch, invalidating the token and every live session minted from it in one step.</li>
-              <li>muxrd has no per-login session isolation — everyone presenting the same token attaches to the same session and sees the same activity.</li>
-              <li>Whatever terminates TLS in front of muxrd sees your terminal traffic and bearer tokens in plaintext.</li>
-              <li>Edge proxies commonly drop idle connections after a minute or two, and an attached terminal is a long-lived stream, so a viewer parked on a silent pane can be cut off — test on a real device before handing out a QR.</li>
-            </ul>
-          </div>
-
-          <h3>Behind a TLS-terminating reverse proxy (how the demo runs)</h3>
-          <p>The proxy owns the public certificate — from Let's Encrypt or another public CA — and terminates TLS for the whole internet-facing hop. It must proxy gRPC over HTTP/2 end to end and speak plaintext HTTP/2 (h2c) to muxrd; muxrd itself listens only on a private address the proxy can reach, and that port is never published to the internet.</p>
-          <div class="code-block"><pre><code>muxrd start --bind &lt;private-address&gt;:50051 --insecure-h2c --i-know-this-is-behind-a-proxy</code></pre></div>
-          <p><code>MUXRD_H2C=1</code> and <code>MUXRD_H2C_ALLOW_PUBLIC=1</code> are the environment equivalents of the two flags. muxrd refuses a non-loopback h2c bind without that acknowledgment, because the proxy-to-muxrd hop is plaintext and the flag is the operator confirming a trusted proxy is the only thing that can reach it.</p>
-          <p>The phone dials <code>your.host:443</code> — <code>443</code> is the default port under <strong>Public domain (CA)</strong> trust. In <code>muxrctl</code> the Certificate dialog reads <strong>h2c behind a proxy · CA trust</strong>, and the pairing QR carries <code>tm=ca</code>.</p>
-          <p>If a self-signed muxrd sits behind a proxy like this instead of running h2c, set <strong>Advertised trust</strong> to <strong>CA</strong> in the Certificate dialog: “Choose CA yourself when this daemon sits behind a TLS-terminating proxy that presents its own certificate.”</p>
-
-          <h3>Serve a public certificate yourself</h3>
-          <p>Obtain a certificate for your DNS name — from Let's Encrypt or another public CA — and point muxrd at the fullchain and private key directly, with no proxy in front:</p>
-          <div class="code-block"><pre><code>muxrd init --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem</code></pre></div>
-          <div class="code-block"><pre><code>muxrd start --bind 0.0.0.0:50051 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem</code></pre></div>
-          <p><code>MUXRD_TLS_CERT</code> and <code>MUXRD_TLS_KEY</code> are the environment equivalents; both files are validated at <code>init</code> and at <code>start</code>, and the pair is mutually exclusive with h2c. Firewall the host so only <code>50051</code> is reachable.</p>
-          <p>The phone dials <code>your.host:50051</code> — type the port, because a bare host defaults to <code>443</code> under <strong>Public domain (CA)</strong>. muxrd reads the certificate files at start, so restart it after every renewal.</p>
-
-          <div class="callout callout-note">
-            <div class="callout-title">A pinned public server</div>
-            <p>A self-signed certificate works too: give it your public host as a SAN with <code>muxrd init --san your.host</code> and publish the port. The pairing QR then pins the fingerprint (<code>tm=pin</code>) instead of using CA trust, but the host is exposed in exactly the same way — this is the demo's other mode.</p>
-          </div>
-
-          <h3>Harden it like the demo</h3>
-          <ul>
-            <li>Firewall to <code>22</code>, <code>80</code> and <code>443</code> behind a proxy, or <code>50051</code> alone for a direct certificate — nothing else inbound.</li>
-            <li>Run muxrd as an unprivileged user inside a container with a read-only root filesystem, no Linux capabilities and resource limits. The demo's <a href="https://github.com/f0x-it-llc/muxr-core/tree/main/demo" target="_blank" rel="noopener noreferrer">compose files</a> are the template.</li>
-            <li>Mint read-only tokens for anyone you do not fully trust.</li>
-            <li>Keep <code>muxrd revoke-token</code> at hand.</li>
-            <li>Test the long-lived attach through your proxy on a real device before publishing a QR.</li>
-          </ul>
+        <section id="wizard">
+          <h2>4. Run <code>muxrctl</code></h2>
+          <p>Run <code>muxrctl</code> on the server, over SSH if it is headless. The setup wizard opens on first run; press <kbd class="kbd">w</kbd> on the dashboard to reopen it later.</p>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-1-welcome.webp" width="1600" height="970" alt="muxrctl setup wizard, step 1 of 6: Welcome, listing the steps ahead and what it detected on this machine" loading="lazy" decoding="async"></div><figcaption class="shot-caption">1 · Press Next.</figcaption></figure>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-2-network.webp" width="1600" height="957" alt="muxrctl setup wizard, step 2 of 6: Network, with the bind host and port fields and the reachable-address picker" loading="lazy" decoding="async"></div><figcaption class="shot-caption">2 · Bind 0.0.0.0 and keep port 50051; on an internet-facing host, pick your 100.x address instead.</figcaption></figure>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-3-certificate.webp" width="1600" height="961" alt="muxrctl setup wizard, step 3 of 6: Certificate, showing the self-signed certificate, its planned addresses and the advertised trust" loading="lazy" decoding="async"></div><figcaption class="shot-caption">3 · Keep the self-signed certificate.</figcaption></figure>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-4-token.webp" width="1600" height="967" alt="muxrctl setup wizard, step 4 of 6: Pairing token, with the name field, the read-only checkbox and the expiry" loading="lazy" decoding="async"></div><figcaption class="shot-caption">4 · Name the token; tick Read-only for a view-only phone.</figcaption></figure>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-5-daemon.webp" width="1600" height="963" alt="muxrctl setup wizard, step 5 of 6: Daemon, showing whether muxrd is running and on which address" loading="lazy" decoding="async"></div><figcaption class="shot-caption">5 · Start the daemon.</figcaption></figure>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-wizard-6-pair.webp" width="1600" height="964" alt="muxrctl setup wizard, step 6 of 6: Pair your phone, a pairing QR with the server address and certificate fingerprint beneath it" loading="lazy" decoding="async"></div><figcaption class="shot-caption">6 · Scan the code from the app (step 5), then press Done.</figcaption></figure>
         </section>
 
         <section id="pair">
-          <h2>Pair your device (QR)</h2>
-          <p>QR pairing is the recommended way to connect — it encodes the server address and token in a single scan. For a self-signed server it also carries the TLS certificate fingerprint so the app pins trust to your exact cert; for a CA-signed server it uses system trust instead.</p>
+          <h2>5. Scan the QR</h2>
           <ol>
-            <li>Run the wizard's last step, <strong>Pair your phone</strong>, which shows the code for the token it just minted — or, from the dashboard, press <kbd class="kbd">t</kbd>, then <kbd class="kbd">n</kbd> (or click <strong>Create…</strong>), name the token and press <kbd class="kbd">Enter</kbd>, then <kbd class="kbd">s</kbd> (or click <strong>Show pairing QR</strong>) on the minted-secret dialog.</li>
-            <li>Check the caption: it names the host and port the code points at and the certificate it pins.</li>
-            <li>Scan the code from the app's Connect screen.</li>
+            <li>Open the Muxr app.</li>
+            <li>Tap the QR scan button on the Connect screen.</li>
+            <li>Point the camera at the code in <code>muxrctl</code>.</li>
           </ol>
-          <p>The QR encodes a URI of the form:</p>
-          <div class="code-block"><pre><code>muxr://pair?v=2&amp;h=&lt;host&gt;&amp;p=&lt;port&gt;&amp;t=&lt;token-base64url&gt;&amp;ro=&lt;0|1&gt;&amp;n=&lt;name&gt;&amp;tm=&lt;pin|ca&gt;[&amp;fp=&lt;sha256-hex&gt;]</code></pre></div>
-          <p>The <code>tm</code> field selects the trust mode. For a self-signed server it is <code>tm=pin</code> and the <code>fp</code> field carries the <strong>SHA-256 fingerprint of the server's TLS certificate</strong> — the app pins trust to exactly that certificate, so a CA-valid impostor cannot bypass the pin. For a CA-signed server (Let's Encrypt or another public CA) it is <code>tm=ca</code> with no <code>fp</code>, and the app uses system CA trust so the connection survives cert renewals.</p>
-
-          <h3>Manual fallback</h3>
-          <p>If you cannot scan a QR, enter the server address and token by hand on the Connect screen and pick a trust mode: <strong>Public domain (CA)</strong> for a CA-signed server, or <strong>Trust anyway</strong> — which the app marks with an <strong>insecure</strong> badge — to skip verification. Fingerprint pinning is available through QR pairing only, and <strong>Trust anyway</strong> is for development, not production.</p>
-        </section>
-
-        <section id="docker">
-          <h2>Docker dev rig</h2>
-          <p>The <code>muxr-core</code> repository includes a Docker Compose file that builds and runs <code>muxrd</code> in a container — useful for trying it out without a local Rust toolchain or a running zellij instance. Run these from the cloned <code>muxr-core</code> directory:</p>
-          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml up --build</code></pre></div>
-          <p>To reach it from a phone, pass the address to publish on as an environment variable — your tailnet address, for instance:</p>
-          <div class="code-block"><pre><code>BIND_ADDR=100.x.y.z docker compose -f docker/compose.yaml up --build</code></pre></div>
-          <p>The rig folds that same address into the certificate's SANs for you, so a phone dialling it gets a certificate that matches; override <code>MUXRD_SAN</code> explicitly only if the certificate must cover something else.</p>
-          <p>The rig exposes two ports:</p>
-          <table class="data-table">
-            <thead>
-              <tr><th>Port</th><th>Purpose</th></tr>
-            </thead>
-            <tbody>
-              <tr><td><code>50051</code></td><td>gRPC (muxrd)</td></tr>
-              <tr><td><code>2222</code></td><td>SSH access into the container</td></tr>
-            </tbody>
-          </table>
-          <p>Reset all container state (volumes included):</p>
-          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml down -v</code></pre></div>
-
-          <div class="callout callout-danger">
-            <div class="callout-title">Dev-only — never expose on an untrusted network</div>
-            <p>The Docker rig uses passwordless SSH and self-signed certificates. It is intended for local development only. Do not expose it on the public internet or any untrusted network.</p>
-          </div>
-        </section>
-
-        <section id="connect">
-          <h2>Connect from the app</h2>
-          <p>With the server running and a token in hand, connect from the Muxr app:</p>
-          <ol>
-            <li><strong>QR scan (recommended):</strong> tap the QR icon on the Connect screen and scan the code from <code>muxrctl</code>. The app connects immediately — pinning a self-signed cert or trusting a CA-signed one as the QR specifies, with no further prompts.</li>
-            <li><strong>Manual:</strong> enter the server as <code>host</code> or <code>host:port</code> and paste the token, then choose <strong>Public domain (CA)</strong> or <strong>Trust anyway</strong>. A bare host without a port defaults to <code>443</code> under <strong>Public domain (CA)</strong> and to <code>50051</code> under <strong>Trust anyway</strong> — so for a self-hosted server on your tailnet type the port explicitly, <code>100.x.y.z:50051</code>. Keep a verifying trust mode: scan the pairing QR (it pins the certificate fingerprint), or use <strong>Public domain (CA)</strong> with a CA-issued certificate. <strong>Trust anyway</strong> switches certificate verification off and is for development only.</li>
-          </ol>
-          <p>The Connect screen also has a <strong>Remember for 4 weeks</strong> toggle, which keeps you signed in to that server for four weeks rather than re-authenticating each time. After a successful connection the app offers a biometric prompt to save the credential for one-tap reconnect — the saved server appears on the Connect screen as a pill you can tap to re-enter with biometric unlock.</p>
-          <p>Once connected, see the <a href="guide.html">Usage Guide</a> for day-to-day terminal control: gestures, the command center, keyboard bar, fullscreen modes, and tablet differences.</p>
+          <p>The token secret is shown once and kept only as a hash, so scan before you press Done; if you miss it, revoke the token and mint a new one.</p>
+          <p>Can't scan? On the Connect screen, enter the server address with its port (<code>100.x.y.z:50051</code>) and paste the token. Only the QR carries a self-signed certificate's fingerprint, so a manual connection to such a server needs <strong>Trust anyway</strong>, which is for development only.</p>
+          <p>Next: <a href="guide.html">Using the app</a>, or <a href="advanced.html">Advanced setup</a> for the dashboard, the CLI, LAN, a public domain and the Docker rig.</p>
         </section>
 
       </div>
@@ -374,6 +152,8 @@
         <a class="footer-link" href="terms.html">Terms</a>
         <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
       </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
 
       <div class="footer-meta">
         <span>self-hosted · open-source backend</span>

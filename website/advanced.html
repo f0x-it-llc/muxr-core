@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Advanced setup — dashboard, CLI, LAN, public domain, Docker · Muxr</title>
+  <meta name="description" content="The muxrctl dashboard keys, the muxrd command-line route, LAN and public-domain setups, and the Docker dev rig.">
+  <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="assets/css/glyph.css">
+  <script src="assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="index.html">Home</a>
+        <a class="nav-link active" href="docs.html">Docs</a>
+        <a class="nav-link" href="guide.html">Guide</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main>
+
+    <div class="doc-header">
+      <span class="eyebrow">Documentation</span>
+      <h1>Advanced <span>Setup</span></h1>
+      <p class="doc-lead">Everything off the <a href="docs.html">quick start</a> path: the dashboard, the command line, LAN, a public domain and the Docker rig.</p>
+    </div>
+
+    <div class="doc-layout">
+
+      <aside class="doc-sidebar" aria-label="On this page">
+        <div class="doc-sidebar-title">On this page</div>
+        <ol class="doc-nav-list">
+          <li><a class="doc-nav-link" href="#dashboard">The dashboard</a></li>
+          <li><a class="doc-nav-link" href="#tokens">The CLI route</a></li>
+          <li><a class="doc-nav-link" href="#lan">LAN instead of a tailnet</a></li>
+          <li><a class="doc-nav-link" href="#public">Public domain</a></li>
+          <li><a class="doc-nav-link" href="#docker">Docker dev rig</a></li>
+        </ol>
+        <p class="doc-sidebar-title"><a href="docs.html">← Quick start</a></p>
+      </aside>
+
+      <div class="doc-content">
+
+        <section id="dashboard">
+          <h2>The <code>muxrctl</code> dashboard</h2>
+          <p>Once set up, <code>muxrctl</code> opens on the dashboard: five panels for the daemon, network, certificate, tokens and devices. Each key opens a dialog; <kbd class="kbd">Esc</kbd> closes it.</p>
+          <figure class="shot shot-wide"><div class="shot-frame"><img src="assets/img/screenshots/muxrctl-dashboard.webp" width="1600" height="980" alt="The muxrctl dashboard: Daemon, Network, Certificate, Tokens and Devices panels above a row of buttons and their keys" loading="lazy" decoding="async"></div><figcaption class="shot-caption">Press a key from the bottom row to open its dialog.</figcaption></figure>
+          <table class="data-table">
+            <thead>
+              <tr><th>Key</th><th>Action</th></tr>
+            </thead>
+            <tbody>
+              <tr><td><kbd class="kbd">s</kbd></td><td>start or stop the daemon</td></tr>
+              <tr><td><kbd class="kbd">c</kbd></td><td>bind host and port</td></tr>
+              <tr><td><kbd class="kbd">e</kbd></td><td>certificate: mode, fingerprint, SANs, advertised trust, regenerate</td></tr>
+              <tr><td><kbd class="kbd">t</kbd></td><td>tokens: create, show pairing QR, revoke</td></tr>
+              <tr><td><kbd class="kbd">d</kbd></td><td>devices registered for push notifications</td></tr>
+              <tr><td><kbd class="kbd">w</kbd></td><td>reopen the setup wizard</td></tr>
+              <tr><td><kbd class="kbd">r</kbd></td><td>refresh</td></tr>
+              <tr><td><kbd class="kbd">q</kbd></td><td>quit</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section id="tokens">
+          <h2>The CLI route</h2>
+          <p>Every wizard step is a <code>muxrd</code> subcommand, for scripted installs. Replace <code>100.x.y.z</code> with your server's address.</p>
+          <p>Create the data directory (<code>~/.local/share/zellij/muxrd/</code> on Linux) and a self-signed certificate for that address (<code>--san</code> is repeatable; <code>MUXRD_SAN</code> takes a comma-separated list):</p>
+          <div class="code-block"><pre><code>muxrd init --san 100.x.y.z</code></pre></div>
+          <p>Start the daemon, detached (<code>MUXRD_BIND</code> also sets the address; the default, <code>127.0.0.1:50051</code>, is unreachable from a phone):</p>
+          <div class="code-block"><pre><code>muxrd start --bind 100.x.y.z:50051 --daemonize</code></pre></div>
+          <p>Mint a token, a view-only token, and one that stops pairing new devices after 24 hours (<code>--expires-in</code> takes <code>30m</code>, <code>24h</code>, <code>7d</code> or <code>never</code>, the default):</p>
+          <div class="code-block"><pre><code>muxrd create-token --name mobile
+muxrd create-token --name viewer --read-only
+muxrd create-token --name guest --expires-in 24h</code></pre></div>
+          <p>Manage them, and the daemon:</p>
+          <div class="code-block"><pre><code>muxrd list-tokens
+muxrd revoke-token guest
+muxrd status
+muxrd stop</code></pre></div>
+          <div class="callout callout-warn">
+            <div class="callout-title">Secret shown once</div>
+            <p>A token's secret is printed only at creation and stored only as a hash, so neither it nor its pairing QR can be shown again; if you lose it, revoke the token and mint a new one. Pair a CLI-minted token by hand: enter the host and paste the secret on the app's Connect screen.</p>
+          </div>
+        </section>
+
+        <section id="lan">
+          <h2>LAN instead of a tailnet</h2>
+          <p>Bind a LAN address and list it in the certificate, or TLS verification fails:</p>
+          <div class="code-block"><pre><code>muxrd init --san 192.168.0.42
+muxrd start --bind 192.168.0.42:50051</code></pre></div>
+          <p><code>--bind 0.0.0.0:50051</code> listens on every interface and lets the QR advertise a real address; on a host with a public interface that also exposes the port, so firewall it.</p>
+          <p>Changing the SANs means a new certificate: rerun <code>muxrd init</code> with the new <code>--san</code> or regenerate from the dashboard (<kbd class="kbd">e</kbd>), restart the daemon, and re-pair every phone.</p>
+          <p>A LAN address only works on that LAN; a tailnet follows the phone onto mobile data.</p>
+        </section>
+
+        <section id="public">
+          <h2>Public domain — least recommended</h2>
+          <p>A public domain puts muxrd on the open internet: anyone with your DNS name and a token can reach it. It suits only something you would be comfortable making public, like the read-only demo at <a href="https://demo.muxr.app" target="_blank" rel="noopener noreferrer">demo.muxr.app</a>; for your own machine use a <a href="docs.html#tailscale">tailnet</a>.</p>
+
+          <div class="callout callout-danger">
+            <div class="callout-title">Read this before you expose muxrd</div>
+            <p>A public listener changes the threat model.</p>
+            <ul>
+              <li>Every host on the internet can reach the login endpoint; the bearer token is the only barrier. <code>muxrd revoke-token &lt;name&gt;</code> is the kill switch: it invalidates the token and every live session minted from it.</li>
+              <li>muxrd has no per-login session isolation: everyone presenting the same token attaches to the same session and sees the same activity.</li>
+              <li>Whatever terminates TLS in front of muxrd sees your terminal traffic and bearer tokens in plaintext.</li>
+              <li>Edge proxies commonly drop idle connections after a minute or two, so a viewer parked on a silent pane can be cut off.</li>
+            </ul>
+          </div>
+
+          <h3>Behind a TLS-terminating reverse proxy</h3>
+          <p>The proxy owns the public certificate, terminates TLS, and proxies gRPC over HTTP/2 to muxrd as plaintext h2c. muxrd listens only on a private address the proxy can reach; never publish that port.</p>
+          <div class="code-block"><pre><code>muxrd start --bind &lt;private-address&gt;:50051 --insecure-h2c --i-know-this-is-behind-a-proxy</code></pre></div>
+          <p>muxrd refuses a non-loopback h2c bind without the second flag, because the proxy-to-muxrd hop is plaintext. The phone dials <code>your.host:443</code> and the QR carries <code>tm=ca</code>. A self-signed muxrd behind such a proxy needs <strong>Advertised trust</strong> set to <strong>CA</strong> in the certificate dialog.</p>
+
+          <h3>Serve your own certificate</h3>
+          <p>Point muxrd at a publicly trusted certificate for your DNS name, with no proxy in front:</p>
+          <div class="code-block"><pre><code>muxrd init --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem
+muxrd start --bind 0.0.0.0:50051 --tls-cert /path/fullchain.pem --tls-key /path/privkey.pem</code></pre></div>
+          <p>The phone dials <code>your.host:50051</code>; type the port, because a bare host defaults to <code>443</code> under <strong>Public domain (CA)</strong>. Restart muxrd after every renewal. A self-signed certificate with <code>--san your.host</code> also works: the QR then pins the fingerprint, but the host is exposed the same way.</p>
+          <p>Environment variables and mode precedence: see <a href="https://github.com/f0x-it-llc/muxr-core#readme" target="_blank" rel="noopener noreferrer">the README</a>.</p>
+
+          <h3>Harden it like the demo</h3>
+          <ul>
+            <li>Firewall to <code>22</code>, <code>80</code> and <code>443</code> behind a proxy, or <code>50051</code> alone for a direct certificate.</li>
+            <li>Run muxrd as an unprivileged user in a container with a read-only root filesystem, no Linux capabilities and resource limits; the demo's <a href="https://github.com/f0x-it-llc/muxr-core/tree/main/demo" target="_blank" rel="noopener noreferrer">compose files</a> are the template.</li>
+            <li>Mint read-only tokens for anyone you do not fully trust.</li>
+            <li>Keep <code>muxrd revoke-token</code> at hand.</li>
+            <li>Test the long-lived attach through your proxy on a real device before publishing a QR.</li>
+          </ul>
+        </section>
+
+        <section id="docker">
+          <h2>Docker dev rig</h2>
+          <p>The repository's Compose rig builds and runs muxrd in a container, with no local Rust toolchain or zellij needed. From a clone of <code>muxr-core</code>:</p>
+          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml up --build</code></pre></div>
+          <p>Set <code>BIND_ADDR</code> to publish on a tailnet or LAN address; the rig adds it to the certificate's SANs, and it also publishes the rig's passwordless SSH port (<code>2222</code>) there:</p>
+          <div class="code-block"><pre><code>BIND_ADDR=100.x.y.z docker compose -f docker/compose.yaml up --build</code></pre></div>
+          <p>Reset all container state, volumes included:</p>
+          <div class="code-block"><pre><code>docker compose -f docker/compose.yaml down -v</code></pre></div>
+          <div class="callout callout-danger">
+            <div class="callout-title">Dev-only — never expose on an untrusted network</div>
+            <p>The rig uses passwordless SSH and self-signed certificates. Do not expose it on the public internet or any untrusted network.</p>
+          </div>
+          <p>Profiles and options: see <a href="https://github.com/f0x-it-llc/muxr-core#readme" target="_blank" rel="noopener noreferrer">the README</a>.</p>
+        </section>
+
+      </div>
+    </div>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="index.html">Home</a>
+        <a class="footer-link" href="docs.html">Docs</a>
+        <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="support.html">Support</a>
+        <a class="footer-link" href="privacy.html">Privacy</a>
+        <a class="footer-link" href="terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <div class="footer-meta">
+        <span>self-hosted · open-source backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is MIT-licensed.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
