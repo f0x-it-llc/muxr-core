@@ -254,10 +254,7 @@ fn host_looks_like_dns(host: &str) -> bool {
     }
     // Loopback names don't need the CA-proxy advisory.
     let lower = h.to_ascii_lowercase();
-    if lower == "localhost" || lower.starts_with("localhost.") {
-        return false;
-    }
-    true
+    !(lower == "localhost" || lower.starts_with("localhost."))
 }
 
 /// The advisory line, shown only when the operator is one setting away from a

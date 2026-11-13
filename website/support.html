@@ -6,6 +6,18 @@
   <title>Support · Muxr</title>
   <meta name="description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, read-only token, and push notification issues.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="favicon.png">
+  <link rel="canonical" href="https://muxr.app/support.html">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Support">
+  <meta property="og:description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, read-only token, and push notification issues.">
+  <meta property="og:url" content="https://muxr.app/support.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
@@ -76,7 +88,7 @@
             <div class="callout-title">Email support</div>
             <p>Write to <a href="mailto:support@muxr.app">support@muxr.app</a> for anything — pairing trouble, connection errors, account-less deletion requests, or general questions. It's a monitored inbox and a real person replies.</p>
           </div>
-          <p>Found a bug in the server, <code>muxrctl</code>, or the wider open-source <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> project? File it on <a href="https://github.com/f0x-it-llc/muxr-core/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a> — that's the fastest way to get eyes on a reproducible server-side problem, and lets other self-hosters find it too.</p>
+          <p>Found a bug in the server, <code>muxrctl</code>, or the wider source-available <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> project? File it on <a href="https://github.com/f0x-it-llc/muxr-core/issues" target="_blank" rel="noopener noreferrer">GitHub Issues</a> — that's the fastest way to get eyes on a reproducible server-side problem, and lets other self-hosters find it too.</p>
         </section>
 
         <section id="quick-links">
@@ -84,7 +96,7 @@
           <ul>
             <li><a href="docs.html">Getting Started</a> — install <code>muxrd</code>, mint a token, and pair your device via QR.</li>
             <li><a href="guide.html">Usage Guide</a> — gestures, the command center, keyboard bar, and read-only mode.</li>
-            <li><a href="https://github.com/f0x-it-llc/muxr-core#readme" target="_blank" rel="noopener noreferrer">muxr-core README</a> — the open-source server repository on GitHub.</li>
+            <li><a href="https://github.com/f0x-it-llc/muxr-core#readme" target="_blank" rel="noopener noreferrer">muxr-core README</a> — the source-available server repository on GitHub.</li>
           </ul>
         </section>
 
@@ -94,9 +106,9 @@
           <h3>Pairing fails, or the QR code won't scan</h3>
           <ul>
             <li>Confirm <code>muxrd</code> is actually running — check with <code>muxrd status</code>, or start it with <code>muxrd start</code>.</li>
-            <li>Make sure the phone can reach the server — over your tailnet (see <a href="docs.html#tailscale">Reach it over Tailscale</a>), or, if you chose the LAN route, on the same Wi-Fi (see <a href="docs.html#lan">LAN instead of a tailnet</a>).</li>
+            <li>Make sure the phone can reach the server — over your tailnet (see <a href="docs.html#tailscale">Reach it over Tailscale</a>), or, if you chose the LAN route, on the same Wi-Fi (see <a href="advanced.html#lan">LAN instead of a tailnet</a>).</li>
             <li>Check that the token hasn't been revoked — run <code>muxrd list-tokens</code> on the server to confirm it still exists.</li>
-            <li>QR codes are shown once, right when a token is minted — <code>muxrctl</code> stores only a hash of the secret, so the code cannot be shown again for a token you have already dismissed (see <a href="docs.html#tokens">token secrets can't be retrieved after creation</a>). If you missed the scan: in <code>muxrctl</code> press <kbd class="kbd">t</kbd>, choose <strong>Revoke…</strong> on that token, then <strong>Create…</strong> a new one and press <strong>Show pairing QR</strong> on the minted-secret dialog; or run the setup wizard again (<kbd class="kbd">w</kbd>) and scan at its last step.</li>
+            <li>QR codes are shown once, right when a token is minted — <code>muxrctl</code> stores only a hash of the secret, so the code cannot be shown again for a token you have already dismissed (see <a href="advanced.html#tokens">token secrets can't be retrieved after creation</a>). If you missed the scan: in <code>muxrctl</code> press <kbd class="kbd">t</kbd>, choose <strong>Revoke…</strong> on that token, then <strong>Create…</strong> a new one and press <strong>Show pairing QR</strong> on the minted-secret dialog; or run the setup wizard again (<kbd class="kbd">w</kbd>) and scan at its last step.</li>
             <li>If the camera won't focus or read the code, try the <a href="docs.html#pair">manual fallback</a> — entering the server URL and token by hand on the Connect screen.</li>
           </ul>
 
@@ -109,7 +121,7 @@
 
           <h3>Connection refused, or the connection times out</h3>
           <ul>
-            <li><code>muxrd</code> binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. To reach it from a phone or tablet, start it with a LAN bind address (<code>muxrd start --bind 0.0.0.0:50051</code>) and add that address as a certificate SAN — see <a href="docs.html#lan">LAN instead of a tailnet</a>.</li>
+            <li><code>muxrd</code> binds <code>127.0.0.1:50051</code> by default, which only accepts connections from the same machine. To reach it from a phone or tablet, start it with a LAN bind address (<code>muxrd start --bind 0.0.0.0:50051</code>) and add that address as a certificate SAN — see <a href="advanced.html#lan">LAN instead of a tailnet</a>.</li>
             <li>Confirm the server is listening on port <code>50051</code> (or whatever port you configured) and that the address you entered in the app matches it exactly.</li>
             <li>Check your firewall — both the host OS firewall and any router-level rules — allows inbound connections to that port from your phone's network.</li>
           </ul>
@@ -167,8 +179,8 @@
       </nav>
 
       <div class="footer-meta">
-        <span>self-hosted · open-source backend</span>
-        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is MIT-licensed.</span>
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Noncommercial 1.0.0.</span>
       </div>
     </div>
   </footer>

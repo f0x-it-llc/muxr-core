@@ -32,18 +32,20 @@ The build context is `website/`; the image is based on `nginx:1.27-alpine` and s
 Design: **Glyph** — a single stylesheet (`assets/css/glyph.css`) shared by every page, set in Space Mono (headings) and IBM Plex Mono (body/code), both loaded from Google Fonts.
 
 - **`index.html`** — Landing page with features, how-it-works, and CTAs.
-- **`docs.html`** — Getting Started guide: prerequisites, installation, token creation, and pairing.
+- **`docs.html`** — Quick start in five steps: get the app, install the server, reach it over a tailnet, run the `muxrctl` wizard, scan the pairing QR.
+- **`advanced.html`** — Advanced setup: the `muxrctl` dashboard keys, the `muxrd` command-line route, LAN, a public domain, and the Docker dev rig. Linked from `docs.html`, not from the top nav.
 - **`guide.html`** — Usage Guide: gestures, command center, keyboard bar, fullscreen modes, tablet differences, and settings.
 - **`privacy.html`** — Privacy Policy: what the app, site, and optional Muxr Push relay do (and don't) collect. Serves as the Privacy Policy URL required by the Apple App Store and Google Play listings.
 - **`terms.html`** — Terms of Use / End User License Agreement (custom EULA) covering licence, subscription/purchase terms, and disclaimers. Required by the App Store and Play Store as the app's terms/EULA link.
 - **`support.html`** — Support page: contact info, bug reporting, and an FAQ. Serves as the Support URL required by both app stores.
+- **`robots.txt`**, **`sitemap.xml`**, **`llms.txt`** — Crawler and AI-agent files served from the web root (`favicon.png` sits beside them). Keep each `<lastmod>` in `sitemap.xml` and the facts in `llms.txt` in step with page changes.
 - **`assets/`** — Static resources:
   - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file.
   - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections, and the phone-width "On this page" toggle/breadcrumb injected into `.doc-sidebar` (paired with glyph.css's `html.js` gating and the `--nav-h` token).
   - `img/logo.svg` — 4-square grid mark (also favicon).
-  - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures; replace by regenerating, never by editing.
+  - `img/screenshots/` — real app screenshots (WebP, 640 px wide) generated from the store-listing captures, plus the `muxrctl` captures (WebP, 1600 px wide): `muxrctl-wizard-1-welcome.webp`, `muxrctl-wizard-2-network.webp`, `muxrctl-wizard-3-certificate.webp`, `muxrctl-wizard-4-token.webp`, `muxrctl-wizard-5-daemon.webp`, `muxrctl-wizard-6-pair.webp` (on `docs.html`) and `muxrctl-dashboard.webp` (on `advanced.html`); replace by regenerating, never by editing.
 
-All six pages share the same `.site-nav` header and `.site-footer` footer (Home, Docs, Guide, Support, Privacy, Terms, GitHub).
+All seven pages share the same `.site-nav` header and `.site-footer` footer (Home, Docs, Guide, Support, Privacy, Terms, GitHub).
 
 ## Font Catalog (`/fonts/`)
 
@@ -63,8 +65,8 @@ The script (`curl` + `python3`, no `gh` CLI) downloads each file listed in the l
 
 ## Links
 
-- **GitHub:** [`f0x-it-llc/muxr-core`](https://github.com/f0x-it-llc/muxr-core) (open-source MIT backend)
+- **GitHub:** [`f0x-it-llc/muxr-core`](https://github.com/f0x-it-llc/muxr-core) (source-available backend, PolyForm Noncommercial 1.0.0)
 - **Server:** Rust gRPC backend and TUI pairing tool (`muxrctl`)
-- **App:** Closed-source [Frust](https://frust.dev)-native mobile/tablet client
+- **App:** [Frust](https://frust.dev)-native mobile/tablet client; its source is published under the same license at https://github.com/f0x-it-llc/muxr-app
 
-The backend is self-hosted and open-source; the Frust-native app is closed-source.
+The backend is self-hosted and source-available.

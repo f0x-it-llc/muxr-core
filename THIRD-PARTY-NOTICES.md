@@ -2,9 +2,9 @@
 
 This document records the attribution obligations for code and techniques incorporated into muxr-core from external sources.
 
-## Apache-2.0 and MIT Compatibility
+## Apache-2.0 code in this project
 
-muxr-core is licensed under the MIT License. This project includes derived code from the herdr project, which is licensed under Apache-2.0. The Apache-2.0 and MIT licenses are compatible in this direction: Apache-2.0 material can be redistributed within an MIT-licensed project, provided the Apache-2.0 license terms are met for that material. The derived portions remain under Apache-2.0; the rest of muxr-core remains MIT.
+muxr-core is licensed under the PolyForm Noncommercial License 1.0.0. It includes derived code from the herdr project, which is licensed under Apache-2.0. That code stays under Apache-2.0, and its license text and attribution are kept as the Apache license requires.
 
 ## herdr
 
@@ -15,6 +15,12 @@ muxr-core is licensed under the MIT License. This project includes derived code 
 **Derived Portions:** The herdr interop module within the `muxrd` crate (located at `muxrd/src/multiplexer/herdr/`) contains the binary wire protocol mirror and JSON control-protocol types derived from herdr's source code. These files have been **modified** from their upstream form to integrate with muxr-core's architecture. Each modified file carries its own per-file notice. `muxrd/src/multiplexer/herdr/api.rs` additionally mirrors herdr v0.9.5's session-snapshot agent record (`AgentInfo`, from herdr's `src/api/schema/agents.rs`), modified so that every field is optional on parse.
 
 **Distribution:** herdr is a separate, user-installed binary that muxr-core neither bundles nor redistributes. The docker development rig may download a herdr binary for local development use only. muxr-core ships no herdr binary in any production artifact; only derived source code (the wire protocol mirror and JSON types) is incorporated into muxr-core's binaries.
+
+---
+
+## Store badges
+
+The files under `website/assets/img/badges/` are trademarks and artwork of Apple Inc. and Google LLC, used under their marketing guidelines, and are not covered by this repository's license.
 
 ---
 

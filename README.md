@@ -1,10 +1,16 @@
 # muxr-core
 
-The open-source backend for **Muxr** — a Rust [Cargo workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)
+The source-available backend for **Muxr** — a Rust [Cargo workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)
 that lets a mobile client attach to and control remote terminal-multiplexer sessions
 over a TLS, bearer-authenticated gRPC API. `muxrd` drives two backends behind a
 `MuxBackend` trait — [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/) — and auto-detects
 whichever are available at startup.
+
+**Get the app:**
+<a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="website/assets/img/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
+<a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="website/assets/img/badges/google-play.png" alt="Get it on Google Play" height="65"></a>
+
+See [muxr.app](https://muxr.app) and its [quick start](https://muxr.app/docs.html) to pair your phone with a server.
 
 Two distributed binaries, plus a third workspace crate distributed separately:
 
@@ -70,8 +76,8 @@ The server resolves its TLS identity by precedence **h2c > external cert > self-
 | Mode | Flags / env | Use for |
 |------|-------------|---------|
 | **Self-signed** (default) | _(none)_ — generated for `127.0.0.1` + `localhost` + any `--san` extras | Direct / LAN connections. The mobile client pins the cert's SHA-256 fingerprint, distributed out-of-band in the pairing QR. |
-| **External cert** | `--tls-cert <pem> --tls-key <pem>` (or `MUXRD_TLS_CERT` / `MUXRD_TLS_KEY`) | Serving a real, publicly-trusted cert directly — Let's Encrypt, a Cloudflare Origin CA cert, or a corporate CA. The client trusts it via the system CA store; no pinning. Both files are validated at `init`/`start`. |
-| **Plaintext h2c** | `--insecure-h2c` (or `MUXRD_H2C=1`) | Sitting behind a TLS-terminating reverse proxy (Traefik / Dokploy / Cloudflare) that owns the public cert. Serves **unencrypted** HTTP/2, so it **refuses a non-loopback bind** unless you also pass `--i-know-this-is-behind-a-proxy` (env `MUXRD_H2C_ALLOW_PUBLIC`). |
+| **External cert** | `--tls-cert <pem> --tls-key <pem>` (or `MUXRD_TLS_CERT` / `MUXRD_TLS_KEY`) | Serving a real, publicly-trusted cert directly — Let's Encrypt, an edge-proxy origin certificate, or a corporate CA. The client trusts it via the system CA store; no pinning. Both files are validated at `init`/`start`. |
+| **Plaintext h2c** | `--insecure-h2c` (or `MUXRD_H2C=1`) | Sitting behind a TLS-terminating reverse proxy that owns the public cert. Serves **unencrypted** HTTP/2, so it **refuses a non-loopback bind** unless you also pass `--i-know-this-is-behind-a-proxy` (env `MUXRD_H2C_ALLOW_PUBLIC`). |
 
 External and h2c are mutually exclusive with each other. `muxrd init` validates the
 chosen mode (e.g. parses the external key) so misconfigurations surface before `start`.
@@ -175,5 +181,13 @@ version computation via the anchored `tag_pattern` in `cliff.toml`.
 
 ## License
 
-[MIT](LICENSE). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+
+Required Notice: Copyright (c) 2026 F0X IT LLC
+
+The software is free to use, modify and share for noncommercial purposes. Commercial use needs a license from F0X IT LLC. Releases up to and including v0.5.2 were published under the MIT License and remain available under it.
+
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLA.md`](CLA.md). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
 Apache-2.0 attribution covering the portions derived from herdr's source.
+
+Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.
