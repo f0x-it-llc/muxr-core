@@ -197,6 +197,53 @@
       </div>
     </section>
 
+    <div class="section-divider"><span class="divider-label">compare</span></div>
+
+    <!-- ═══════════════ COMPARE ═══════════════ -->
+    <section class="section compare" id="compare">
+      <div class="container">
+        <div class="section-head">
+          <span class="eyebrow">// compare</span>
+          <h2>Muxr and Moshi, side by side</h2>
+          <p>Moshi is a capable SSH terminal for phones. Muxr takes a different route: a source-available daemon on your server and a one-time price.</p>
+        </div>
+
+        <div class="compare-wrap">
+          <table class="compare-table">
+            <caption>Muxr and Moshi compared row by row</caption>
+            <thead>
+              <tr><td></td><th scope="col">Muxr</th><th scope="col">Moshi</th></tr>
+            </thead>
+            <tbody>
+              <tr><th scope="row">One-time price</th><td>$9.99 (Pro)</td><td>$199 (Lifetime, described as a limited-time offer)</td></tr>
+              <tr><th scope="row">Subscription</th><td>None for the app; the optional hosted push relay will be a subscription</td><td>$9.99 / month or $89.99 / year</td></tr>
+              <tr><th scope="row">Free tier</th><td>Full app, one server</td><td>Full SSH terminal, unlimited sessions, push notifications</td></tr>
+              <tr><th scope="row">Paying unlocks</th><td>More than one server</td><td>Mosh and ET sessions, auto-attach for tmux and herdr</td></tr>
+              <tr><th scope="row">Source code</th><td>Source available, free for noncommercial use</td><td>Not published</td></tr>
+              <tr><th scope="row">Tech stack</th><td>Rust end to end: <a href="https://frust.dev/" target="_blank" rel="noopener noreferrer">frust</a> app, muxrd server</td><td>Not published</td></tr>
+              <tr><th scope="row">Connection</th><td>muxrd on your server, gRPC over TLS, token auth</td><td>SSH, Mosh or ET straight to your host</td></tr>
+              <tr><th scope="row">Server install</th><td>Required (muxrd)</td><td>None required; optional hook for agent context</td></tr>
+              <tr><th scope="row">Pairing</th><td>QR code, certificate pinned</td><td>SSH keys</td></tr>
+              <tr><th scope="row">zellij</th><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">herdr</th><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">tmux</th><td><span class="soon">Coming soon</span></td><td>Yes</td></tr>
+              <tr><th scope="row">Push notifications</th><td><span class="soon">Coming soon</span></td><td>Yes</td></tr>
+              <tr><th scope="row">Voice input</th><td><span class="soon">Coming soon</span></td><td>Yes, on-device</td></tr>
+              <tr><th scope="row">Read-only access tokens</th><td>Yes</td><td>Not stated</td></tr>
+              <tr><th scope="row">AI agents</th><td>Agents list (herdr)</td><td>Agent inbox and approvals, 18 agents listed</td></tr>
+              <tr><th scope="row">Tablet layout</th><td>Yes, split-pane rail</td><td>iPad keyboard shortcuts</td></tr>
+              <tr><th scope="row">Phones and tablets</th><td>iOS, Android</td><td>iOS, Android, Apple Watch</td></tr>
+              <tr><th scope="row">Desktop app</th><td><span class="soon">Coming soon</span> (macOS, Linux, Windows)</td><td>macOS, Linux, Windows (alpha, free)</td></tr>
+              <tr><th scope="row">In-app analytics</th><td>None</td><td>Basic usage analytics</td></tr>
+              <tr><th scope="row">Account required</th><td>No</td><td>No</td></tr>
+            </tbody>
+          </table>
+        </div>
+
+        <p class="trademark-note">Moshi details are taken from <a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer nofollow">getmoshi.app</a> as published on 13 November 2026 and may have changed. "Not published" and "Not stated" mean their site does not say. Moshi is a trademark of its owner; Muxr is not affiliated with it.</p>
+      </div>
+    </section>
+
     <div class="section-divider"><span class="divider-label">in the terminal</span></div>
 
     <!-- ═══════════════ TERMINAL SHOWCASE ═══════════════ -->
@@ -245,6 +292,7 @@
         <a class="footer-link" href="index.html">Home</a>
         <a class="footer-link" href="docs.html">Docs</a>
         <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="#compare">Compare</a>
         <a class="footer-link" href="support.html">Support</a>
         <a class="footer-link" href="privacy.html">Privacy</a>
         <a class="footer-link" href="terms.html">Terms</a>
