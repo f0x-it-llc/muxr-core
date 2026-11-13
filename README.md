@@ -1,6 +1,6 @@
 # muxr-core
 
-The open-source backend for **Muxr** — a Rust [Cargo workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)
+The source-available backend for **Muxr** — a Rust [Cargo workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)
 that lets a mobile client attach to and control remote terminal-multiplexer sessions
 over a TLS, bearer-authenticated gRPC API. `muxrd` drives two backends behind a
 `MuxBackend` trait — [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/) — and auto-detects
@@ -181,7 +181,13 @@ version computation via the anchored `tag_pattern` in `cliff.toml`.
 
 ## License
 
-[MIT](LICENSE). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
+[PolyForm Noncommercial License 1.0.0](LICENSE)
+
+Required Notice: Copyright (c) 2026 F0X IT LLC
+
+The software is free to use, modify and share for noncommercial purposes. Commercial use needs a license from F0X IT LLC. Releases up to and including v0.5.2 were published under the MIT License and remain available under it.
+
+Contributions are welcome; see [`CONTRIBUTING.md`](CONTRIBUTING.md) and [`CLA.md`](CLA.md). See [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md) for the
 Apache-2.0 attribution covering the portions derived from herdr's source.
 
 Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.

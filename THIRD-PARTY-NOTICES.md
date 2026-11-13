@@ -2,9 +2,9 @@
 
 This document records the attribution obligations for code and techniques incorporated into muxr-core from external sources.
 
-## Apache-2.0 and MIT Compatibility
+## Apache-2.0 code in this project
 
-muxr-core is licensed under the MIT License. This project includes derived code from the herdr project, which is licensed under Apache-2.0. The Apache-2.0 and MIT licenses are compatible in this direction: Apache-2.0 material can be redistributed within an MIT-licensed project, provided the Apache-2.0 license terms are met for that material. The derived portions remain under Apache-2.0; the rest of muxr-core remains MIT.
+muxr-core is licensed under the PolyForm Noncommercial License 1.0.0. It includes derived code from the herdr project, which is licensed under Apache-2.0. That code stays under Apache-2.0, and its license text and attribution are kept as the Apache license requires.
 
 ## herdr
 
@@ -20,7 +20,7 @@ muxr-core is licensed under the MIT License. This project includes derived code 
 
 ## Store badges
 
-The files under `website/assets/img/badges/` are trademarks and artwork of Apple Inc. and Google LLC, used under their marketing guidelines, and are not covered by this repository's MIT license.
+The files under `website/assets/img/badges/` are trademarks and artwork of Apple Inc. and Google LLC, used under their marketing guidelines, and are not covered by this repository's license.
 
 ---
 
