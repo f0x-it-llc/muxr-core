@@ -3,9 +3,66 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Muxr — your terminal multiplexer, from your phone or tablet</title>
-  <meta name="description" content="Muxr is a Frust-native client that attaches to your remote herdr and zellij terminal-multiplexer sessions over TLS-secured gRPC. Self-hosted, source-available backend, QR device pairing, full session/tab/pane control.">
+  <title>Zellij and herdr terminal for iPhone, iPad, Android · Muxr</title>
+  <meta name="description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions through muxrd, with TLS, token login and QR pairing.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="favicon.png">
+  <link rel="canonical" href="https://muxr.app/">
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Zellij and herdr terminal for iPhone, iPad, Android">
+  <meta property="og:description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions through muxrd, with TLS, token login and QR pairing.">
+  <meta property="og:url" content="https://muxr.app/">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <meta name="apple-itunes-app" content="app-id=6815185967">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Organization",
+        "@id": "https://muxr.app/#organization",
+        "name": "F0X IT LLC",
+        "url": "https://muxr.app/",
+        "logo": "https://muxr.app/favicon.png",
+        "sameAs": [
+          "https://github.com/f0x-it-llc/muxr-core",
+          "https://github.com/f0x-it-llc/muxr-app"
+        ]
+      },
+      {
+        "@type": "WebSite",
+        "@id": "https://muxr.app/#website",
+        "name": "Muxr",
+        "url": "https://muxr.app/"
+      },
+      {
+        "@type": "MobileApplication",
+        "@id": "https://muxr.app/#app",
+        "name": "Muxr",
+        "description": "Muxr is a mobile app for iPhone, iPad and Android that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon.",
+        "operatingSystem": "iOS, Android",
+        "applicationCategory": "DeveloperApplication",
+        "url": "https://muxr.app/",
+        "installUrl": [
+          "https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967",
+          "https://play.google.com/store/apps/details?id=com.it.f0x.muxr"
+        ],
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "USD"
+        },
+        "publisher": { "@id": "https://muxr.app/#organization" },
+        "license": "https://github.com/f0x-it-llc/muxr-core/blob/main/LICENSE"
+      }
+    ]
+  }
+  </script>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
@@ -57,7 +114,7 @@
           <div class="hero-copy">
             <span class="eyebrow">self-hosted · source-available backend</span>
             <h1>Mu<span>xr</span></h1>
-            <p class="hero-tagline">Attach to your remote herdr and zellij sessions from your phone or tablet.</p>
+            <p class="hero-tagline">Attach to your remote zellij and herdr sessions from your iPhone, iPad or Android device.</p>
             <p class="hero-sub">A <a href="https://frust.dev" target="_blank" rel="noopener noreferrer">Frust</a>-native client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
 
             <div class="ascii-box">┌──────────────────────────────┐

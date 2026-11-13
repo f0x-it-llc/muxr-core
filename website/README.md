@@ -38,6 +38,7 @@ Design: **Glyph** — a single stylesheet (`assets/css/glyph.css`) shared by eve
 - **`privacy.html`** — Privacy Policy: what the app, site, and optional Muxr Push relay do (and don't) collect. Serves as the Privacy Policy URL required by the Apple App Store and Google Play listings.
 - **`terms.html`** — Terms of Use / End User License Agreement (custom EULA) covering licence, subscription/purchase terms, and disclaimers. Required by the App Store and Play Store as the app's terms/EULA link.
 - **`support.html`** — Support page: contact info, bug reporting, and an FAQ. Serves as the Support URL required by both app stores.
+- **`robots.txt`**, **`sitemap.xml`**, **`llms.txt`** — Crawler and AI-agent files served from the web root (`favicon.png` sits beside them). Keep each `<lastmod>` in `sitemap.xml` and the facts in `llms.txt` in step with page changes.
 - **`assets/`** — Static resources:
   - `css/glyph.css` — The Glyph design system: tokens, nav, footer, doc layout, and all shared components in one file.
   - `js/main.js` — Mobile nav toggle, copy-code buttons, scroll-spy active sections, and the phone-width "On this page" toggle/breadcrumb injected into `.doc-sidebar` (paired with glyph.css's `html.js` gating and the `--nav-h` token).
