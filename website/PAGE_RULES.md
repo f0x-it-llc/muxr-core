@@ -107,6 +107,11 @@ page breaks under `/how-to/` or `/compare/`.
 - [ ] Say where the other product is the better pick (CLAIMS.md "Our
       judgement" lines give the wording).
 - [ ] 400 to 900 words of body text (about.html is the one exception: 300 to 500).
+- [ ] Section indexes (`/how-to/index.html`, `/compare/index.html`) are the
+      other exception: no word minimum, and their JSON-LD is a `CollectionPage`
+      with an `ItemList` of the linked pages (name and url, in visible order)
+      plus the `BreadcrumbList`, instead of an Article. `faq.html` may run to
+      1,800 words, and a page whose card sets its own range follows the card.
 - [ ] End with 2 to 4 links to related pages, inside
       `<nav class="page-links" aria-label="Related pages">` with no heading: a
       short `<p class="page-links-label">Related pages</p>` then a `<ul>`. This
