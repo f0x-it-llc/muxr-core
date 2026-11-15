@@ -12,6 +12,20 @@ use this file and nothing else: if a fact is not here, it is not published.
   "Not stated" on the page; never guess.
 - Status words: **verified** (seen on the product's own site, repository or store
   listing, or in this repository's code), **not stated**, **owner to confirm**.
+- Three kinds of line appear under each other product:
+  1. A sourced claim: `claim — source URL — fetched date — verified`. Publish it
+     with a link to that URL.
+  2. A "not stated" line. It means: none of the source URLs listed in that
+     product's section said anything about this on 15 November 2026. On a page
+     write "Not stated" and nothing more.
+  3. An "Our judgement" line (where the other product is the better pick, or a
+     plain consequence of the facts). It is our conclusion from the sourced
+     claims above it, not a quote. Publish it in our own voice, never as
+     something the other product says about itself.
+- A block marked **DO NOT PUBLISH** is an open question for the owner. Nothing
+  inside it may appear on a page until the marker is removed here.
+- Pages that still carry the old price wording and must change with it:
+  index.html, llms.txt and both repository readmes.
 
 ## Muxr
 
@@ -56,10 +70,12 @@ Verified against this repository, the muxr-app repository and the store listings
   (muxrd/src/multiplexer/herdr/mod.rs, paths.rs; docker/README.md)
 - herdr-core: not supported. muxrd contains no herdr-core support.
   (muxrd/src/multiplexer/herdr/ has no reference to it)
-- **owner to confirm before any page says it:** that the herdr 0.9.x server
-  muxrd drives is the one herdr's site calls "Herdr TUI". Until confirmed,
-  pages write "the herdr 0.9.x server (0.9.0 to 0.9.5)" and "herdr-core is not
-  supported", and do not use the phrase "Herdr TUI" about Muxr.
+- Publish this wording: "Muxr works with the herdr 0.9.x server (0.9.0 to
+  0.9.5). herdr-core is not supported."
+- **DO NOT PUBLISH — owner to confirm:** whether the herdr 0.9.x server muxrd
+  drives is the one herdr's site calls "Herdr TUI". Do not use the phrase
+  "Herdr TUI" about Muxr, and do not say Muxr works where the Herdr mobile app
+  does not.
 - muxrd auto-detects whichever of zellij and herdr is installed. (README.md)
 - tmux: coming soon. Not available today.
 - Without zellij or herdr: Muxr does nothing. It is not a general SSH client.
@@ -111,7 +127,12 @@ Verified against this repository, the muxr-app repository and the store listings
 ### Coming soon (not available today; never give a date)
 
 - tmux support
-- push notifications
+- push notifications. The app does not deliver notifications today. The server
+  side already has the plumbing (muxrd can register devices and a relay
+  exists, and privacy.html describes an optional "Muxr Push" relay), but
+  support.html says device registration arrives "with app-side push support".
+  Pages say "coming soon" and do not describe the relay, its platforms or how
+  to enable it.
 - voice input
 - desktop apps for macOS, Linux and Windows
 
@@ -140,9 +161,10 @@ Verified against this repository, the muxr-app repository and the store listings
 ### Demo server
 
 - A public read-only demo runs at demo.muxr.app. (advanced.html)
-- **owner to confirm:** how a visitor gets a token for it. The site publishes
-  none. Until it does, pages may say a read-only demo server exists but must
-  not tell readers they can try Muxr without installing a server.
+- Publish at most: "A public read-only demo server runs at demo.muxr.app."
+- **DO NOT PUBLISH — owner to confirm:** how a visitor gets a token for it.
+  The site publishes none. Do not tell readers they can try Muxr without
+  installing a server.
 
 ### Support
 
@@ -188,8 +210,7 @@ Format: claim — source — fetched — status.
 - **Rule:** a page that gives a Moshi price shows both sources ("$199 on its
   website, $249.00 on the App Store"), never a single figure.
 - Paying unlocks Mosh and Eternal Terminal sessions and auto-attach for tmux
-  and herdr. — https://getmoshi.app/pricing — 13 Nov 2026 (as already cited on
-  index.html) — verified
+  and herdr. — https://getmoshi.app/pricing — 15 Nov 2026 — verified
 - zellij: supported, with a session picker and shortcut panel. —
   https://getmoshi.app/docs/zellij — 15 Nov 2026 — verified
 - herdr: supported, with a workspace picker and shortcut panel. —
@@ -203,7 +224,7 @@ Format: claim — source — fetched — status.
   diff viewer. — https://getmoshi.app/ — 15 Nov 2026 — verified
 - Account required: no. — https://getmoshi.app/pricing — 15 Nov 2026 — verified
 - Source code and licence: not stated.
-- Better pick than Muxr when: you need tmux today, push notifications, voice
+- Our judgement — better pick than Muxr when: you need tmux today, push notifications, voice
   input, Apple Watch, or you do not want to install anything on the server.
 
 ### Zelmux
@@ -215,7 +236,7 @@ Format: claim — source — fetched — status.
   TLS with certificate pinning. — same — verified
 - Android: not stated (the listing is App Store only). herdr: not stated.
   Push notifications: not stated. Source code: not stated.
-- Better pick than Muxr when: you want a free zellij client on iPhone or iPad,
+- Our judgement — better pick than Muxr when: you want a free zellij client on iPhone or iPad,
   or one app for zellij, tmux and plain SSH.
 
 ### Termius
@@ -230,7 +251,7 @@ Format: claim — source — fetched — status.
 - zellij, herdr or tmux-specific features: not stated. (It is a general SSH
   client; any multiplexer runs inside the shell.)
 - One-time purchase: not stated (plans are per month). Source code: not stated.
-- Better pick than Muxr when: you manage many servers over SSH, need desktop
+- Our judgement — better pick than Muxr when: you manage many servers over SSH, need desktop
   apps and sync, SFTP or port forwarding, or use tmux.
 
 ### Blink Shell
@@ -242,7 +263,7 @@ Format: claim — source — fetched — status.
 - Open source, GPL-3.0; SSH and Mosh. — https://github.com/blinksh/blink —
   15 Nov 2026 — verified
 - Android: no (iOS only). zellij or herdr-specific features: not stated.
-- Better pick than Muxr when: you want a full SSH and Mosh terminal on iPad
+- Our judgement — better pick than Muxr when: you want a full SSH and Mosh terminal on iPad
   with a hardware keyboard, open-source code, or tmux.
 
 ### Prompt 3
@@ -267,7 +288,7 @@ Format: claim — source — fetched — status.
 
 - "An Android terminal emulator and Linux environment app"; free; distributed
   through F-Droid and GitHub. — https://termux.dev/en/ — 15 Nov 2026 — verified
-- Use with zellij: run `ssh` inside Termux and then `zellij attach`.
+- Our judgement — use with zellij: run `ssh` inside Termux and then `zellij attach`.
 
 ### ConnectBot
 
@@ -286,16 +307,20 @@ Format: claim — source — fetched — status.
   a web app. — same — verified
 - No built-in rate limiting; a reverse proxy is recommended. — same — verified
 - Price: free (it ships with zellij). herdr: no. Push notifications: not stated.
-- Better pick than Muxr when: you want zellij on a phone with no app and no
+- Our judgement — better pick than Muxr when: you want zellij on a phone with no app and no
   extra daemon, or only need occasional access.
 
 ### An SSH app running `zellij attach`
+
+Our judgement throughout: this section describes a method, not a product, and
+quotes nobody. Name the SSH apps only as examples, with the facts from their
+own sections.
 
 - Works with any SSH client (Termius, Blink Shell, Prompt 3, Termux,
   ConnectBot). Needs only an SSH server on the machine.
 - The session is the ordinary zellij terminal UI, drawn at the phone's screen
   size and driven by zellij's keyboard shortcuts.
-- Better pick than Muxr when: you already live in an SSH app, or cannot install
+- Our judgement — better pick than Muxr when: you already live in an SSH app, or cannot install
   a daemon on the server.
 
 ### Herdr mobile app (made by the herdr project)
@@ -312,7 +337,7 @@ Format: claim — source — fetched — status.
 - herdr itself is open source under Apache 2.0. — https://herdr.dev/ —
   15 Nov 2026 — verified
 - Push notifications: not stated. zellij: no.
-- Better pick than Muxr when: you run herdr-core. It is free and made by the
+- Our judgement — better pick than Muxr when: you run herdr-core. It is free and made by the
   herdr project.
 
 ### Heeler for herdr
@@ -366,7 +391,7 @@ Format: claim — source — fetched — status.
 - The phone shows the conversation; a terminal emulator is not described. —
   same — verified
 - Works with Claude Code only. — same — verified
-- Better pick than Muxr when: you use Claude Code only, do not need the
+- Our judgement — better pick than Muxr when: you use Claude Code only, do not need the
   terminal, and want Anthropic's own notifications with nothing to self-host.
 
 ### Codex remote connections (OpenAI)
