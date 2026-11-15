@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muxr vs the Herdr mobile app · Muxr</title>
+  <meta name="description" content="Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.">
+  <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
+  <link rel="canonical" href="https://muxr.app/compare/herdr-mobile.html">
+  <link rel="alternate" type="text/markdown" href="/compare/herdr-mobile.html.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Muxr vs the Herdr mobile app">
+  <meta property="og:description" content="Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.">
+  <meta property="og:url" content="https://muxr.app/compare/herdr-mobile.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/glyph.css?v=4">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Article",
+        "headline": "Muxr vs the Herdr mobile app",
+        "description": "Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.",
+        "datePublished": "2026-11-15",
+        "dateModified": "2026-11-15",
+        "author": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "publisher": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "mainEntityOfPage": {
+          "@type": "WebPage",
+          "@id": "https://muxr.app/compare/herdr-mobile.html"
+        }
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://muxr.app/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Compare",
+            "item": "https://muxr.app/compare/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 3,
+            "name": "Muxr vs the Herdr mobile app",
+            "item": "https://muxr.app/compare/herdr-mobile.html"
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+  <script src="/assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="/index.html">Home</a>
+        <a class="nav-link" href="/docs.html">Docs</a>
+        <a class="nav-link" href="/guide.html">Guide</a>
+        <a class="nav-link active" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article">
+
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/index.html">Home</a></li>
+        <li><a href="/compare/">Compare</a></li>
+        <li><span aria-current="page">Muxr vs the Herdr mobile app</span></li>
+      </ol>
+    </nav>
+
+    <h1>Muxr vs the Herdr mobile app</h1>
+    <p class="updated">Last updated: 15 November 2026. Published by the makers of Muxr.</p>
+
+    <p class="article-lead">The Herdr mobile app is made by the herdr project, is free and is the natural first choice if you run herdr-core. Muxr is a different route: it also attaches to zellij, and connects through a daemon you run over TLS with QR pairing instead of SSH.</p>
+
+    <div class="verdict">
+      <p class="verdict-title">Which one should I pick?</p>
+      <ul>
+        <li><strong>Pick the Herdr mobile app if</strong> you run herdr-core. It is free, made by the herdr project, and its page says it works with herdr-core.</li>
+        <li><strong>Pick Muxr if</strong> you also use zellij, want QR pairing over TLS instead of SSH, or want read-only tokens and a persistent pane rail on a tablet. If you run herdr-core, Muxr will not work for you; use the Herdr app.</li>
+      </ul>
+    </div>
+
+    <h2>How do the two compare?</h2>
+    <p>Details for the Herdr mobile app are taken from <a href="https://herdr.dev/mobile" target="_blank" rel="noopener noreferrer nofollow">herdr.dev/mobile</a> as published on 15 November 2026. Details for Muxr come from this site. "Not stated" means the app's own pages say nothing about it.</p>
+
+    <div class="compare-wrap">
+      <table class="compare-table">
+        <caption>Muxr and the Herdr mobile app compared row by row</caption>
+        <thead>
+          <tr><td></td><th scope="col">Muxr</th><th scope="col">Herdr mobile app</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Price model</th><td>Free app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027.</td><td>Free</td></tr>
+          <tr><th scope="row">Platforms</th><td>iPhone, iPad, Android phones and tablets</td><td>iPhone, iPad and Android</td></tr>
+          <tr><th scope="row">Connection</th><td>muxrd over gRPC with TLS and a per-device token, paired by QR code. No SSH.</td><td>SSH to herdr-core on each machine; no Herdr account and no server of the project's in between</td></tr>
+          <tr><th scope="row">What it needs on the server</th><td>muxrd, plus zellij or herdr</td><td>herdr-core</td></tr>
+          <tr><th scope="row">Which herdr it works with</th><td>The herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</td><td>"Works with herdr-core, which comes with the Herdr app" (<a href="https://herdr.dev/mobile" target="_blank" rel="noopener noreferrer">herdr.dev/mobile</a>)</td></tr>
+          <tr><th scope="row">Agents view</th><td>On herdr, a list of the agents in a session, most urgent first (blocked, done, working, idle)</td><td>An inbox sorted by needs you, done, working, idle</td></tr>
+          <tr><th scope="row">Notifications</th><td><span class="soon">Coming soon</span></td><td>Not stated</td></tr>
+          <tr><th scope="row">zellij</th><td>Yes</td><td>Not stated (our judgement: its page mentions no other multiplexer)</td></tr>
+          <tr><th scope="row">Tablet layout</th><td>Yes, a persistent pane rail beside the terminal</td><td>Not stated</td></tr>
+          <tr><th scope="row">Source code and licence</th><td>Source available under the PolyForm Shield License 1.0.0 (app and server)</td><td>App: Not stated. herdr itself is open source under Apache 2.0.</td></tr>
+          <tr><th scope="row">Account required</th><td>No</td><td>No Herdr account</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Where is the Herdr mobile app the better choice?</h2>
+    <p>It is the better pick when you run herdr-core. It is free and made by the herdr project, and its page states it works with herdr-core. Muxr does not support herdr-core.</p>
+    <p>It connects over SSH to herdr-core, and its page says there is no Herdr account and no server of the project's in between. Its page also says "Herdr TUI isn't supported".</p>
+
+    <h2>Where is Muxr the better choice?</h2>
+    <p>Pick it if you use zellij as well as herdr, because muxrd detects whichever is installed. Pairing is a QR code from <code>muxrctl</code> over TLS rather than SSH keys, read-only tokens let someone watch a session without typing, and tablets get a persistent pane rail. Push notifications are <span class="soon">coming soon</span>.</p>
+
+    <h2>Is Muxr the same kind of app?</h2>
+    <p>Both are phone clients for herdr, but they sit differently. Muxr needs muxrd on your machine and does nothing without zellij or herdr. It does not integrate with any specific agent; it shows the terminal the agent runs in.</p>
+
+    <p>Sources: the Herdr mobile app facts come from <a href="https://herdr.dev/mobile" target="_blank" rel="noopener noreferrer">herdr.dev/mobile</a>, fetched 15 November 2026. The herdr Apache 2.0 licence is from <a href="https://herdr.dev/" target="_blank" rel="noopener noreferrer">herdr.dev</a>. See also <a href="/how-to/herdr-on-your-phone.html">herdr on your phone</a>.</p>
+    <p class="trademark-note">Herdr, Heeler, Collie, Sherpr, herdrup, Whip and Moshi are trademarks of their owners; Muxr is not affiliated with them. Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+    <nav class="page-links" aria-label="Related pages">
+      <p class="page-links-label">Related pages</p>
+      <ul>
+        <li><a href="/best/herdr-mobile-clients.html">Best herdr mobile clients for iPhone and Android (2026)</a></li>
+        <li><a href="/how-to/herdr-on-your-phone.html">How to use herdr on your phone</a></li>
+        <li><a href="/compare/">Compare Muxr with other apps</a></li>
+        <li><a href="/pricing.html">Pricing</a></li>
+      </ul>
+    </nav>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="/index.html">Home</a>
+        <a class="footer-link" href="/docs.html">Docs</a>
+        <a class="footer-link" href="/guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
+        <a class="footer-link" href="/support.html">Support</a>
+        <a class="footer-link" href="/privacy.html">Privacy</a>
+        <a class="footer-link" href="/terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+      <div class="footer-meta">
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>

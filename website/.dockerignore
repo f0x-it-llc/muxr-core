@@ -2,14 +2,24 @@
 # (info disclosure if the Dockerfile ever switches to a bulk `COPY . .`).
 # NOTE: nginx.conf is deliberately NOT ignored — the Dockerfile copies it to
 # /etc/nginx/conf.d/default.conf (not the web root), so it must stay in context.
+# tools/ is NOT ignored either: the markdown build stage runs tools/build_md.py,
+# and the final stage never copies it.
 Dockerfile
 .dockerignore
 README.md
+CLAIMS.md
+PAGE_RULES.md
+
+# Markdown mirrors and llms-full.txt from a local generator run: the image
+# builds its own, so a stale local copy must not ride along in a section dir.
+**/*.html.md
+llms-full.txt
 
 # VCS / OS / editor cruft
 .git
 .gitignore
 .DS_Store
+**/__pycache__
 *.swp
 *.swo
 *~

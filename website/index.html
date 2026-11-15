@@ -4,14 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Zellij and herdr terminal for iPhone, iPad, Android · Muxr</title>
-  <meta name="description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions through muxrd, with TLS, token login and QR pairing.">
+  <meta name="description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions, and the coding agents running in them, with TLS and QR pairing.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon.png">
   <link rel="canonical" href="https://muxr.app/">
+  <link rel="alternate" type="text/markdown" href="/index.html.md">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Muxr">
   <meta property="og:title" content="Zellij and herdr terminal for iPhone, iPad, Android">
-  <meta property="og:description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions through muxrd, with TLS, token login and QR pairing.">
+  <meta property="og:description" content="Muxr attaches your iPhone, iPad or Android device to remote zellij and herdr sessions, and the coding agents running in them, with TLS and QR pairing.">
   <meta property="og:url" content="https://muxr.app/">
   <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
   <meta property="og:image:width" content="1200">
@@ -28,7 +29,7 @@
         "@id": "https://muxr.app/#organization",
         "name": "F0X IT LLC",
         "url": "https://muxr.app/",
-        "logo": "https://muxr.app/favicon.png",
+        "logo": "https://muxr.app/assets/img/logo-512.png",
         "sameAs": [
           "https://github.com/f0x-it-llc/muxr-core",
           "https://github.com/f0x-it-llc/muxr-app"
@@ -44,7 +45,12 @@
         "@type": "MobileApplication",
         "@id": "https://muxr.app/#app",
         "name": "Muxr",
-        "description": "Muxr is a mobile app for iPhone, iPad and Android that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon.",
+        "description": "Muxr is a mobile app for iPhone, iPad and Android that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon. It also lets you watch and steer the coding agents, such as Claude Code and Codex, that run in those sessions.",
+        "disambiguatingDescription": "Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.",
+        "sameAs": [
+          "https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967",
+          "https://play.google.com/store/apps/details?id=com.it.f0x.muxr"
+        ],
         "operatingSystem": "iOS, Android",
         "applicationCategory": "DeveloperApplication",
         "url": "https://muxr.app/",
@@ -66,7 +72,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/css/glyph.css?v=3">
+  <link rel="stylesheet" href="assets/css/glyph.css?v=4">
   <script src="assets/js/main.js" defer></script>
 </head>
 <body>
@@ -96,6 +102,8 @@
         <a class="nav-link active" href="index.html">Home</a>
         <a class="nav-link" href="docs.html">Docs</a>
         <a class="nav-link" href="guide.html">Guide</a>
+        <a class="nav-link" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
         <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
@@ -115,7 +123,7 @@
             <span class="eyebrow">self-hosted · source-available backend</span>
             <h1>Mu<span>xr</span></h1>
             <p class="hero-tagline">Attach to your remote zellij and herdr sessions from your iPhone, iPad or Android device.</p>
-            <p class="hero-sub">A <a href="https://frust.dev" target="_blank" rel="noopener noreferrer">Frust</a>-native client that drives your <code>herdr</code> or <code>zellij</code> multiplexer over TLS-secured, bearer-authenticated gRPC — full session, tab, and pane control with touch-native gestures.</p>
+            <p class="hero-sub">Muxr attaches to your <code>zellij</code> and <code>herdr</code> sessions, with full session, tab and pane control and touch-native gestures. That includes the sessions where your coding agents (Claude Code, Codex and others) run, so you can watch and steer them from your phone.</p>
 
             <div class="ascii-box">┌──────────────────────────────┐
 │  muxr · remote attach        │
@@ -150,7 +158,7 @@
         <div class="section-head">
           <span class="eyebrow">// features</span>
           <h2>Built for remote terminal control</h2>
-          <p>Everything you need to drive a herdr or zellij server from a touch device — secured, self-hosted, and open at the boundary.</p>
+          <p>Everything you need to drive a herdr or zellij server from a touch device, secured and self-hosted. The server and the app are source available under PolyForm Shield 1.0.0.</p>
         </div>
 
         <div class="feature-grid">
@@ -161,7 +169,7 @@
               </svg>
             </div>
             <h3 class="feature-title">TLS + bearer auth</h3>
-            <p class="feature-desc">Every connection is encrypted and authenticated. The gRPC boundary speaks the <code>muxr.v1</code> protobuf contract over fingerprint-pinned TLS with bearer-token auth.</p>
+            <p class="feature-desc">Every connection is encrypted and authenticated. The gRPC boundary speaks the <code>muxr.v1</code> protobuf contract over TLS with bearer-token auth; a self-signed server's certificate is pinned at pairing.</p>
           </article>
 
           <article class="feature-card">
@@ -171,7 +179,7 @@
               </svg>
             </div>
             <h3 class="feature-title">QR-code device pairing</h3>
-            <p class="feature-desc">Pair from the setup TUI by scanning a QR. The code pins the server's TLS certificate fingerprint — cert-pinned trust, no manual cert wrangling.</p>
+            <p class="feature-desc">Pair from the setup TUI by scanning a QR. For a self-signed server the code pins the certificate fingerprint; for a CA-signed server the app uses system trust.</p>
           </article>
 
           <article class="feature-card">
@@ -191,7 +199,7 @@
               </svg>
             </div>
             <h3 class="feature-title">Touch-native gestures</h3>
-            <p class="feature-desc">Tap to focus, tap again for the keyboard, long-press to fullscreen a pane, swipe back to peel immersive layers. A modifier key bar covers Ctrl, Alt, Esc, arrows.</p>
+            <p class="feature-desc">Tap to focus, tap again for the keyboard, double-tap a pane to toggle its fullscreen, long-press text to select it, swipe back to peel immersive layers. A modifier key bar covers Ctrl, Alt, Esc, arrows.</p>
           </article>
 
           <article class="feature-card">
@@ -217,6 +225,21 @@
       </div>
     </section>
 
+    <div class="section-divider"><span class="divider-label">coding agents</span></div>
+
+    <!-- ═══════════════ CODING AGENTS ═══════════════ -->
+    <section class="section" id="agents">
+      <div class="container container-narrow">
+        <div class="section-head">
+          <span class="eyebrow">// coding agents</span>
+          <h2>Can I check on my coding agents from my phone?</h2>
+          <p>Yes. Run your coding agent, such as Claude Code or Codex, inside zellij or herdr on your own machine, then attach to that session from Muxr and see its real terminal.</p>
+        </div>
+        <p>On herdr, an agents list shows which agents are blocked, done, working or idle, most urgent first. On zellij the agent appears as a terminal like any other pane, because zellij reports no agents. Muxr does not integrate with any specific agent: it shows the terminal the agent runs in. Push notifications are coming soon.</p>
+        <p><a href="/how-to/claude-code-and-codex-on-your-phone.html">How to use Claude Code and Codex from your phone</a> · <a href="/compare/claude-code-remote-control.html">Muxr and Claude Code Remote Control compared</a></p>
+      </div>
+    </section>
+
     <div class="section-divider"><span class="divider-label">how it works</span></div>
 
     <!-- ═══════════════ HOW IT WORKS ═══════════════ -->
@@ -225,7 +248,7 @@
         <div class="section-head">
           <span class="eyebrow">// three steps</span>
           <h2>From bare server to pocket terminal</h2>
-          <p>Self-host the source-available backend, pair once, and you are driving herdr or zellij from anywhere on your network.</p>
+          <p>Self-host the source available backend, pair once, and you are driving herdr or zellij from anywhere on your network.</p>
         </div>
 
         <div class="flow-steps">
@@ -262,7 +285,7 @@
         <div class="section-head">
           <span class="eyebrow">// compare</span>
           <h2>Muxr and Moshi, side by side</h2>
-          <p>Moshi is a capable SSH terminal for phones. Muxr takes a different route: a source-available daemon on your server and a one-time price.</p>
+          <p>Moshi is a capable SSH terminal for phones. Muxr takes a different route: a source available daemon on your server and a one-time price. This is the short version; the full page has sources for every cell.</p>
         </div>
 
         <div class="compare-wrap">
@@ -272,32 +295,54 @@
               <tr><td></td><th scope="col">Muxr</th><th scope="col">Moshi</th></tr>
             </thead>
             <tbody>
-              <tr><th scope="row">One-time price</th><td>$9.99 (Pro)</td><td>$199 (Lifetime, described as a limited-time offer)</td></tr>
-              <tr><th scope="row">Subscription</th><td>None</td><td>$9.99 / month or $89.99 / year</td></tr>
-              <tr><th scope="row">Free tier</th><td>Full app, one server</td><td>Full SSH terminal, unlimited sessions, push notifications</td></tr>
-              <tr><th scope="row">Paying unlocks</th><td>More than one server</td><td>Mosh and ET sessions, auto-attach for tmux and herdr</td></tr>
-              <tr><th scope="row">Source code</th><td>Source available; server free to use except to build a competing product</td><td>Not published</td></tr>
-              <tr><th scope="row">Tech stack</th><td>Rust end to end: <a href="https://frust.dev/" target="_blank" rel="noopener noreferrer">frust</a> app, muxrd server</td><td>Not published</td></tr>
-              <tr><th scope="row">Connection</th><td>muxrd on your server, gRPC over TLS, token auth</td><td>SSH, Mosh or ET straight to your host</td></tr>
-              <tr><th scope="row">Server install</th><td>Required (muxrd)</td><td>None required; optional hook for agent context</td></tr>
-              <tr><th scope="row">Pairing</th><td>QR code, certificate pinned</td><td>SSH keys</td></tr>
-              <tr><th scope="row">zellij</th><td>Yes</td><td>Yes</td></tr>
-              <tr><th scope="row">herdr</th><td>Yes</td><td>Yes</td></tr>
+              <tr><th scope="row">Price model</th><td>Free app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. <a href="/pricing.html">Pricing</a></td><td>Free tier, then Pro. Website: Pro $9.99 per month, $89.99 per year, Lifetime $199 once (<a href="https://getmoshi.app/pricing" target="_blank" rel="noopener noreferrer">Moshi pricing page</a>). App Store: Pro Monthly listed at $6.99, $7.99 and $9.99; Pro Yearly at $69.99 and $89.99; Pro Lifetime $249.00 (<a href="https://apps.apple.com/us/app/id6757859949" target="_blank" rel="noopener noreferrer">Moshi App Store listing</a>).</td></tr>
+              <tr><th scope="row">Subscription</th><td>None</td><td>Monthly and yearly plans, or a lifetime price (prices in the row above).</td></tr>
+              <tr><th scope="row">Connection</th><td>muxrd, a daemon on your own machine; gRPC over TLS with a per-device token. No SSH between app and server. Pairing by QR code.</td><td>SSH, Mosh or Eternal Terminal straight to your host, with no relay (<a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer">getmoshi.app</a>).</td></tr>
+              <tr><th scope="row">Server install</th><td>Required: you install muxrd next to zellij or herdr.</td><td>None required; an optional hook adds agent context.</td></tr>
+              <tr><th scope="row">zellij</th><td>Yes</td><td>Yes, with a session picker and shortcut panel.</td></tr>
+              <tr><th scope="row">herdr</th><td>Yes, the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</td><td>Yes, with a workspace picker and shortcut panel.</td></tr>
               <tr><th scope="row">tmux</th><td><span class="soon">Coming soon</span></td><td>Yes</td></tr>
-              <tr><th scope="row">Push notifications</th><td><span class="soon">Coming soon</span></td><td>Yes</td></tr>
-              <tr><th scope="row">Voice input</th><td><span class="soon">Coming soon</span></td><td>Yes, on-device</td></tr>
-              <tr><th scope="row">Read-only access tokens</th><td>Yes</td><td>Not stated</td></tr>
-              <tr><th scope="row">AI agents</th><td>Agents list (herdr)</td><td>Agent inbox and approvals, 18 agents listed</td></tr>
-              <tr><th scope="row">Tablet layout</th><td>Yes, split-pane rail</td><td>iPad keyboard shortcuts</td></tr>
-              <tr><th scope="row">Phones and tablets</th><td>iOS, Android</td><td>iOS, Android, Apple Watch</td></tr>
-              <tr><th scope="row">Desktop app</th><td><span class="soon">Coming soon</span> (macOS, Linux, Windows)</td><td>macOS, Linux, Windows (alpha, free)</td></tr>
-              <tr><th scope="row">In-app analytics</th><td>None</td><td>Basic usage analytics</td></tr>
-              <tr><th scope="row">Account required</th><td>No</td><td>No</td></tr>
+              <tr><th scope="row">Push notifications</th><td><span class="soon">Coming soon</span></td><td>Yes, when agents need you.</td></tr>
             </tbody>
           </table>
         </div>
 
-        <p class="trademark-note">Moshi details are taken from <a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer nofollow">getmoshi.app</a> as published on 13 November 2026 and may have changed. "Not published" and "Not stated" mean their site does not say. Moshi is a trademark of its owner; Muxr is not affiliated with it.</p>
+        <p class="trademark-note">Moshi details are taken from <a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer nofollow">getmoshi.app</a> as published on 15 November 2026 and may have changed. Moshi is a trademark of its owner; Muxr is not affiliated with it.</p>
+        <p><a href="/compare/moshi.html">Full comparison</a> · <a href="/compare/">All comparisons</a></p>
+      </div>
+    </section>
+
+    <div class="section-divider"><span class="divider-label">faq</span></div>
+
+    <!-- ═══════════════ FAQ TEASER ═══════════════ -->
+    <section class="section" id="faq">
+      <div class="container container-narrow">
+        <div class="section-head">
+          <span class="eyebrow">// faq</span>
+          <h2>Common questions</h2>
+        </div>
+
+        <div class="faq-item">
+          <h3>What is Muxr?</h3>
+          <p>Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions. It talks to muxrd, a daemon you run on your own machine next to zellij or herdr. <a href="/about.html">More about Muxr</a></p>
+        </div>
+        <div class="faq-item">
+          <h3>Does Muxr support tmux?</h3>
+          <p>tmux support is coming soon. It is not available today. See the <a href="/roadmap.html">roadmap</a>.</p>
+        </div>
+        <div class="faq-item">
+          <h3>How much does Muxr cost?</h3>
+          <p>Muxr is free to download, and the free app is the full app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. <a href="/pricing.html">Pricing</a></p>
+        </div>
+        <div class="faq-item">
+          <h3>Does my traffic go through your servers?</h3>
+          <p>No. Terminal traffic goes from the phone to your own server and does not pass through any server run by F0X IT LLC. <a href="/privacy.html">Privacy</a></p>
+        </div>
+        <div class="faq-item">
+          <h3>Is Muxr related to trymuxr or the @trymuxr/cli npm package?</h3>
+          <p>Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.</p>
+        </div>
+        <p><a href="/faq.html">All questions and answers</a></p>
       </div>
     </section>
 
@@ -349,7 +394,13 @@
         <a class="footer-link" href="index.html">Home</a>
         <a class="footer-link" href="docs.html">Docs</a>
         <a class="footer-link" href="guide.html">Guide</a>
-        <a class="footer-link" href="#compare">Compare</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
         <a class="footer-link" href="support.html">Support</a>
         <a class="footer-link" href="privacy.html">Privacy</a>
         <a class="footer-link" href="terms.html">Terms</a>
@@ -360,7 +411,7 @@
 
       <div class="footer-meta">
         <span>self-hosted · source-available backend</span>
-        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+        <span>Source available: the server (<a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a>) and the app are both licensed under PolyForm Shield 1.0.0.</span>
       </div>
     </div>
   </footer>

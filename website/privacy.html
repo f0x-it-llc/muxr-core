@@ -4,14 +4,15 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Privacy Policy · Muxr</title>
-  <meta name="description" content="How Muxr handles your data: no accounts, no analytics, no ads, no crash reporting. Your terminal traffic flows only between your device and your own server. Privacy policy for the Muxr app, muxr.app, and the optional Muxr Push relay.">
+  <meta name="description" content="How Muxr handles your data: no accounts, no analytics, no ads, no crash reporting. Terminal traffic flows only between your device and your own server.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon.png">
   <link rel="canonical" href="https://muxr.app/privacy.html">
+  <link rel="alternate" type="text/markdown" href="/privacy.html.md">
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Muxr">
   <meta property="og:title" content="Privacy Policy">
-  <meta property="og:description" content="How Muxr handles your data: no accounts, no analytics, no ads, no crash reporting. Your terminal traffic flows only between your device and your own server. Privacy policy for the Muxr app, muxr.app, and the optional Muxr Push relay.">
+  <meta property="og:description" content="How Muxr handles your data: no accounts, no analytics, no ads, no crash reporting. Terminal traffic flows only between your device and your own server.">
   <meta property="og:url" content="https://muxr.app/privacy.html">
   <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
   <meta property="og:image:width" content="1200">
@@ -21,7 +22,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="assets/css/glyph.css?v=3">
+  <link rel="stylesheet" href="assets/css/glyph.css?v=4">
   <script src="assets/js/main.js" defer></script>
 </head>
 <body>
@@ -51,6 +52,8 @@
         <a class="nav-link" href="index.html">Home</a>
         <a class="nav-link" href="docs.html">Docs</a>
         <a class="nav-link" href="guide.html">Guide</a>
+        <a class="nav-link" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
         <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
           <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
             <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
@@ -66,7 +69,7 @@
       <span class="eyebrow">Legal</span>
       <h1>Privacy <span>Policy</span></h1>
       <p class="doc-lead">How the Muxr app, the muxr.app website, and the optional Muxr Push relay handle your data — operated by f0x.it LLC.</p>
-      <p class="doc-lead"><strong>Effective date:</strong> August 13, 2026 · <strong>Last updated:</strong> August 13, 2026</p>
+      <p class="doc-lead"><strong>Effective date:</strong> August 13, 2026 · <strong>Last updated:</strong> November 15, 2026</p>
     </div>
 
     <div class="doc-layout">
@@ -103,7 +106,7 @@
             <li><strong>No sale of data.</strong> We do not sell your personal information, and we do not share it for advertising or cross-app tracking.</li>
             <li><strong>Your terminal traffic never reaches us.</strong> It flows directly between your device and the <code>muxrd</code> server you run.</li>
             <li><strong>Credentials stay on your device</strong>, in the operating system's Keychain (iOS) or Keystore (Android), behind your device biometrics.</li>
-            <li><strong>The only data we ever receive</strong> is standard web-server access logs from muxr.app, and — if you deliberately turn on notifications and register a device with our hosted relay — a small registration record described in <a href="#push">Muxr Push</a>.</li>
+            <li><strong>The only data we ever receive</strong> is standard web-server access logs from muxr.app, and — once push notifications are available, if you deliberately turn on notifications and register a device with our hosted relay — a small registration record described in <a href="#push">Muxr Push</a>.</li>
           </ul>
         </section>
 
@@ -114,7 +117,7 @@
           <ul>
             <li><strong>The Muxr app</strong> — the mobile and tablet client for iOS and Android ("the App").</li>
             <li><strong>The muxr.app website</strong> — these pages, plus the Nerd Font catalog served at <code>muxr.app/fonts/</code> that the App downloads fonts from ("the Site").</li>
-            <li><strong>Muxr Push</strong> — the optional hosted notification relay we operate, used only if you enable notifications and register a device with it.</li>
+            <li><strong>Muxr Push</strong> — the optional hosted notification relay we operate, used only if you enable notifications and register a device with it. Push notifications are not yet available in the app.</li>
           </ul>
           <p>It does <strong>not</strong> cover the server software you run yourself. <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> (<code>muxrd</code>, <code>muxrctl</code>, <code>muxr-notify</code>) is source-available software that you install and operate on your own machine. Anything it stores — tokens, TLS certificates, device registrations — lives on your hardware, under your control. We never receive it.</p>
         </section>
@@ -152,6 +155,11 @@
 
         <section id="push">
           <h2>Muxr Push (optional)</h2>
+          <div class="callout callout-warn">
+            <div class="callout-title">Not yet available</div>
+            <p>Push notifications are not yet available in the Muxr app. This section describes how the hosted relay will handle data once the app can register a device. Until then the app registers no device with the relay and sends nothing to it.</p>
+          </div>
+
           <p>Muxr Push is an <strong>opt-in</strong> feature. It applies only if you turn on notifications and register a device with the relay we host. If you never enable it, nothing in this section happens and no data about you leaves your device for us.</p>
 
           <div class="callout callout-note">
@@ -229,7 +237,7 @@
         <section id="choices">
           <h2>Your choices and rights</h2>
           <ul>
-            <li><strong>Notifications:</strong> turn them off in the App at any time and unregister the device. That deletes the relay's registration record for it.</li>
+            <li><strong>Notifications (once available):</strong> turn them off in the App at any time and unregister the device. That deletes the relay's registration record for it.</li>
             <li><strong>Locally saved data:</strong> remove an individual saved server or stored credential in the App, or uninstall the App to remove everything it stored on the device.</li>
             <li><strong>Self-hosting:</strong> run your own <code>muxr-notify</code> relay, and no notification data reaches us at all.</li>
             <li><strong>Deletion requests and questions:</strong> email <a href="mailto:support@muxr.app">support@muxr.app</a>. Because we hold no account, tell us enough to locate the record — we will work with you to identify and delete any registration associated with your device.</li>
@@ -278,6 +286,13 @@
         <a class="footer-link" href="index.html">Home</a>
         <a class="footer-link" href="docs.html">Docs</a>
         <a class="footer-link" href="guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
         <a class="footer-link" href="support.html">Support</a>
         <a class="footer-link" href="privacy.html">Privacy</a>
         <a class="footer-link" href="terms.html">Terms</a>
