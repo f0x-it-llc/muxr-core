@@ -1,16 +1,45 @@
-# muxr-core
+# Muxr server (muxr-core)
 
-The source-available backend for **Muxr** — a Rust [Cargo workspace](https://doc.rust-lang.org/cargo/reference/workspaces.html)
-that lets a mobile client attach to and control remote terminal-multiplexer sessions
-over a TLS, bearer-authenticated gRPC API. `muxrd` drives two backends behind a
-`MuxBackend` trait — [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/) — and auto-detects
-whichever are available at startup.
+Muxr puts your zellij and herdr terminal sessions, including the ones your coding agents run in, on your iPhone, iPad or Android device. This repository is the server side: `muxrd`, a daemon you run next to zellij or herdr, and `muxrctl`, a terminal UI that sets it up and pairs your phone with a QR code.
 
-**Get the app:**
 <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="website/assets/img/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
 <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="website/assets/img/badges/google-play.png" alt="Get it on Google Play" height="65"></a>
 
-See [muxr.app](https://muxr.app) and its [quick start](https://muxr.app/docs.html) to pair your phone with a server.
+[Website](https://muxr.app/) · [Quick start](https://muxr.app/docs.html) · [FAQ](https://muxr.app/faq.html) · [How-to guides](https://muxr.app/how-to/index.html) · [Comparisons](https://muxr.app/compare/index.html) · [Pricing](https://muxr.app/pricing.html) · [Security](https://muxr.app/security.html)
+
+## What you get
+
+- Works with [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
+- Browse, open, create, rename and close sessions, tabs and panes from the app.
+- On herdr, an agents list shows the coding agents running in a session, most urgent first.
+- Pair by scanning a QR code; for a self-signed server the code pins the certificate fingerprint.
+- Per-device tokens, including read-only tokens for a view-only phone.
+- Three certificate modes: self-signed, an external CA certificate, or plaintext h2c behind a TLS-terminating proxy.
+- A tablet layout with a persistent pane rail beside the terminal.
+- No account, and terminal traffic goes from your phone to your own server, not through a server run by F0X IT LLC.
+
+## Start in a minute
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.sh | bash
+muxrctl
+```
+
+Then scan the QR code in the app. Step by step: [quick start](https://muxr.app/docs.html).
+
+## Price and licence
+
+The server is free to use under PolyForm Shield 1.0.0 (source available: free for any use except providing a competing product). The app is free for one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027.
+
+## Status
+
+Works with zellij and herdr today. tmux support, push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
+
+## Not the npm package
+
+Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.
+
+## What is in this repository
 
 Two distributed binaries, plus a third workspace crate distributed separately:
 
