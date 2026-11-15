@@ -154,9 +154,15 @@ Verified against this repository, the muxr-app repository and the store listings
 - muxr-core (server, this site): PolyForm Shield License 1.0.0 — free to use,
   modify and share for any purpose, including at work, except to provide a
   product that competes with Muxr. (README.md § License)
-- muxr-app (the app): PolyForm Noncommercial License 1.0.0 — free for
-  noncommercial purposes, including building it for your own devices.
-  (muxr-app README.md § License)
+- muxr-app (the app): PolyForm Shield License 1.0.0, the same licence as the
+  server — free to use, modify and share for any purpose, including at work,
+  except to provide a product that competes with Muxr. (Owner decision,
+  15 November 2026; muxr-app LICENSE.)
+- Shield's one limit is on providing a competing product, which covers
+  reselling the app. It is not a limit on commercial or work use.
+- Release note, not for pages: the muxr-app LICENSE changes in the same
+  release as this site. Do not deploy the site before the muxr-app pull
+  request that changes the licence has merged.
 
 ### Demo server
 
