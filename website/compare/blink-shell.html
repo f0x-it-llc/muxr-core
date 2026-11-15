@@ -127,7 +127,7 @@
 
     <div class="verdict">
       <p class="verdict-title">Which one should I pick?</p>
-      <p><strong>Pick Blink Shell if</strong> you want a full SSH and Mosh terminal on iPad with a hardware keyboard, open-source code, or tmux. It needs no daemon on your server.</p>
+      <p><strong>Pick Blink Shell if</strong> you want a full SSH and Mosh terminal on iPad with a hardware keyboard, open-source code, or tmux. It needs no daemon on your server (our judgement).</p>
       <p><strong>Pick Muxr if</strong> you run zellij or herdr, want native screens for their sessions, tabs and panes, or need an Android app as well as an iOS one.</p>
     </div>
 
@@ -141,7 +141,7 @@
         <tbody>
           <tr><th scope="row">Price model</th><td>Free to download. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. No subscription.</td><td>"Get 2 weeks free. Then just $19.99/year." (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>)</td></tr>
           <tr><th scope="row">Free tier</th><td>The full app with one server.</td><td>A two-week free period (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>). A permanent free tier: Not stated.</td></tr>
-          <tr><th scope="row">Platforms</th><td>iPhone, iPad, Android phones and tablets. Desktop apps <span class="soon">Coming soon</span></td><td>iPhone and iPad only (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>). No Android app.</td></tr>
+          <tr><th scope="row">Platforms</th><td>iPhone, iPad, Android phones and tablets. Desktop apps <span class="soon">Coming soon</span></td><td>iPhone and iPad only (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>). Its own site describes it as a terminal for iOS.</td></tr>
           <tr><th scope="row">Connection</th><td>gRPC over TLS to muxrd with a per-device token. No SSH between the app and the server.</td><td>SSH and Mosh (<a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a>).</td></tr>
           <tr><th scope="row">Server install</th><td>Required: muxrd on the machine that runs zellij or herdr.</td><td>Not stated. As an SSH and Mosh terminal it needs an SSH server (our judgement).</td></tr>
           <tr><th scope="row">zellij</th><td>Yes. Native session, tab and pane controls.</td><td>Not stated. zellij runs inside the shell session (our judgement).</td></tr>
@@ -174,7 +174,6 @@
 
     <h2>Can I use both?</h2>
     <p>Yes. Blink Shell can open a shell on any server, run <code>zellij attach</code> inside it and give you a full terminal on iPhone or iPad. Muxr covers the machines where you have installed muxrd and want native multiplexer controls, and it also runs on Android. They do not share data, and neither needs the other.</p>
-    <p>Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.</p>
 
     <p class="trademark-note">Blink Shell details are taken from <a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a> and <a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a> as published on 15 November 2026 and may have changed. "Not stated" means those pages do not say. Blink Shell is a trademark of its owner; Muxr is not affiliated with it.</p>
 
