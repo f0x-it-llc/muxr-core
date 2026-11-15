@@ -31,6 +31,9 @@ Work through the list top to bottom. A page that misses an item is not done.
       `Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027.`
 - [ ] Where the name could be confused with trymuxr, use the sentence from
       CLAIMS.md "Disambiguation" verbatim.
+      It needs no source link or fetch date, because it describes what Muxr
+      is not and makes no claim about the other product. Nothing else about
+      that product may be written.
 - [ ] No hosting-vendor or platform names anywhere (text, comments, links).
 - [ ] No "only", "official" or superlatives (best, fastest, ultimate) about Muxr.
 - [ ] No tracking, no third-party script, no new external host.
@@ -86,7 +89,7 @@ page breaks under `/how-to/` or `/compare/`.
       `default-src 'self'`.
 - [ ] Only classes that exist in `assets/css/glyph.css`. Page components:
       `.article`, `.article-lead`, `.breadcrumb`, `.updated`, `.faq-item`,
-      `.verdict` (with `.verdict-title`), `.page-links`, `.hub-grid` (with
+      `.verdict` (with `.verdict-title`), `.page-links` (with `.page-links-label`), `.hub-grid` (with
       `.hub-card`, `.hub-card-title`, `.hub-card-desc`), `.soon`, plus
       `.compare-wrap` and `.compare-table` for every comparison table and
       `.code-block` for commands. Need something new? Ask the conductor; do
@@ -104,7 +107,10 @@ page breaks under `/how-to/` or `/compare/`.
 - [ ] Say where the other product is the better pick (CLAIMS.md "Our
       judgement" lines give the wording).
 - [ ] 400 to 900 words of body text (about.html is the one exception: 300 to 500).
-- [ ] End with 2 to 4 links to related pages, as `<ul class="page-links">`.
+- [ ] End with 2 to 4 links to related pages, inside
+      `<nav class="page-links" aria-label="Related pages">` with no heading: a
+      short `<p class="page-links-label">Related pages</p>` then a `<ul>`. This
+      block is the one place a page has no question-form h2.
 - [ ] A coming-soon item says "coming soon" and nothing about timing.
 
 ## 6. URL map
