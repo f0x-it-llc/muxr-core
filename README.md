@@ -5,16 +5,16 @@ Muxr puts your zellij and herdr terminal sessions, including the ones your codin
 <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="website/assets/img/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
 <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="website/assets/img/badges/google-play.png" alt="Get it on Google Play" height="65"></a>
 
-[Website](https://muxr.app/) · [Quick start](https://muxr.app/docs.html) · [FAQ](https://muxr.app/faq.html) · [How-to guides](https://muxr.app/how-to/index.html) · [Comparisons](https://muxr.app/compare/index.html) · [Pricing](https://muxr.app/pricing.html) · [Security](https://muxr.app/security.html)
+[Website](https://muxr.app/) · [Quick start](https://muxr.app/docs.html) · [FAQ](https://muxr.app/faq.html) · [How-to guides](https://muxr.app/how-to/) · [Comparisons](https://muxr.app/compare/) · [Pricing](https://muxr.app/pricing.html) · [Security](https://muxr.app/security.html)
 
 ## What you get
 
 - Works with [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
 - Browse, open, create, rename and close sessions, tabs and panes from the app.
 - On herdr, an agents list shows the coding agents running in a session, most urgent first.
-- Pair by scanning a QR code; for a self-signed server the code pins the certificate fingerprint.
+- Pair by scanning a QR code. The code also pins the server's certificate, so the phone trusts only your server.
 - Per-device tokens, including read-only tokens for a view-only phone.
-- Three certificate modes: self-signed, an external CA certificate, or plaintext h2c behind a TLS-terminating proxy.
+- Works with a self-signed certificate, a certificate from a certificate authority, or behind a proxy that handles TLS.
 - A tablet layout with a persistent pane rail beside the terminal.
 - No account, and terminal traffic goes from your phone to your own server, not through a server run by F0X IT LLC.
 
