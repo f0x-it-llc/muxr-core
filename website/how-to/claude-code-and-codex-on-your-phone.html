@@ -1,0 +1,230 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Claude Code or Codex from your phone · Muxr</title>
+  <meta name="description" content="Control a terminal coding agent from your phone: Claude Code Remote Control, Codex remote connections, an SSH app, or Muxr with zellij or herdr.">
+  <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
+  <link rel="canonical" href="https://muxr.app/how-to/claude-code-and-codex-on-your-phone.html">
+  <link rel="alternate" type="text/markdown" href="/how-to/claude-code-and-codex-on-your-phone.html.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Run Claude Code or Codex from your phone with zellij">
+  <meta property="og:description" content="Control a terminal coding agent from your phone: Claude Code Remote Control, Codex remote connections, an SSH app, or Muxr with zellij or herdr.">
+  <meta property="og:url" content="https://muxr.app/how-to/claude-code-and-codex-on-your-phone.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/glyph.css?v=4">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "TechArticle",
+        "headline": "Run Claude Code or Codex from your phone with zellij",
+        "description": "Control a terminal coding agent from your phone: Claude Code Remote Control, Codex remote connections, an SSH app, or Muxr with zellij or herdr.",
+        "datePublished": "2026-11-15",
+        "dateModified": "2026-11-15",
+        "author": {"@id": "https://muxr.app/#organization"},
+        "publisher": {"@id": "https://muxr.app/#organization"},
+        "mainEntityOfPage": {"@type": "WebPage", "@id": "https://muxr.app/how-to/claude-code-and-codex-on-your-phone.html"}
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {"@type": "ListItem", "position": 1, "name": "Home", "item": "https://muxr.app/"},
+          {"@type": "ListItem", "position": 2, "name": "How-to", "item": "https://muxr.app/how-to/"},
+          {"@type": "ListItem", "position": 3, "name": "Run Claude Code or Codex from your phone with zellij", "item": "https://muxr.app/how-to/claude-code-and-codex-on-your-phone.html"}
+        ]
+      }
+    ]
+  }
+  </script>
+  <script src="/assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="/index.html">Home</a>
+        <a class="nav-link" href="/docs.html">Docs</a>
+        <a class="nav-link" href="/guide.html">Guide</a>
+        <a class="nav-link" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article">
+
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/index.html">Home</a></li>
+        <li><a href="/how-to/">How-to</a></li>
+        <li><span aria-current="page">Run Claude Code or Codex from your phone with zellij</span></li>
+      </ol>
+    </nav>
+
+    <h1>Run Claude Code or Codex from your phone with zellij</h1>
+    <p class="updated">Last updated: 15 November 2026</p>
+
+    <p class="article-lead">A coding agent that runs in a terminal keeps running inside a zellij or herdr session on your computer, and any phone client that can attach to that session lets you watch it and type to it. Muxr does this for zellij and herdr, and the vendors' own remote features do it without a terminal.</p>
+
+    <h2>What are my options?</h2>
+    <p>Four ways to reach a coding agent from a phone, as published on 15 November 2026. Muxr is one of them, and it is not the right pick for everyone.</p>
+
+    <div class="compare-wrap">
+      <table class="compare-table">
+        <caption>Ways to control a coding agent from your phone</caption>
+        <thead>
+          <tr>
+            <th scope="col">Option</th>
+            <th scope="col">What you see</th>
+            <th scope="col">Where traffic goes</th>
+            <th scope="col">What you need</th>
+            <th scope="col">Notifications</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <th scope="row"><a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer">Claude Code Remote Control</a></th>
+            <td>The conversation, in claude.ai/code or the Claude iOS and Android apps. A terminal emulator is not described.</td>
+            <td>The local session makes outbound HTTPS requests only; traffic goes through the Anthropic API, and the transcript is stored on Anthropic's servers while connected.</td>
+            <td>A paid Claude plan (API keys are not supported). The computer must stay on with <code>claude</code> running. Claude Code only.</td>
+            <td>Not stated</td>
+          </tr>
+          <tr>
+            <th scope="row"><a href="https://learn.chatgpt.com/docs/remote-connections" target="_blank" rel="noopener noreferrer">Codex remote connections</a> in the ChatGPT app</th>
+            <td>Threads, approvals, diffs and terminal output. An interactive terminal: not stated.</td>
+            <td>Through "a secure relay layer".</td>
+            <td>The ChatGPT app on iOS or Android and a Codex host, the ChatGPT desktop app on macOS or Windows. Plans required: not stated.</td>
+            <td>Not stated</td>
+          </tr>
+          <tr>
+            <th scope="row">An SSH app with tmux or zellij</th>
+            <td>A real terminal: the ordinary zellij interface, drawn at the phone's screen size and driven by zellij's keyboard shortcuts.</td>
+            <td>SSH to your own machine.</td>
+            <td>Any SSH client, such as <a href="https://termius.com/" target="_blank" rel="noopener noreferrer">Termius</a> or <a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">Blink Shell</a>, and an SSH server on the machine.</td>
+            <td>Not stated</td>
+          </tr>
+          <tr>
+            <th scope="row">Muxr with zellij or herdr</th>
+            <td>A real terminal. On herdr, also a list of agents.</td>
+            <td>gRPC over TLS from the phone to your own server. No SSH, and nothing passes through a server run by F0X IT LLC.</td>
+            <td>Muxr on the phone, and <code>muxrd</code> on the computer next to zellij or herdr.</td>
+            <td>Push notifications <span class="soon">Coming soon</span></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>When is the built-in remote feature the better choice?</h2>
+    <p>When you use one vendor's agent, want notifications and do not need the terminal. If you use Claude Code alone, <a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer">Remote Control</a> is the better pick: you get Anthropic's own notifications with nothing to self-host. The same reasoning applies to Codex remote connections if Codex is the one agent you run.</p>
+    <p>Muxr makes more sense when you want the real terminal, run more than one agent, or want the traffic to stay between your phone and your own machine. A longer comparison is on <a href="/compare/claude-code-remote-control.html">Muxr and Claude Code Remote Control</a>.</p>
+
+    <h2>How do I set this up with Muxr?</h2>
+    <ol>
+      <li>On the computer, start a named zellij session, or a herdr session, that you will recognise later.</li>
+      <li>Run the agent inside it, in a pane, as you would in any terminal.</li>
+      <li>Install the server on the same computer. It installs <code>muxrd</code> and <code>muxrctl</code>:
+        <div class="code-block"><pre><code>curl -fsSL https://raw.githubusercontent.com/f0x-it-llc/muxr-core/main/install.sh | bash</code></pre></div>
+      </li>
+      <li>Run <code>muxrctl</code>, follow the setup wizard and scan the pairing QR code from the Muxr app on your phone. The <a href="/docs.html">quick start</a> has every step, including reaching the server over a tailnet such as Tailscale.</li>
+      <li>Open the session from the app's Sessions screen and open the agent's pane.</li>
+      <li>Close the app when you are done. The session keeps running on your computer, and the agent keeps working in it.</li>
+    </ol>
+    <p>The app is free with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027.</p>
+
+    <h2>What does Muxr show about my agents?</h2>
+    <p>On herdr, Muxr lists the coding agents running in a session, most urgent first: blocked, then done, working, idle, with counts. Which agents herdr reports is up to herdr.</p>
+    <p>On zellij there is no agents list, because zellij reports no agents. The agent's pane is a terminal like any other pane. Muxr does not tie in with any specific agent: it shows the terminal the agent runs in.</p>
+
+    <h2>Will I get a notification when the agent needs me?</h2>
+    <p>Not yet. Push notifications are <span class="soon">Coming soon</span>; the app does not deliver notifications today. See the <a href="/roadmap.html">roadmap</a>. If notifications matter to you now, the built-in remote features above are the better choice.</p>
+
+    <h2>Can someone else watch without being able to type?</h2>
+    <p>Yes. A read-only token can navigate tabs, panes and spaces, scroll, and resize its own terminal, but cannot type or change the session. Tick Read-only when you name the token in <code>muxrctl</code>, then pair the other person's phone with it.</p>
+
+    <nav class="page-links" aria-label="Related pages">
+      <p class="page-links-label">Related pages</p>
+      <ul>
+        <li><a href="/compare/claude-code-remote-control.html">Muxr and Claude Code Remote Control</a></li>
+        <li><a href="/best/apps-for-coding-agents-on-your-phone.html">Apps for coding agents on your phone</a></li>
+        <li><a href="/how-to/">All how-to guides</a></li>
+      </ul>
+    </nav>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="/index.html">Home</a>
+        <a class="footer-link" href="/docs.html">Docs</a>
+        <a class="footer-link" href="/guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
+        <a class="footer-link" href="/support.html">Support</a>
+        <a class="footer-link" href="/privacy.html">Privacy</a>
+        <a class="footer-link" href="/terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+      <div class="footer-meta">
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
