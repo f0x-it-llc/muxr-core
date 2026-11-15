@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Support · Muxr</title>
-  <meta name="description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, read-only token, and push notification issues.">
+  <meta name="description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, and read-only token issues.">
   <link rel="icon" type="image/svg+xml" href="assets/img/logo.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="favicon.png">
   <link rel="canonical" href="https://muxr.app/support.html">
@@ -12,7 +12,7 @@
   <meta property="og:type" content="website">
   <meta property="og:site_name" content="Muxr">
   <meta property="og:title" content="Support">
-  <meta property="og:description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, read-only token, and push notification issues.">
+  <meta property="og:description" content="Get help with Muxr: contact support@muxr.app, file a bug on GitHub, or check the FAQ for pairing, TLS fingerprint, connection, and read-only token issues.">
   <meta property="og:url" content="https://muxr.app/support.html">
   <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
   <meta property="og:image:width" content="1200">
@@ -68,7 +68,7 @@
     <div class="doc-header">
       <span class="eyebrow">Help</span>
       <h1>Sup<span>port</span></h1>
-      <p class="doc-lead">Contact us, file a bug, or check the FAQ below for pairing, TLS, connection, and notification issues.</p>
+      <p class="doc-lead">Contact us, file a bug, or check the FAQ below for pairing, TLS, and connection issues.</p>
     </div>
 
     <div class="doc-layout">
@@ -132,7 +132,7 @@
           <h3>My read-only token can't modify sessions</h3>
           <p>This is by design. Mutating RPCs — creating, renaming, or closing sessions, tabs, and panes, and server-side pane fullscreen — fail closed on read-only tokens; the app also hides those affordances entirely when connected read-only. If you need to make changes, mint a read-write token instead: <code>muxrd create-token --name mobile</code> (omit <code>--read-only</code>).</p>
 
-          <h3>Does Muxr send push notifications?</h3>
+          <h3 id="push">Does Muxr send push notifications?</h3>
           <p>Push notifications are not available in the app yet; they are coming soon. See the <a href="/roadmap.html">roadmap</a> for where they stand. When they arrive, the server decides whether push is available: it will require herdr's event kernel, so a zellij-only <code>muxrd</code> will report push as unsupported.</p>
         </section>
 
