@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Claude Code or Codex from your phone · Muxr</title>
+  <title>Run Claude Code or Codex from your phone with zellij · Muxr</title>
   <meta name="description" content="Control a terminal coding agent from your phone: Claude Code Remote Control, Codex remote connections, an SSH app, or Muxr with zellij or herdr.">
   <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
@@ -101,7 +101,7 @@
     <h1>Run Claude Code or Codex from your phone with zellij</h1>
     <p class="updated">Last updated: 15 November 2026</p>
 
-    <p class="article-lead">A coding agent that runs in a terminal keeps running inside a zellij or herdr session on your computer, and any phone client that can attach to that session lets you watch it and type to it. Muxr does this for zellij and herdr, and the vendors' own remote features do it without a terminal.</p>
+    <p class="article-lead">A coding agent that runs in a terminal keeps running inside a zellij or herdr session on your computer, and any phone client that can attach to that session lets you watch it and type to it. Muxr does this for zellij and herdr; the table below sets it beside the vendors' own remote features and an SSH app.</p>
 
     <h2>What are my options?</h2>
     <p>Four ways to reach a coding agent from a phone, as published on 15 November 2026. Muxr is one of them, and it is not the right pick for everyone.</p>
@@ -143,7 +143,7 @@
           <tr>
             <th scope="row">Muxr with zellij or herdr</th>
             <td>A real terminal. On herdr, also a list of agents.</td>
-            <td>gRPC over TLS from the phone to your own server. No SSH, and nothing passes through a server run by F0X IT LLC.</td>
+            <td>gRPC over TLS from the phone to your own server. No SSH. Terminal traffic goes from the phone to your own server; it does not pass through any server run by F0X IT LLC.</td>
             <td>Muxr on the phone, and <code>muxrd</code> on the computer next to zellij or herdr.</td>
             <td>Push notifications <span class="soon">Coming soon</span></td>
           </tr>
@@ -152,7 +152,7 @@
     </div>
 
     <h2>When is the built-in remote feature the better choice?</h2>
-    <p>When you use one vendor's agent, want notifications and do not need the terminal. If you use Claude Code alone, <a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer">Remote Control</a> is the better pick: you get Anthropic's own notifications with nothing to self-host. The same reasoning applies to Codex remote connections if Codex is the one agent you run.</p>
+    <p>When you use one vendor's agent, want notifications and do not need the terminal. If you use Claude Code alone, do not need the terminal and want nothing to self-host, <a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer">Remote Control</a> is the better pick. Codex remote connections show threads, approvals, diffs and terminal output; whether they offer an interactive terminal is not stated.</p>
     <p>Muxr makes more sense when you want the real terminal, run more than one agent, or want the traffic to stay between your phone and your own machine. A longer comparison is on <a href="/compare/claude-code-remote-control.html">Muxr and Claude Code Remote Control</a>.</p>
 
     <h2>How do I set this up with Muxr?</h2>
@@ -173,10 +173,11 @@
     <p>On zellij there is no agents list, because zellij reports no agents. The agent's pane is a terminal like any other pane. Muxr does not tie in with any specific agent: it shows the terminal the agent runs in.</p>
 
     <h2>Will I get a notification when the agent needs me?</h2>
-    <p>Not yet. Push notifications are <span class="soon">Coming soon</span>; the app does not deliver notifications today. See the <a href="/roadmap.html">roadmap</a>. If notifications matter to you now, the built-in remote features above are the better choice.</p>
+    <p>Not yet. Muxr does not send notifications today; push notifications are <span class="soon">Coming soon</span>. See the <a href="/roadmap.html">roadmap</a>.</p>
+    <p>Whether the vendors' remote features notify you is not stated in the sources we checked. If you need notifications now, <a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer">Moshi</a> lists push notifications when agents need you (as published on 15 November 2026), and <a href="https://apps.apple.com/us/app/ssh-client-secure-shellfish/id1336634154" target="_blank" rel="noopener noreferrer">Secure ShellFish</a> sets up agent hooks for notifications (App Store listing, 15 November 2026). More clients are listed on <a href="/best/apps-for-coding-agents-on-your-phone.html">apps for coding agents on your phone</a>.</p>
 
     <h2>Can someone else watch without being able to type?</h2>
-    <p>Yes. A read-only token can navigate tabs, panes and spaces, scroll, and resize its own terminal, but cannot type or change the session. Tick Read-only when you name the token in <code>muxrctl</code>, then pair the other person's phone with it.</p>
+    <p>Yes. A read-only token can navigate tabs, panes and spaces, scroll, and resize its own terminal, but cannot type or change the session. It can also list every herdr space and read any space's tab and pane structure; pane content still requires an attach. Tick Read-only when you name the token in <code>muxrctl</code>, then pair the other person's phone with it.</p>
 
     <nav class="page-links" aria-label="Related pages">
       <p class="page-links-label">Related pages</p>
