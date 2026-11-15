@@ -134,6 +134,10 @@ Verified against this repository, the muxr-app repository and the store listings
   support.html says device registration arrives "with app-side push support".
   Pages say "coming soon" and do not describe the relay, its platforms or how
   to enable it.
+  The Terms and Privacy pages describe the hosted Muxr Push relay as planned:
+  when push ships, access to the hosted relay will be part of Pro
+  (terms.html § 6). Pages still say only "coming soon" and do not describe the
+  relay.
 - voice input
 - desktop apps for macOS, Linux and Windows
 
@@ -161,6 +165,10 @@ Verified against this repository, the muxr-app repository and the store listings
   15 November 2026; muxr-app LICENSE.)
 - Shield's one limit is on providing a competing product, which covers
   reselling the app. It is not a limit on commercial or work use.
+- The Terms page (terms.html) governs the app as distributed through the
+  stores; its section 4 says the app's published source code is governed by
+  the PolyForm Shield License 1.0.0 and that section 3 does not restrict rights
+  that licence grants in the source.
 - Release note, not for pages: the muxr-app LICENSE changes in the same
   release as this site. Do not deploy the site before the muxr-app pull
   request that changes the licence has merged.

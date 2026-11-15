@@ -69,7 +69,7 @@
       <span class="eyebrow">Legal</span>
       <h1>Privacy <span>Policy</span></h1>
       <p class="doc-lead">How the Muxr app, the muxr.app website, and the optional Muxr Push relay handle your data — operated by f0x.it LLC.</p>
-      <p class="doc-lead"><strong>Effective date:</strong> August 13, 2026 · <strong>Last updated:</strong> August 13, 2026</p>
+      <p class="doc-lead"><strong>Effective date:</strong> August 13, 2026 · <strong>Last updated:</strong> November 15, 2026</p>
     </div>
 
     <div class="doc-layout">
@@ -106,7 +106,7 @@
             <li><strong>No sale of data.</strong> We do not sell your personal information, and we do not share it for advertising or cross-app tracking.</li>
             <li><strong>Your terminal traffic never reaches us.</strong> It flows directly between your device and the <code>muxrd</code> server you run.</li>
             <li><strong>Credentials stay on your device</strong>, in the operating system's Keychain (iOS) or Keystore (Android), behind your device biometrics.</li>
-            <li><strong>The only data we ever receive</strong> is standard web-server access logs from muxr.app, and — if you deliberately turn on notifications and register a device with our hosted relay — a small registration record described in <a href="#push">Muxr Push</a>.</li>
+            <li><strong>The only data we ever receive</strong> is standard web-server access logs from muxr.app, and — once push notifications are available, if you deliberately turn on notifications and register a device with our hosted relay — a small registration record described in <a href="#push">Muxr Push</a>.</li>
           </ul>
         </section>
 
@@ -117,7 +117,7 @@
           <ul>
             <li><strong>The Muxr app</strong> — the mobile and tablet client for iOS and Android ("the App").</li>
             <li><strong>The muxr.app website</strong> — these pages, plus the Nerd Font catalog served at <code>muxr.app/fonts/</code> that the App downloads fonts from ("the Site").</li>
-            <li><strong>Muxr Push</strong> — the optional hosted notification relay we operate, used only if you enable notifications and register a device with it.</li>
+            <li><strong>Muxr Push</strong> — the optional hosted notification relay we operate, used only if you enable notifications and register a device with it. Push notifications are not yet available in the app.</li>
           </ul>
           <p>It does <strong>not</strong> cover the server software you run yourself. <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> (<code>muxrd</code>, <code>muxrctl</code>, <code>muxr-notify</code>) is source-available software that you install and operate on your own machine. Anything it stores — tokens, TLS certificates, device registrations — lives on your hardware, under your control. We never receive it.</p>
         </section>
@@ -155,6 +155,11 @@
 
         <section id="push">
           <h2>Muxr Push (optional)</h2>
+          <div class="callout callout-warn">
+            <div class="callout-title">Not yet available</div>
+            <p>Push notifications are not yet available in the Muxr app. This section describes how the hosted relay will handle data once the app can register a device. Until then the app registers no device with the relay and sends us nothing.</p>
+          </div>
+
           <p>Muxr Push is an <strong>opt-in</strong> feature. It applies only if you turn on notifications and register a device with the relay we host. If you never enable it, nothing in this section happens and no data about you leaves your device for us.</p>
 
           <div class="callout callout-note">
@@ -232,7 +237,7 @@
         <section id="choices">
           <h2>Your choices and rights</h2>
           <ul>
-            <li><strong>Notifications:</strong> turn them off in the App at any time and unregister the device. That deletes the relay's registration record for it.</li>
+            <li><strong>Notifications (once available):</strong> turn them off in the App at any time and unregister the device. That deletes the relay's registration record for it.</li>
             <li><strong>Locally saved data:</strong> remove an individual saved server or stored credential in the App, or uninstall the App to remove everything it stored on the device.</li>
             <li><strong>Self-hosting:</strong> run your own <code>muxr-notify</code> relay, and no notification data reaches us at all.</li>
             <li><strong>Deletion requests and questions:</strong> email <a href="mailto:support@muxr.app">support@muxr.app</a>. Because we hold no account, tell us enough to locate the record — we will work with you to identify and delete any registration associated with your device.</li>
