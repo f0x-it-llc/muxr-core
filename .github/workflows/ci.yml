@@ -19,6 +19,24 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  website:
+    name: Website checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      # Python 3 is preinstalled on ubuntu-latest; both scripts use only the
+      # standard library.
+      - name: Check the site (links, metadata, sitemap, llms.txt)
+        run: python3 tools/check_site.py
+
+      - name: Build the markdown mirrors
+        run: python3 tools/build_md.py --src . --out "$RUNNER_TEMP/md"
+
   check:
     name: Check / ${{ matrix.os }}
     runs-on: ${{ matrix.os }}

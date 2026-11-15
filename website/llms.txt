@@ -1,20 +1,61 @@
 # Muxr
 
-> Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon. It connects over TLS with token authentication and QR pairing.
+> Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions through muxrd, a self-hosted server daemon you run on your own machine. It connects over TLS with token authentication and QR pairing.
 
 - Platforms: iPhone, iPad, Android phones and tablets
 - Supported multiplexers: zellij and herdr
 - How it connects: the app talks to muxrd, a self-hosted server daemon, over TLS with token authentication and QR pairing
-- Price: free to download; Muxr Pro is a one-time $9.99 in-app purchase that unlocks more than one server
-- License: source available. The server (muxr-core) and the app (muxr-app) are both under the PolyForm Shield License 1.0.0: free for any use, including at work, except providing a competing product
+- Price: Muxr is free to download with one server included. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027.
+- Licence: source available. The server (muxr-core) and the app (muxr-app) are both under the PolyForm Shield License 1.0.0: free for any use, including at work, except to provide a competing product
 - Publisher: F0X IT LLC
 - Coming soon: tmux support, push notifications, voice input and desktop apps
+- Not to be confused with: Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.
+
+## Start here
+
+- [Muxr home](https://muxr.app/index.html.md): what Muxr is, how it works and how it compares
+- [What is Muxr?](https://muxr.app/about.html.md): who makes it, how it connects and what it is not
+- [FAQ](https://muxr.app/faq.html.md): short answers on compatibility, connection, price and alternatives
+- [Pricing](https://muxr.app/pricing.html.md): the free app, Muxr Pro and how other apps charge
+- [Security](https://muxr.app/security.html.md): TLS, tokens, pairing and what leaves your machine
+- [Roadmap](https://muxr.app/roadmap.html.md): what works today and what is coming soon
 
 ## Docs
 
-- [Quick start](https://muxr.app/docs.html): install muxrd and pair your phone
-- [Advanced setup](https://muxr.app/advanced.html): LAN, public domain, command line and Docker
-- [Usage guide](https://muxr.app/guide.html): gestures, tabs, panes and the key bar
+- [Quick start](https://muxr.app/docs.html.md): install muxrd and pair your phone
+- [Advanced setup](https://muxr.app/advanced.html.md): LAN, public domain, command line and Docker
+- [Usage guide](https://muxr.app/guide.html.md): gestures, tabs, panes and the key bar
+
+## How-to
+
+- [How-to guides](https://muxr.app/how-to/index.html.md): the list of guides
+- [zellij on iPhone and iPad](https://muxr.app/how-to/zellij-on-iphone-and-ipad.html.md): attach to a zellij session from iOS
+- [zellij on Android](https://muxr.app/how-to/zellij-on-android.html.md): attach to a zellij session from an Android phone or tablet
+- [herdr on your phone](https://muxr.app/how-to/herdr-on-your-phone.html.md): the ways to reach herdr sessions from a phone
+- [Claude Code and Codex on your phone](https://muxr.app/how-to/claude-code-and-codex-on-your-phone.html.md): run terminal coding agents in zellij or herdr and watch them from a phone
+
+## Comparisons
+
+- [Comparisons](https://muxr.app/compare/index.html.md): Muxr next to SSH terminals, multiplexer clients and agent remote controls
+- [Muxr vs Moshi](https://muxr.app/compare/moshi.html.md): self-hosted daemon or SSH terminal
+- [Muxr vs Zelmux](https://muxr.app/compare/zelmux.html.md): two zellij clients
+- [Muxr vs Termius](https://muxr.app/compare/termius.html.md): zellij client or SSH manager
+- [Muxr vs Blink Shell](https://muxr.app/compare/blink-shell.html.md): zellij and herdr on iOS
+- [Muxr vs the zellij web client](https://muxr.app/compare/zellij-web-client.html.md): the browser client that ships with zellij
+- [Muxr vs an SSH app running zellij attach](https://muxr.app/compare/ssh-and-zellij.html.md): a general SSH app with zellij on the server
+- [Muxr vs the Herdr mobile app](https://muxr.app/compare/herdr-mobile.html.md): the herdr project's own app
+- [Muxr vs Claude Code Remote Control](https://muxr.app/compare/claude-code-remote-control.html.md): a terminal client or a vendor's agent remote control
+
+## Alternatives
+
+- [Moshi alternatives](https://muxr.app/alternatives/moshi.html.md): apps for zellij, herdr and tmux
+- [Termius alternatives](https://muxr.app/alternatives/termius.html.md): apps without a subscription
+
+## Best-of lists
+
+- [Best zellij clients](https://muxr.app/best/zellij-mobile-clients.html.md): for iPhone, iPad and Android
+- [Best herdr mobile clients](https://muxr.app/best/herdr-mobile-clients.html.md): for iPhone and Android
+- [Apps for coding agents on your phone](https://muxr.app/best/apps-for-coding-agents-on-your-phone.html.md): control terminal coding agents from a phone
 
 ## Get the app
 
@@ -26,8 +67,12 @@
 - [muxr-core](https://github.com/f0x-it-llc/muxr-core): the muxrd server, muxrctl and the website
 - [muxr-app](https://github.com/f0x-it-llc/muxr-app): the mobile app
 
+## For AI agents
+
+- Every page has a markdown version at the same URL plus .md, and the whole site is at [llms-full.txt](https://muxr.app/llms-full.txt).
+
 ## Optional
 
-- [Support](https://muxr.app/support.html)
-- [Privacy](https://muxr.app/privacy.html)
-- [Terms](https://muxr.app/terms.html)
+- [Support](https://muxr.app/support.html.md)
+- [Privacy](https://muxr.app/privacy.html.md)
+- [Terms](https://muxr.app/terms.html.md)
