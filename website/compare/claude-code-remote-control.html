@@ -1,0 +1,222 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muxr vs Claude Code Remote Control · Muxr</title>
+  <meta name="description" content="Remote Control continues a Claude Code session in the Claude app. Muxr attaches to your zellij or herdr session and shows the real terminal. Side by side.">
+  <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
+  <link rel="canonical" href="https://muxr.app/compare/claude-code-remote-control.html">
+  <link rel="alternate" type="text/markdown" href="/compare/claude-code-remote-control.html.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Muxr vs Claude Code Remote Control">
+  <meta property="og:description" content="Remote Control continues a Claude Code session in the Claude app. Muxr attaches to your zellij or herdr session and shows the real terminal. Side by side.">
+  <meta property="og:url" content="https://muxr.app/compare/claude-code-remote-control.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/glyph.css?v=4">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Article",
+        "headline": "Muxr vs Claude Code Remote Control",
+        "description": "Remote Control continues a Claude Code session in the Claude app. Muxr attaches to your zellij or herdr session and shows the real terminal. Side by side.",
+        "datePublished": "2026-11-15",
+        "dateModified": "2026-11-15",
+        "author": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "publisher": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "mainEntityOfPage": {
+          "@type": "WebPage",
+          "@id": "https://muxr.app/compare/claude-code-remote-control.html"
+        }
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://muxr.app/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Compare",
+            "item": "https://muxr.app/compare/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 3,
+            "name": "Muxr vs Claude Code Remote Control",
+            "item": "https://muxr.app/compare/claude-code-remote-control.html"
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+  <script src="/assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="/index.html">Home</a>
+        <a class="nav-link" href="/docs.html">Docs</a>
+        <a class="nav-link" href="/guide.html">Guide</a>
+        <a class="nav-link active" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article">
+
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/index.html">Home</a></li>
+        <li><a href="/compare/">Compare</a></li>
+        <li><span aria-current="page">Muxr vs Claude Code Remote Control</span></li>
+      </ol>
+    </nav>
+
+    <h1>Muxr vs Claude Code Remote Control</h1>
+    <p class="updated">Last updated: 15 November 2026</p>
+
+    <p class="article-lead">Claude Code Remote Control is Anthropic's built-in way to continue a Claude Code session from the Claude app, and it shows a conversation view. Muxr attaches to the zellij or herdr session the agent runs in and shows the real terminal, for any program.</p>
+
+    <div class="verdict">
+      <p class="verdict-title">Short answer</p>
+      <ul>
+        <li>Pick Remote Control if you use Claude Code only, do not need the terminal, and want Anthropic's own notifications with nothing to self-host.</li>
+        <li>Pick Muxr if the agent runs in a zellij or herdr session and you want the terminal itself, or you use other agents and tools in the same session.</li>
+        <li>You can use both. Push notifications are coming soon in Muxr.</li>
+      </ul>
+    </div>
+
+    <div class="compare-wrap">
+      <table class="compare-table">
+        <caption>Muxr and Claude Code Remote Control compared row by row</caption>
+        <thead>
+          <tr><td></td><th scope="col">Muxr</th><th scope="col">Claude Code Remote Control</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Made by</th><td>F0X IT LLC</td><td>Anthropic (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">What you see</th><td>The real terminal, drawn from the zellij or herdr session</td><td>The conversation. A terminal emulator is not described (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">Which agents</th><td>Any program in a zellij or herdr pane. On herdr, an agents list shows the agents herdr reports</td><td>Claude Code only (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">Where traffic goes</th><td>From your phone to your own server over gRPC with TLS. It does not pass through any server run by F0X IT LLC</td><td>The local session makes outbound HTTPS requests only. Traffic goes through the Anthropic API, and the transcript is stored on Anthropic's servers while connected (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">What must be running</th><td>zellij or herdr, plus <code>muxrd</code> on your own machine</td><td>The computer must stay on with <code>claude</code> running (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">Plan or price needed</th><td>None to start: the free app is the full app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. Pro unlocks more than one server</td><td>A paid Claude plan. API keys are not supported (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">Notifications</th><td><span class="soon">Coming soon</span></td><td>Not stated</td></tr>
+          <tr><th scope="row">Works with other terminal programs</th><td>Yes, anything that runs in the session</td><td>No. Works with Claude Code only (<a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a>, 15 November 2026)</td></tr>
+          <tr><th scope="row">Account required</th><td>No</td><td>Not stated. A paid Claude plan is needed, as above</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>When is Remote Control the better choice?</h2>
+    <p>In our judgement, Remote Control is the better pick when you use Claude Code only and do not need to see the terminal. It needs nothing self-hosted, and it brings Anthropic's own notifications, which Muxr does not have yet. It runs on a paid Claude plan you may already have.</p>
+
+    <h2>When is a terminal client the better choice?</h2>
+    <p>A terminal client such as Muxr fits when other agents and tools share the same session, because it shows whatever runs in the pane. It also fits when you want the path from phone to machine to stay between the two, with no third-party relay: Muxr talks to your own <code>muxrd</code> server. Muxr offers read-only tokens for sharing a session without typing access.</p>
+    <p>Remote Control does not support API keys, so a setup that uses one is outside it. Muxr does not ask for a Claude plan or an account.</p>
+
+    <h2>Can I use both?</h2>
+    <p>Yes. Run Claude Code inside a zellij session and use whichever suits the moment: Remote Control for the conversation, Muxr for the terminal underneath. Muxr does not work with any specific agent in a special way; it shows the terminal the agent runs in.</p>
+
+    <h2>What about Codex remote connections?</h2>
+    <p>OpenAI describes a similar feature for Codex. The ChatGPT app on iOS or Android connects to a Codex host, the ChatGPT desktop app on macOS or Windows, through "a secure relay layer". From the phone you can start and continue threads, approve actions and review diffs and terminal output, per <a href="https://learn.chatgpt.com/docs/remote-connections" target="_blank" rel="noopener noreferrer nofollow">OpenAI's documentation</a> as published on 15 November 2026. Whether it offers an interactive terminal, and which plans it needs, is not stated.</p>
+
+    <p class="trademark-note">Remote Control details are taken from <a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer nofollow">Anthropic documentation</a> as published on 15 November 2026 and may have changed. "Not stated" means that page does not say. Claude and Claude Code are trademarks of Anthropic, and Codex and ChatGPT are trademarks of OpenAI. Product names are used descriptively; Muxr is not affiliated with either company.</p>
+
+    <nav class="page-links" aria-label="Related pages">
+      <p class="page-links-label">Related pages</p>
+      <ul>
+        <li><a href="/compare/">Compare Muxr with other apps</a></li>
+        <li><a href="/how-to/claude-code-and-codex-on-your-phone.html">Claude Code and Codex on your phone</a></li>
+        <li><a href="/best/apps-for-coding-agents-on-your-phone.html">Apps to control coding agents from your phone</a></li>
+        <li><a href="/pricing.html">Pricing</a></li>
+      </ul>
+    </nav>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="/index.html">Home</a>
+        <a class="footer-link" href="/docs.html">Docs</a>
+        <a class="footer-link" href="/guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
+        <a class="footer-link" href="/support.html">Support</a>
+        <a class="footer-link" href="/privacy.html">Privacy</a>
+        <a class="footer-link" href="/terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+      <div class="footer-meta">
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
