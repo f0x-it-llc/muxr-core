@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Muxr vs the Herdr mobile app · Muxr</title>
-  <meta name="description" content="Muxr vs the Herdr mobile app: free and made by the herdr project, it suits herdr-core. Muxr suits the herdr 0.9.x server and zellij.">
+  <meta name="description" content="Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.">
   <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
   <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
   <link rel="canonical" href="https://muxr.app/compare/herdr-mobile.html">
@@ -12,7 +12,7 @@
   <meta property="og:type" content="article">
   <meta property="og:site_name" content="Muxr">
   <meta property="og:title" content="Muxr vs the Herdr mobile app">
-  <meta property="og:description" content="Muxr vs the Herdr mobile app: free and made by the herdr project, it suits herdr-core. Muxr suits the herdr 0.9.x server and zellij.">
+  <meta property="og:description" content="Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.">
   <meta property="og:url" content="https://muxr.app/compare/herdr-mobile.html">
   <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
   <meta property="og:image:width" content="1200">
@@ -30,7 +30,7 @@
       {
         "@type": "Article",
         "headline": "Muxr vs the Herdr mobile app",
-        "description": "Muxr vs the Herdr mobile app: free and made by the herdr project, it suits herdr-core. Muxr suits the herdr 0.9.x server and zellij.",
+        "description": "Muxr vs the Herdr mobile app: the Herdr app is free and made by the herdr project. Muxr also attaches to zellij and pairs by QR code over TLS.",
         "datePublished": "2026-11-15",
         "dateModified": "2026-11-15",
         "author": {
@@ -123,13 +123,13 @@
     <h1>Muxr vs the Herdr mobile app</h1>
     <p class="updated">Last updated: 15 November 2026</p>
 
-    <p class="article-lead">The Herdr mobile app is made by the herdr project, is free and is the natural first choice if you run herdr-core. Muxr is a different route: it works with the herdr 0.9.x server and also attaches to zellij, through a daemon you run and a TLS connection instead of SSH.</p>
+    <p class="article-lead">The Herdr mobile app is made by the herdr project, is free and is the natural first choice if you run herdr-core. Muxr is a different route: it also attaches to zellij, and connects through a daemon you run over TLS with QR pairing instead of SSH.</p>
 
     <div class="verdict">
       <p class="verdict-title">Which one should I pick?</p>
       <ul>
         <li><strong>Pick the Herdr mobile app if</strong> you run herdr-core. It is free, made by the herdr project, and its page says it works with herdr-core.</li>
-        <li><strong>Pick Muxr if</strong> you run the herdr 0.9.x server, or you also use zellij, or you want read-only tokens and a persistent pane rail on a tablet. Muxr does not support herdr-core.</li>
+        <li><strong>Pick Muxr if</strong> you also use zellij, want QR pairing over TLS instead of SSH, or want read-only tokens and a persistent pane rail on a tablet. If you run herdr-core, Muxr will not work for you; use the Herdr app.</li>
       </ul>
     </div>
 
@@ -150,7 +150,7 @@
           <tr><th scope="row">Which herdr it works with</th><td>The herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</td><td>"Works with herdr-core, which comes with the Herdr app. Herdr TUI isn't supported."</td></tr>
           <tr><th scope="row">Agents view</th><td>On herdr, a list of the agents in a session, most urgent first (blocked, done, working, idle)</td><td>An inbox sorted by needs you, done, working, idle</td></tr>
           <tr><th scope="row">Notifications</th><td><span class="soon">Coming soon</span></td><td>Not stated</td></tr>
-          <tr><th scope="row">zellij</th><td>Yes</td><td>Not stated; its page mentions no other multiplexer</td></tr>
+          <tr><th scope="row">zellij</th><td>Yes</td><td>Not stated (our judgement: its page mentions no other multiplexer)</td></tr>
           <tr><th scope="row">Tablet layout</th><td>Yes, a persistent pane rail beside the terminal</td><td>Not stated</td></tr>
           <tr><th scope="row">Source code and licence</th><td>Source available under the PolyForm Shield License 1.0.0 (app and server)</td><td>App: Not stated. herdr itself is open source under Apache 2.0.</td></tr>
           <tr><th scope="row">Account required</th><td>No</td><td>No Herdr account</td></tr>
@@ -159,12 +159,12 @@
     </div>
 
     <h2>Where is the Herdr mobile app the better choice?</h2>
-    <p>It is the better pick when you run herdr-core. It is free and made by the herdr project, and its page states it works with herdr-core. Muxr does not support herdr-core, so a herdr-core machine needs the Herdr app.</p>
-    <p>It also asks nothing of your server beyond herdr itself: it connects over SSH, so there is no extra daemon to install, and it needs no Herdr account.</p>
+    <p>It is the better pick when you run herdr-core. It is free and made by the herdr project, and its page states it works with herdr-core. Muxr does not support herdr-core.</p>
+    <p>It connects over SSH to herdr-core, and its page says there is no Herdr account and no server of the project's in between.</p>
 
     <h2>Where is Muxr the better choice?</h2>
-    <p>Muxr suits you if your machine runs the herdr 0.9.x server rather than herdr-core. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</p>
-    <p>It is also the pick if you use zellij as well as herdr, because muxrd detects whichever is installed. Pairing is a QR code from <code>muxrctl</code> over TLS rather than SSH keys, read-only tokens let someone watch a session without typing, and tablets get a persistent pane rail. Push notifications are <span class="soon">coming soon</span>.</p>
+    <p>Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</p>
+    <p>Pick it if you use zellij as well as herdr, because muxrd detects whichever is installed. Pairing is a QR code from <code>muxrctl</code> over TLS rather than SSH keys, read-only tokens let someone watch a session without typing, and tablets get a persistent pane rail. Push notifications are <span class="soon">coming soon</span>.</p>
 
     <h2>Is Muxr the same kind of app?</h2>
     <p>Both are phone clients for herdr, but they sit differently. Muxr needs muxrd on your machine and does nothing without zellij or herdr. It does not integrate with any specific agent; it shows the terminal the agent runs in.</p>
