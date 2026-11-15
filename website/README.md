@@ -97,11 +97,23 @@ python3 tools/build_md.py --src . --out /tmp/muxr-md
 
 ## Checks
 
-`python3 tools/check_site.py`, run from `website/`, enumerates the pages on disk and fails (exit 1, one line per problem) on: title, description or canonical problems, a missing markdown alternate link, unparseable or wrong-type JSON-LD, a broken internal link or source, a relative link in a subdirectory page, a page missing from `sitemap.xml` or from `llms.txt`, "open source" said about Muxr, Muxr's price stated other than in the verbatim sentence, a word count outside the `PAGE_RULES.md` range, and inline styles or scripts. It uses only the standard library. CI runs it, plus `tools/build_md.py`, in the `website` job of `.github/workflows/ci.yml` on every push and pull request.
+`python3 tools/check_site.py`, run from `website/`, enumerates the pages on disk (skipping dot-directories and `assets/`, `fonts/`, `tools/`, `node_modules/`, the same rules `tools/build_md.py` uses) and fails (exit 1, one line per problem) on: title, description or canonical problems, a missing markdown alternate link, unparseable or wrong-type JSON-LD, a broken internal link or source, a relative link in a subdirectory page, a page missing from `sitemap.xml` or from `llms.txt`, "open source" said about Muxr (in body text, including text split by inline tags such as links, in meta content and in any JSON-LD string), Muxr's price stated other than in the verbatim sentence, a word count outside the `PAGE_RULES.md` range, and inline styles or scripts. It also fails on:
+
+- **External subresources**: a `<script>`, `<img>`, `<iframe>`, `<source>`, `<video>`, `<audio>`, `<object>`, `<embed>` or a fetching `<link>` (stylesheet, preload, preconnect, icon, manifest) loaded from any host other than the site itself and the two font hosts the CSP in `nginx.conf` allows (`fonts.googleapis.com` for the stylesheet, `fonts.gstatic.com` for the font files). Ordinary `<a href>` links to other sites are fine.
+- **Publisher disclosure**: a page under `compare/`, `alternatives/` or `best/` whose visible text does not contain the phrase "makers of Muxr".
+
+It uses only the standard library. The tools have unit tests (`tools/test_build_md.py`, `tools/test_check_site.py`) that build their fixtures in a temporary directory; run them from `website/`:
+
+```bash
+cd website
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tools -p 'test_*.py' -v
+```
+
+CI runs the unit tests, `tools/check_site.py` and `tools/build_md.py` in the `website` job of `.github/workflows/ci.yml` on every push and pull request.
 
 ## Indexing
 
-`indexnow-key.txt` holds the site's IndexNow key (public by design) and is served at `https://muxr.app/indexnow-key.txt`. After a deploy, run `tools/indexnow.sh --send` to POST the `sitemap.xml` URL list to IndexNow; without `--send` it only prints the payload.
+`indexnow-key.txt` holds the site's IndexNow key (public by design) and is served at `https://muxr.app/indexnow-key.txt`. After a deploy, run `tools/indexnow.sh --send` to POST the `sitemap.xml` URL list to IndexNow; it prints the HTTP status and exits non-zero unless IndexNow answers 200 or 202. Without `--send` it only prints the payload.
 
 ## Links
 

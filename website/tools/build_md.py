@@ -27,7 +27,9 @@ from urllib.parse import urljoin, urlparse
 SITE_NAME = "Muxr"
 TITLE_SUFFIX = re.compile(r"\s+\u00b7\s+Muxr\s*$")
 
-# Directories under --src that never hold pages.
+# Directories under --src that never hold pages, at any depth. Directories
+# whose name starts with "." are skipped as well. tools/check_site.py uses the
+# same rules, so both tools see the same pages.
 SKIP_DIRS = {"assets", "fonts", "tools", "node_modules"}
 
 VOID_TAGS = {
@@ -529,8 +531,12 @@ def strip_layout(body):
 
 def convert_page(src_root, rel, base):
     path = os.path.join(src_root, *rel.split("/"))
-    with open(path, encoding="utf-8") as handle:
-        doc = parse_html(handle.read())
+    try:
+        with open(path, encoding="utf-8") as handle:
+            source = handle.read()
+    except (OSError, UnicodeDecodeError) as err:
+        raise BuildError(rel + ": cannot read page: " + str(err))
+    doc = parse_html(source)
 
     title_node = doc.find("title")
     title = WS.sub(" ", title_node.text()).strip() if title_node else ""

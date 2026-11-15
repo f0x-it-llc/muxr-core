@@ -28,9 +28,14 @@ jobs:
         working-directory: website
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
 
       # Python 3 is preinstalled on ubuntu-latest; both scripts use only the
       # standard library.
+      - name: Unit-test the site tools
+        run: python3 -m unittest discover -s tools -p 'test_*.py' -v
+
       - name: Check the site (links, metadata, sitemap, llms.txt)
         run: python3 tools/check_site.py
 
