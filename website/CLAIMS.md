@@ -403,8 +403,9 @@ own sections.
 - The phone shows the conversation; a terminal emulator is not described. —
   same — verified
 - Works with Claude Code only. — same — verified
-- Our judgement — better pick than Muxr when: you use Claude Code only, do not need the
-  terminal, and want Anthropic's own notifications with nothing to self-host.
+- Notifications: not stated.
+- Our judgement — better pick than Muxr when: you use Claude Code only, do not
+  need the terminal, and want nothing to self-host. It is made by Anthropic.
 
 ### Codex remote connections (OpenAI)
 
