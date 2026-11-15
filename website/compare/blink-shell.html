@@ -1,0 +1,231 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muxr vs Blink Shell: zellij and herdr on iOS · Muxr</title>
+  <meta name="description" content="Blink Shell is an open-source SSH and Mosh terminal for iOS. Muxr is a zellij and herdr client for iOS and Android. Where each fits, with sources.">
+  <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
+  <link rel="canonical" href="https://muxr.app/compare/blink-shell.html">
+  <link rel="alternate" type="text/markdown" href="/compare/blink-shell.html.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Muxr vs Blink Shell: zellij and herdr on iOS">
+  <meta property="og:description" content="Blink Shell is an open-source SSH and Mosh terminal for iOS. Muxr is a zellij and herdr client for iOS and Android. Where each fits, with sources.">
+  <meta property="og:url" content="https://muxr.app/compare/blink-shell.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/glyph.css?v=4">
+  <script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "Article",
+      "headline": "Muxr vs Blink Shell: zellij and herdr on iOS",
+      "description": "Blink Shell is an open-source SSH and Mosh terminal for iOS. Muxr is a zellij and herdr client for iOS and Android. Where each fits, with sources.",
+      "datePublished": "2026-11-15",
+      "dateModified": "2026-11-15",
+      "author": {
+        "@id": "https://muxr.app/#organization"
+      },
+      "publisher": {
+        "@id": "https://muxr.app/#organization"
+      },
+      "mainEntityOfPage": {
+        "@type": "WebPage",
+        "@id": "https://muxr.app/compare/blink-shell.html"
+      }
+    },
+    {
+      "@type": "BreadcrumbList",
+      "itemListElement": [
+        {
+          "@type": "ListItem",
+          "position": 1,
+          "name": "Home",
+          "item": "https://muxr.app/"
+        },
+        {
+          "@type": "ListItem",
+          "position": 2,
+          "name": "Compare",
+          "item": "https://muxr.app/compare/"
+        },
+        {
+          "@type": "ListItem",
+          "position": 3,
+          "name": "Muxr vs Blink Shell",
+          "item": "https://muxr.app/compare/blink-shell.html"
+        }
+      ]
+    }
+  ]
+}
+  </script>
+  <script src="/assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="/index.html">Home</a>
+        <a class="nav-link" href="/docs.html">Docs</a>
+        <a class="nav-link" href="/guide.html">Guide</a>
+        <a class="nav-link active" href="/compare/">Compare</a>
+        <a class="nav-link" href="/faq.html">FAQ</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article">
+
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/index.html">Home</a></li>
+        <li><a href="/compare/">Compare</a></li>
+        <li><span aria-current="page">Muxr vs Blink Shell</span></li>
+      </ol>
+    </nav>
+
+    <h1>Muxr vs Blink Shell: zellij and herdr on iOS</h1>
+    <p class="updated">Last updated: 15 November 2026</p>
+
+    <p class="article-lead">Blink Shell is a general SSH and Mosh terminal for iPhone and iPad, and it is open source under GPL-3.0; Muxr is a zellij and herdr client for iOS and Android that needs a daemon on the server. Blink suits you if you want a full terminal on an iPad with a hardware keyboard, and Muxr suits you if you want native session, tab and pane controls for zellij or herdr.</p>
+
+    <div class="verdict">
+      <p class="verdict-title">Which one should I pick?</p>
+      <p><strong>Pick Blink Shell if</strong> you want a full SSH and Mosh terminal on iPad with a hardware keyboard, open-source code, or tmux. It needs no daemon on your server.</p>
+      <p><strong>Pick Muxr if</strong> you run zellij or herdr, want native screens for their sessions, tabs and panes, or need an Android app as well as an iOS one.</p>
+    </div>
+
+    <h2>How do Muxr and Blink Shell compare?</h2>
+    <div class="compare-wrap">
+      <table class="compare-table">
+        <caption>Muxr and Blink Shell compared row by row</caption>
+        <thead>
+          <tr><td></td><th scope="col">Muxr</th><th scope="col">Blink Shell</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Price model</th><td>Free to download. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. No subscription.</td><td>"Get 2 weeks free. Then just $19.99/year." (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>)</td></tr>
+          <tr><th scope="row">Free tier</th><td>The full app with one server.</td><td>A two-week free period (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>). A permanent free tier: Not stated.</td></tr>
+          <tr><th scope="row">Platforms</th><td>iPhone, iPad, Android phones and tablets. Desktop apps <span class="soon">Coming soon</span></td><td>iPhone and iPad only (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>). No Android app.</td></tr>
+          <tr><th scope="row">Connection</th><td>gRPC over TLS to muxrd with a per-device token. No SSH between the app and the server.</td><td>SSH and Mosh (<a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a>).</td></tr>
+          <tr><th scope="row">Server install</th><td>Required: muxrd on the machine that runs zellij or herdr.</td><td>Not stated. As an SSH and Mosh terminal it needs an SSH server (our judgement).</td></tr>
+          <tr><th scope="row">zellij</th><td>Yes. Native session, tab and pane controls.</td><td>Not stated. zellij runs inside the shell session (our judgement).</td></tr>
+          <tr><th scope="row">herdr</th><td>Yes, the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.</td><td>Not stated</td></tr>
+          <tr><th scope="row">tmux</th><td><span class="soon">Coming soon</span></td><td>Not stated</td></tr>
+          <tr><th scope="row">Push notifications</th><td><span class="soon">Coming soon</span></td><td>Not stated</td></tr>
+          <tr><th scope="row">Coding-agent features</th><td>Agents list on herdr. Muxr does not integrate with any specific agent; it shows the terminal the agent runs in.</td><td>Not stated</td></tr>
+          <tr><th scope="row">Tablet layout</th><td>Yes: a persistent pane rail beside the terminal.</td><td>Not stated</td></tr>
+          <tr><th scope="row">Source code and licence</th><td>Source available under PolyForm Shield License 1.0.0, for the app and the server.</td><td>Open source, GPL-3.0 (<a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a>).</td></tr>
+          <tr><th scope="row">Account required</th><td>No.</td><td>Not stated</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h2>Where is Blink Shell the better choice?</h2>
+    <ul>
+      <li>You want a "professional, desktop grade terminal" for iOS (<a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a>) that connects over SSH or Mosh to any machine.</li>
+      <li>You want code you can read under an open-source licence: Blink is GPL-3.0 (<a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a>). Muxr is source available.</li>
+      <li>You use tmux. Muxr's tmux support is coming soon.</li>
+      <li>You work on an iPad with a hardware keyboard and want a full terminal rather than a multiplexer client (our judgement).</li>
+    </ul>
+
+    <h2>Where is Muxr the better choice?</h2>
+    <ul>
+      <li>You use Android. Blink's own site describes it as a terminal for iOS, and Muxr runs on Android 10 and later as well as iOS and iPadOS 15.0 and later.</li>
+      <li>You want to pay once. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. Blink lists a yearly price after its free period.</li>
+      <li>You run zellij or herdr and want sessions, tabs and panes as native screens, with an agents list on herdr.</li>
+      <li>You want no account and per-device tokens, including read-only tokens for a view that cannot type.</li>
+    </ul>
+
+    <h2>Can I use both?</h2>
+    <p>Yes. Blink Shell can open a shell on any server, run <code>zellij attach</code> inside it and give you a full terminal on iPhone or iPad. Muxr covers the machines where you have installed muxrd and want native multiplexer controls, and it also runs on Android. They do not share data, and neither needs the other.</p>
+    <p>Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.</p>
+
+    <p class="trademark-note">Blink Shell details are taken from <a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">blink.sh</a> and <a href="https://github.com/blinksh/blink" target="_blank" rel="noopener noreferrer">github.com/blinksh/blink</a> as published on 15 November 2026 and may have changed. "Not stated" means those pages do not say. Blink Shell is a trademark of its owner; Muxr is not affiliated with it.</p>
+
+    <nav class="page-links" aria-label="Related pages">
+      <p class="page-links-label">Related pages</p>
+      <ul>
+        <li><a href="/compare/">Compare Muxr with other apps</a></li>
+        <li><a href="/compare/termius.html">Muxr vs Termius: zellij client or SSH manager</a></li>
+        <li><a href="/compare/ssh-and-zellij.html">Muxr vs an SSH app running zellij attach</a></li>
+        <li><a href="/pricing.html">Muxr pricing</a></li>
+      </ul>
+    </nav>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="/index.html">Home</a>
+        <a class="footer-link" href="/docs.html">Docs</a>
+        <a class="footer-link" href="/guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
+        <a class="footer-link" href="/support.html">Support</a>
+        <a class="footer-link" href="/privacy.html">Privacy</a>
+        <a class="footer-link" href="/terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+      <div class="footer-meta">
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
