@@ -1,0 +1,712 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Muxr FAQ: zellij and herdr on your phone · Muxr</title>
+  <meta name="description" content="Short answers about Muxr: zellij and herdr on iPhone, iPad and Android, coding agents, setup, price, licence, privacy and how it compares with other apps.">
+  <link rel="icon" type="image/svg+xml" href="/assets/img/logo.svg">
+  <link rel="icon" type="image/png" sizes="96x96" href="/favicon.png">
+  <link rel="canonical" href="https://muxr.app/faq.html">
+  <link rel="alternate" type="text/markdown" href="/faq.html.md">
+  <meta property="og:type" content="article">
+  <meta property="og:site_name" content="Muxr">
+  <meta property="og:title" content="Muxr FAQ: zellij and herdr on your phone">
+  <meta property="og:description" content="Short answers about Muxr: zellij and herdr on iPhone, iPad and Android, coding agents, setup, price, licence, privacy and how it compares with other apps.">
+  <meta property="og:url" content="https://muxr.app/faq.html">
+  <meta property="og:image" content="https://muxr.app/assets/img/og-card.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Muxr, a zellij and herdr terminal client for iPhone, iPad and Android">
+  <meta name="twitter:card" content="summary_large_image">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=IBM+Plex+Mono:ital,wght@0,300;0,400;0,500;0,600;1,400&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/assets/css/glyph.css?v=4">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Article",
+        "headline": "Muxr FAQ: zellij and herdr on your phone",
+        "description": "Short answers about Muxr: zellij and herdr on iPhone, iPad and Android, coding agents, setup, price, licence, privacy and how it compares with other apps.",
+        "datePublished": "2026-11-15",
+        "dateModified": "2026-11-15",
+        "author": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "publisher": {
+          "@id": "https://muxr.app/#organization"
+        },
+        "mainEntityOfPage": {
+          "@type": "WebPage",
+          "@id": "https://muxr.app/faq.html"
+        }
+      },
+      {
+        "@type": "BreadcrumbList",
+        "itemListElement": [
+          {
+            "@type": "ListItem",
+            "position": 1,
+            "name": "Home",
+            "item": "https://muxr.app/"
+          },
+          {
+            "@type": "ListItem",
+            "position": 2,
+            "name": "Muxr FAQ: zellij and herdr on your phone",
+            "item": "https://muxr.app/faq.html"
+          }
+        ]
+      },
+      {
+        "@type": "FAQPage",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "What is Muxr?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions. It talks to muxrd, a daemon you run on your own machine next to zellij or herdr. More about Muxr"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Who makes Muxr?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr is published by F0X IT LLC. It is source available: the server is on GitHub and the app is on GitHub too."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is Muxr related to trymuxr or the @trymuxr/cli npm package?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Which phones and tablets does Muxr run on, and which OS versions?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr runs on iPhone and iPad with iOS 15.0 or iPadOS 15.0 or later, and on Android phones and tablets with Android 10 or later. Get it from the App Store or Google Play."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there a desktop app?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Desktop apps for macOS, Linux and Windows are coming soon. See the roadmap."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Muxr work with zellij?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. muxrd is built against zellij 0.45.1. The how-to guides cover iPhone and iPad and Android."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Muxr work with herdr, and which herdr?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported. Muxr and herdr on your phone"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Muxr support tmux?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "tmux support is coming soon. It is not available today. See the roadmap."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I use Muxr without zellij or herdr?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Without zellij or herdr on the server Muxr does nothing, because it is not a general SSH client. The server detects whichever of the two is installed."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Which servers can run muxrd: Linux, macOS or Windows?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Pre-built binaries exist for x86_64 Linux, aarch64 Linux and Apple Silicon macOS. Intel Macs build from source. Windows is not supported, because the server needs a Unix host."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I use Muxr to check on Claude Code or Codex from my phone?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes, as a terminal. Muxr does not integrate with any specific agent; it shows the terminal the agent runs in. Claude Code and Codex on your phone"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does the agents list show, and on which backend?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "On herdr, Muxr lists the coding agents running in a session, most urgent first (blocked, then done, working, idle), with counts. On zellij there is no agents list, because zellij reports no agents; an agent running in a zellij pane appears as a terminal like any other pane."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Muxr notify me when an agent needs input?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Not today. Push notifications are coming soon, and the app does not deliver notifications yet. See the roadmap."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is Muxr different from Claude Code Remote Control?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "As published on 15 November 2026, Claude Code Remote Control continues a local Claude Code session from claude.ai/code or the Claude apps, works with Claude Code only and sends traffic through the Anthropic API. Muxr shows the terminal itself, and terminal traffic goes from your phone to your own server. Compare in detail"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How do I connect my phone to my server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Install muxrd on the server, run muxrctl, and scan the QR code it shows from the Muxr app. Quick start"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need Tailscale or a VPN?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No, but a tailnet such as Tailscale is the recommended way to reach the server from a phone. A LAN address or a public domain are the alternatives. Advanced setup"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does Muxr use SSH?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. The app talks to muxrd over gRPC protected by TLS, signed in with a per-device bearer token."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I reach my server away from home?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes, over a tailnet, which follows the phone onto mobile data. A LAN address works on that LAN alone. LAN, tailnet and public domain"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need to open a port?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "With a tailnet you bind muxrd to the server's tailnet address on port 50051, as the quick start shows. The default address, 127.0.0.1:50051, is unreachable from a phone. A public domain exposes muxrd to the open internet and is the least recommended route. Advanced setup"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there a demo server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A public read-only demo server runs at demo.muxr.app. To use Muxr with your own sessions, follow the quick start."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I connect to more than one server?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Yes, with Muxr Pro. The free app is the full app with one server. Pricing"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How much does Muxr cost?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr is free to download, and the free app is the full app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. Pricing"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is there a subscription?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Muxr Pro is a one-time purchase, made through the App Store or Google Play, and it belongs to that store account."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does the free version include?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The free app is the full app with one server. The muxrd server is free to use under its licence, and you host it yourself."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does Pro add?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Pro unlocks more than one server, with saved servers you can switch between."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Is Muxr source available, and under which licences?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Muxr is source available. The server, muxr-core, is under the PolyForm Shield License 1.0.0: free to use, modify and share for any purpose, except to provide a product that competes with Muxr. The app, muxr-app, is under the PolyForm Noncommercial License 1.0.0: free for noncommercial purposes, including building it for your own devices."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Can I use Muxr at work?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The server licence allows use at work, except to provide a product that competes with Muxr. For questions about the app, write to support@muxr.app."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How does Muxr protect my connection?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The app talks to muxrd over TLS with a per-device bearer token. A QR code for a self-signed server also pins the certificate fingerprint. Security"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does my traffic go through your servers?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Terminal traffic goes from the phone to your own server and does not pass through any server run by F0X IT LLC. Privacy"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Do I need an account?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Muxr has no account."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does a read-only token allow?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "A read-only token can navigate tabs, panes and spaces, scroll, and resize its own terminal. It cannot type or change the session."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does the app collect analytics?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "No. Muxr has no analytics, no ads and no crash reporting."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How are saved credentials protected?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Saved credentials are kept in the iOS Keychain or the Android Keystore, gated behind device biometrics."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is Muxr different from Moshi?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "As published on 15 November 2026, Moshi connects by SSH, Mosh or Eternal Terminal and needs no server install, while Muxr needs muxrd and uses no SSH. In our judgement Moshi is the better pick if you need tmux today, push notifications, voice input or Apple Watch. Compare in detail"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is Muxr different from Termius or Blink Shell?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "As published on 15 November 2026, Termius is a general SSH client for desktop and mobile, and Blink Shell is a terminal for iOS with SSH and Mosh. Muxr is not a general SSH client and attaches to zellij and herdr sessions. Read the Termius comparison or the Blink Shell comparison."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is Muxr different from zellij's own web client?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "As published on 15 November 2026, the zellij web client is part of zellij, runs in a browser and is started with zellij web. In our judgement it is the better pick if you want zellij on a phone with no app and no extra daemon; it does not attach to herdr. Compare in detail"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "How is Muxr different from the Herdr mobile app?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "As published on 15 November 2026, the Herdr mobile app is free, made by the herdr project and connects over SSH to herdr-core. Muxr works with the herdr 0.9.x server, not herdr-core, and also works with zellij. In our judgement the Herdr mobile app is the better pick if you run herdr-core. Compare in detail"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What if pairing fails or the QR code will not scan?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Check that muxrd is running, that the phone can reach the server and that the token has not been revoked. If the camera cannot read the code, enter the server address and token by hand on the Connect screen. Support: pairing fails"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What does a TLS fingerprint mismatch mean?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "The certificate the server presents no longer matches the fingerprint the app pinned, usually because the self-signed certificate was regenerated. If the change was intentional, remove the saved server in the app and pair again by QR. Support: TLS fingerprint mismatch"
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "What if the connection is refused?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "muxrd binds 127.0.0.1:50051 by default, which accepts connections from the same machine alone. Bind an address the phone can reach, list it in the certificate and check your firewall. Support: connection refused"
+            }
+          }
+        ]
+      }
+    ]
+  }
+  </script>
+  <script src="/assets/js/main.js" defer></script>
+</head>
+<body>
+
+  <header class="site-nav">
+    <nav class="nav-inner" aria-label="Primary">
+      <a class="nav-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <button class="nav-toggle" id="nav-toggle" aria-label="Toggle navigation" aria-expanded="false" aria-controls="nav-links">
+        <svg class="icon-open" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="3" y1="6" x2="21" y2="6"/><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="18" x2="21" y2="18"/>
+        </svg>
+        <svg class="icon-close" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+          <line x1="6" y1="6" x2="18" y2="18"/><line x1="6" y1="18" x2="18" y2="6"/>
+        </svg>
+      </button>
+
+      <div class="nav-links" id="nav-links">
+        <a class="nav-link" href="/index.html">Home</a>
+        <a class="nav-link" href="/docs.html">Docs</a>
+        <a class="nav-link" href="/guide.html">Guide</a>
+        <a class="nav-link" href="/compare/">Compare</a>
+        <a class="nav-link active" href="/faq.html">FAQ</a>
+        <a class="nav-github" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">
+          <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <path d="M12 .5C5.37.5 0 5.87 0 12.5c0 5.3 3.44 9.8 8.21 11.39.6.11.82-.26.82-.58l-.01-2.04c-3.34.73-4.04-1.61-4.04-1.61-.55-1.39-1.34-1.76-1.34-1.76-1.09-.75.08-.73.08-.73 1.2.09 1.84 1.24 1.84 1.24 1.07 1.83 2.81 1.3 3.5.99.11-.78.42-1.3.76-1.6-2.67-.3-5.47-1.34-5.47-5.95 0-1.32.47-2.39 1.24-3.23-.13-.3-.54-1.53.11-3.18 0 0 1.01-.32 3.3 1.23a11.5 11.5 0 0 1 6 0c2.29-1.55 3.3-1.23 3.3-1.23.65 1.65.24 2.88.12 3.18.77.84 1.23 1.91 1.23 3.23 0 4.62-2.81 5.64-5.49 5.94.43.37.81 1.1.81 2.22l-.01 3.29c0 .32.21.7.82.58A12.01 12.01 0 0 0 24 12.5C24 5.87 18.63.5 12 .5z"/>
+          </svg>
+        </a>
+      </div>
+    </nav>
+  </header>
+
+  <main class="article">
+
+    <nav class="breadcrumb" aria-label="Breadcrumb">
+      <ol>
+        <li><a href="/index.html">Home</a></li>
+        <li><span aria-current="page">Muxr FAQ: zellij and herdr on your phone</span></li>
+      </ol>
+    </nav>
+
+    <h1>Muxr FAQ: zellij and herdr on your phone</h1>
+    <p class="updated">Last updated: 15 November 2026</p>
+
+    <p class="article-lead">Muxr is a mobile app that attaches to zellij and herdr sessions on your own machine, with a daemon called muxrd on that machine. These short answers cover what it works with, how it connects, what it costs and how it differs from other apps.</p>
+
+    <h2 id="basics">What is Muxr, in short?</h2>
+
+    <div class="faq-item">
+      <h3 id="what-is-muxr">What is Muxr?</h3>
+      <p>Muxr is a mobile app for iPhone, iPad and Android phones and tablets that attaches to remote zellij and herdr terminal-multiplexer sessions. It talks to muxrd, a daemon you run on your own machine next to zellij or herdr. <a href="/about.html">More about Muxr</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="who-makes-muxr">Who makes Muxr?</h3>
+      <p>Muxr is published by F0X IT LLC. It is source available: the server is on <a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">GitHub</a> and the app is on <a href="https://github.com/f0x-it-llc/muxr-app" target="_blank" rel="noopener noreferrer">GitHub too</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="trymuxr">Is Muxr related to trymuxr or the @trymuxr/cli npm package?</h3>
+      <p>Muxr by F0X IT LLC (muxr.app) is a zellij and herdr client and is unrelated to the npm package @trymuxr/cli at trymuxr.com.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="platforms">Which phones and tablets does Muxr run on, and which OS versions?</h3>
+      <p>Muxr runs on iPhone and iPad with iOS 15.0 or iPadOS 15.0 or later, and on Android phones and tablets with Android 10 or later. Get it from the <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967" target="_blank" rel="noopener noreferrer">App Store</a> or <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr" target="_blank" rel="noopener noreferrer">Google Play</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="desktop-app">Is there a desktop app?</h3>
+      <p>Desktop apps for macOS, Linux and Windows are coming soon. See the <a href="/roadmap.html">roadmap</a>.</p>
+    </div>
+
+    <h2 id="works-with">What does Muxr work with?</h2>
+
+    <div class="faq-item">
+      <h3 id="zellij">Does Muxr work with zellij?</h3>
+      <p>Yes. muxrd is built against zellij 0.45.1. The how-to guides cover <a href="/how-to/zellij-on-iphone-and-ipad.html">iPhone and iPad</a> and <a href="/how-to/zellij-on-android.html">Android</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="herdr">Does Muxr work with herdr, and which herdr?</h3>
+      <p>Yes. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported. <a href="/how-to/herdr-on-your-phone.html">Muxr and herdr on your phone</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="tmux">Does Muxr support tmux?</h3>
+      <p>tmux support is coming soon. It is not available today. See the <a href="/roadmap.html">roadmap</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="without-multiplexer">Can I use Muxr without zellij or herdr?</h3>
+      <p>No. Without zellij or herdr on the server Muxr does nothing, because it is not a general SSH client. The server detects whichever of the two is installed.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="server-platforms">Which servers can run muxrd: Linux, macOS or Windows?</h3>
+      <p>Pre-built binaries exist for x86_64 Linux, aarch64 Linux and Apple Silicon macOS. Intel Macs build from source. Windows is not supported, because the server needs a Unix host.</p>
+    </div>
+
+    <h2 id="coding-agents">Can I use Muxr with coding agents?</h2>
+
+    <div class="faq-item">
+      <h3 id="claude-code-codex">Can I use Muxr to check on Claude Code or Codex from my phone?</h3>
+      <p>Yes, as a terminal. Muxr does not integrate with any specific agent; it shows the terminal the agent runs in. <a href="/how-to/claude-code-and-codex-on-your-phone.html">Claude Code and Codex on your phone</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="agents-list">What does the agents list show, and on which backend?</h3>
+      <p>On herdr, Muxr lists the coding agents running in a session, most urgent first (blocked, then done, working, idle), with counts. On zellij there is no agents list, because zellij reports no agents; an agent running in a zellij pane appears as a terminal like any other pane.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="notifications">Does Muxr notify me when an agent needs input?</h3>
+      <p>Not today. Push notifications are coming soon, and the app does not deliver notifications yet. See the <a href="/roadmap.html">roadmap</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="remote-control">How is Muxr different from Claude Code Remote Control?</h3>
+      <p>As published on 15 November 2026, <a href="https://code.claude.com/docs/en/remote-control" target="_blank" rel="noopener noreferrer">Claude Code Remote Control</a> continues a local Claude Code session from claude.ai/code or the Claude apps, works with Claude Code only and sends traffic through the Anthropic API. Muxr shows the terminal itself, and terminal traffic goes from your phone to your own server. <a href="/compare/claude-code-remote-control.html">Compare in detail</a></p>
+    </div>
+
+    <h2 id="setup">How do I set up and connect Muxr?</h2>
+
+    <div class="faq-item">
+      <h3 id="connect">How do I connect my phone to my server?</h3>
+      <p>Install muxrd on the server, run muxrctl, and scan the QR code it shows from the Muxr app. <a href="/docs.html">Quick start</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="tailscale">Do I need Tailscale or a VPN?</h3>
+      <p>No, but a tailnet such as Tailscale is the recommended way to reach the server from a phone. A LAN address or a public domain are the alternatives. <a href="/advanced.html">Advanced setup</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="ssh">Does Muxr use SSH?</h3>
+      <p>No. The app talks to muxrd over gRPC protected by TLS, signed in with a per-device bearer token.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="away-from-home">Can I reach my server away from home?</h3>
+      <p>Yes, over a tailnet, which follows the phone onto mobile data. A LAN address works on that LAN alone. <a href="/advanced.html">LAN, tailnet and public domain</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="open-a-port">Do I need to open a port?</h3>
+      <p>With a tailnet you bind muxrd to the server's tailnet address on port 50051, as the quick start shows. The default address, 127.0.0.1:50051, is unreachable from a phone. A public domain exposes muxrd to the open internet and is the least recommended route. <a href="/advanced.html">Advanced setup</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="demo">Is there a demo server?</h3>
+      <p>A public read-only demo server runs at demo.muxr.app. To use Muxr with your own sessions, follow the <a href="/docs.html">quick start</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="multiple-servers">Can I connect to more than one server?</h3>
+      <p>Yes, with Muxr Pro. The free app is the full app with one server. <a href="/pricing.html">Pricing</a></p>
+    </div>
+
+    <h2 id="price-licence">What does Muxr cost, and what is the licence?</h2>
+
+    <div class="faq-item">
+      <h3 id="cost">How much does Muxr cost?</h3>
+      <p>Muxr is free to download, and the free app is the full app with one server. Muxr Pro is a one-time $19.99 purchase, 50% off ($9.99) until January 13, 2027. <a href="/pricing.html">Pricing</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="subscription">Is there a subscription?</h3>
+      <p>No. Muxr Pro is a one-time purchase, made through the App Store or Google Play, and it belongs to that store account.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="free-version">What does the free version include?</h3>
+      <p>The free app is the full app with one server. The muxrd server is free to use under its licence, and you host it yourself.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="pro">What does Pro add?</h3>
+      <p>Pro unlocks more than one server, with saved servers you can switch between.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="licence">Is Muxr source available, and under which licences?</h3>
+      <p>Muxr is source available. The server, muxr-core, is under the PolyForm Shield License 1.0.0: free to use, modify and share for any purpose, except to provide a product that competes with Muxr. The app, muxr-app, is under the PolyForm Noncommercial License 1.0.0: free for noncommercial purposes, including building it for your own devices.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="at-work">Can I use Muxr at work?</h3>
+      <p>The server licence allows use at work, except to provide a product that competes with Muxr. For questions about the app, write to <a href="mailto:support@muxr.app">support@muxr.app</a>.</p>
+    </div>
+
+    <h2 id="security-privacy">Is Muxr secure and private?</h2>
+
+    <div class="faq-item">
+      <h3 id="security">How does Muxr protect my connection?</h3>
+      <p>The app talks to muxrd over TLS with a per-device bearer token. A QR code for a self-signed server also pins the certificate fingerprint. <a href="/security.html">Security</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="traffic">Does my traffic go through your servers?</h3>
+      <p>No. Terminal traffic goes from the phone to your own server and does not pass through any server run by F0X IT LLC. <a href="/privacy.html">Privacy</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="account">Do I need an account?</h3>
+      <p>No. Muxr has no account.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="read-only">What does a read-only token allow?</h3>
+      <p>A read-only token can navigate tabs, panes and spaces, scroll, and resize its own terminal. It cannot type or change the session.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="analytics">Does the app collect analytics?</h3>
+      <p>No. Muxr has no analytics, no ads and no crash reporting.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="credentials">How are saved credentials protected?</h3>
+      <p>Saved credentials are kept in the iOS Keychain or the Android Keystore, gated behind device biometrics.</p>
+    </div>
+
+    <h2 id="compare">How does Muxr compare with other apps?</h2>
+
+    <div class="faq-item">
+      <h3 id="moshi">How is Muxr different from Moshi?</h3>
+      <p>As published on 15 November 2026, <a href="https://getmoshi.app/" target="_blank" rel="noopener noreferrer">Moshi</a> connects by SSH, Mosh or Eternal Terminal and needs no server install, while Muxr needs muxrd and uses no SSH. In our judgement Moshi is the better pick if you need tmux today, push notifications, voice input or Apple Watch. <a href="/compare/moshi.html">Compare in detail</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="termius-blink">How is Muxr different from Termius or Blink Shell?</h3>
+      <p>As published on 15 November 2026, <a href="https://termius.com/" target="_blank" rel="noopener noreferrer">Termius</a> is a general SSH client for desktop and mobile, and <a href="https://blink.sh/" target="_blank" rel="noopener noreferrer">Blink Shell</a> is a terminal for iOS with SSH and Mosh. Muxr is not a general SSH client and attaches to zellij and herdr sessions. Read the <a href="/compare/termius.html">Termius comparison</a> or the <a href="/compare/blink-shell.html">Blink Shell comparison</a>.</p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="zellij-web">How is Muxr different from zellij's own web client?</h3>
+      <p>As published on 15 November 2026, the <a href="https://zellij.dev/documentation/web-client" target="_blank" rel="noopener noreferrer">zellij web client</a> is part of zellij, runs in a browser and is started with zellij web. In our judgement it is the better pick if you want zellij on a phone with no app and no extra daemon; it does not attach to herdr. <a href="/compare/zellij-web-client.html">Compare in detail</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="herdr-mobile">How is Muxr different from the Herdr mobile app?</h3>
+      <p>As published on 15 November 2026, the <a href="https://herdr.dev/mobile" target="_blank" rel="noopener noreferrer">Herdr mobile app</a> is free, made by the herdr project and connects over SSH to herdr-core. Muxr works with the herdr 0.9.x server, not herdr-core, and also works with zellij. In our judgement the Herdr mobile app is the better pick if you run herdr-core. <a href="/compare/herdr-mobile.html">Compare in detail</a></p>
+    </div>
+
+    <h2 id="troubleshooting">What if something goes wrong?</h2>
+
+    <div class="faq-item">
+      <h3 id="pairing-fails">What if pairing fails or the QR code will not scan?</h3>
+      <p>Check that muxrd is running, that the phone can reach the server and that the token has not been revoked. If the camera cannot read the code, enter the server address and token by hand on the Connect screen. <a href="/support.html#faq">Support: pairing fails</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="tls-mismatch">What does a TLS fingerprint mismatch mean?</h3>
+      <p>The certificate the server presents no longer matches the fingerprint the app pinned, usually because the self-signed certificate was regenerated. If the change was intentional, remove the saved server in the app and pair again by QR. <a href="/support.html#faq">Support: TLS fingerprint mismatch</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="connection-refused">What if the connection is refused?</h3>
+      <p>muxrd binds 127.0.0.1:50051 by default, which accepts connections from the same machine alone. Bind an address the phone can reach, list it in the certificate and check your firewall. <a href="/support.html#faq">Support: connection refused</a></p>
+    </div>
+
+    <nav class="page-links" aria-label="Related pages">
+      <p class="page-links-label">Related pages</p>
+      <ul>
+        <li><a href="/about.html">What is Muxr?</a></li>
+        <li><a href="/docs.html">Quick start: install muxrd and pair your phone</a></li>
+        <li><a href="/pricing.html">Pricing</a></li>
+        <li><a href="/compare/">Compare Muxr with other apps</a></li>
+      </ul>
+    </nav>
+
+  </main>
+
+  <footer class="site-footer">
+    <div class="footer-inner">
+      <a class="footer-brand" href="/index.html" aria-label="Muxr home">
+        <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg" aria-hidden="true">
+          <rect x="2" y="2" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.6"/>
+          <rect x="11" y="2" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="2" y="11" width="7" height="7" rx="1.5" fill="currentColor"/>
+          <rect x="11" y="11" width="7" height="7" rx="1.5" fill="currentColor" opacity="0.4"/>
+        </svg>
+        muxr
+      </a>
+
+      <nav class="footer-links" aria-label="Footer">
+        <a class="footer-link" href="/index.html">Home</a>
+        <a class="footer-link" href="/docs.html">Docs</a>
+        <a class="footer-link" href="/guide.html">Guide</a>
+        <a class="footer-link" href="/how-to/">How-to</a>
+        <a class="footer-link" href="/compare/">Compare</a>
+        <a class="footer-link" href="/faq.html">FAQ</a>
+        <a class="footer-link" href="/pricing.html">Pricing</a>
+        <a class="footer-link" href="/security.html">Security</a>
+        <a class="footer-link" href="/roadmap.html">Roadmap</a>
+        <a class="footer-link" href="/about.html">About</a>
+        <a class="footer-link" href="/support.html">Support</a>
+        <a class="footer-link" href="/privacy.html">Privacy</a>
+        <a class="footer-link" href="/terms.html">Terms</a>
+        <a class="footer-link" href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer" aria-label="GitHub">GitHub</a>
+      </nav>
+
+      <p class="trademark-note">Apple and the Apple logo are trademarks of Apple Inc. Google Play and the Google Play logo are trademarks of Google LLC.</p>
+
+      <div class="footer-meta">
+        <span>self-hosted · source-available backend</span>
+        <span><a href="https://github.com/f0x-it-llc/muxr-core" target="_blank" rel="noopener noreferrer">muxr-core</a> is licensed under PolyForm Shield 1.0.0.</span>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
