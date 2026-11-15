@@ -248,8 +248,9 @@ Format: claim — source — fetched — status.
   https://termius.com/pricing — 15 Nov 2026 — verified
 - Protocols: SSH, SFTP, Telnet, Mosh. — https://termius.com/pricing —
   15 Nov 2026 — verified
-- zellij, herdr or tmux-specific features: not stated. (It is a general SSH
-  client; any multiplexer runs inside the shell.)
+- zellij, herdr or tmux-specific features: not stated.
+- Our judgement — it is a general SSH client, so any multiplexer runs inside
+  the shell session.
 - One-time purchase: not stated (plans are per month). Source code: not stated.
 - Our judgement — better pick than Muxr when: you manage many servers over SSH, need desktop
   apps and sync, SFTP or port forwarding, or use tmux.
@@ -262,7 +263,8 @@ Format: claim — source — fetched — status.
   15 Nov 2026 — verified
 - Open source, GPL-3.0; SSH and Mosh. — https://github.com/blinksh/blink —
   15 Nov 2026 — verified
-- Android: no (iOS only). zellij or herdr-specific features: not stated.
+- Our judgement — no Android app: its own site describes it as a terminal for iOS.
+- zellij or herdr-specific features: not stated.
 - Our judgement — better pick than Muxr when: you want a full SSH and Mosh terminal on iPad
   with a hardware keyboard, open-source code, or tmux.
 
@@ -271,7 +273,8 @@ Format: claim — source — fetched — status.
 - By Panic. iPhone, iPad, Mac, Apple Vision. Free with in-app purchases:
   $9.99 per year, or $49.99 one time. SSH, Mosh, Eternal Terminal. —
   https://apps.apple.com/app/id1594420480 — 15 Nov 2026 — verified
-- Android: no. zellij or herdr-specific features: not stated.
+- Our judgement — no Android app: its store listing covers Apple platforms only.
+- zellij or herdr-specific features: not stated.
 
 ### Secure ShellFish
 
@@ -282,7 +285,8 @@ Format: claim — source — fetched — status.
   15 Nov 2026 — verified
 - Detects Claude Code, Codex CLI and OpenCode and sets up agent hooks for
   notifications. — same — verified
-- Android: no. zellij or herdr-specific features: not stated.
+- Our judgement — no Android app: its store listing covers Apple platforms only.
+- zellij or herdr-specific features: not stated.
 
 ### Termux
 
@@ -306,7 +310,8 @@ Format: claim — source — fetched — status.
   keys, pane and tab pickers and single-pane fullscreen; it can be installed as
   a web app. — same — verified
 - No built-in rate limiting; a reverse proxy is recommended. — same — verified
-- Price: free (it ships with zellij). herdr: no. Push notifications: not stated.
+- Our judgement — free, because it ships with zellij; it is a zellij feature, so it does not attach to herdr.
+- Push notifications: not stated.
 - Our judgement — better pick than Muxr when: you want zellij on a phone with no app and no
   extra daemon, or only need occasional access.
 
@@ -336,7 +341,8 @@ own sections.
 - Away from home: Tailscale or any VPN. — same — verified
 - herdr itself is open source under Apache 2.0. — https://herdr.dev/ —
   15 Nov 2026 — verified
-- Push notifications: not stated. zellij: no.
+- Push notifications: not stated.
+- Our judgement — it is a herdr client; its page mentions no other multiplexer.
 - Our judgement — better pick than Muxr when: you run herdr-core. It is free and made by the
   herdr project.
 
