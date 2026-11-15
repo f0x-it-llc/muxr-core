@@ -8,4 +8,8 @@
 **/.dart_tool/
 **/build/
 /website/fonts
+# Markdown mirrors and llms-full.txt from website/tools/build_md.py: built
+# into the image, never committed.
+website/**/*.html.md
+website/llms-full.txt
 /workflow
