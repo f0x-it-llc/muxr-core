@@ -102,7 +102,7 @@
     <p class="article-lead">Muxr sends your terminal traffic straight from your phone to <code>muxrd</code> on your own machine, over TLS, signed in with a per-device token. It does not pass through any server run by F0X IT LLC.</p>
 
     <h2>Does my terminal traffic pass through Muxr's servers?</h2>
-    <p>No. The app talks to <code>muxrd</code>, the daemon you run next to zellij or herdr. Keystrokes and output go from the phone to your server and nowhere else. If your server is unreachable, the app cannot connect, because there is no fallback route. No SSH is used between the app and the server.</p>
+    <p>No. The app talks to <code>muxrd</code>, the daemon you run next to zellij or herdr. Keystrokes and output go from the phone to your server and nowhere else. No SSH is used between the app and the server.</p>
 
     <h2>How is the connection protected?</h2>
     <p>The app talks to <code>muxrd</code> over gRPC protected by TLS. The server offers three certificate modes:</p>
