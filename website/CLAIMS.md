@@ -103,8 +103,9 @@ Verified against this repository, the muxr-app repository and the store listings
 - Sessions: browse, open, create, rename and close sessions, tabs and panes;
   switch spaces on herdr. (index.html)
 - Terminal with a key bar (Ctrl, Alt, Esc, arrows and more) and touch gestures:
-  tap to focus, tap again for the keyboard, long-press to fullscreen a pane,
-  swipe back. (index.html; guide.html)
+  tap to focus, tap again for the keyboard, double-tap a pane to toggle its
+  fullscreen, long-press text to select it, swipe back. (guide.html, which is
+  the authority for gestures)
 - Tablet layout: a persistent pane rail beside the terminal. (index.html)
 - Agents list: on herdr, Muxr lists the coding agents running in a session,
   most urgent first (blocked, then done, working, idle), with counts.
