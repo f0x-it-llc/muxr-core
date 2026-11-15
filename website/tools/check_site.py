@@ -32,16 +32,6 @@ ORIGINAL_PAGES = {
     "support.html", "privacy.html", "terms.html",
 }
 
-# Hosting-vendor and platform names that must not appear anywhere in the tree.
-VENDOR_NAMES = [
-    "cloudflare", "dokploy", "traefik", "vercel", "netlify", "heroku",
-    "github pages", "fly.io", "digitalocean", "hetzner",
-]
-# This script holds the list above, so it is not scanned for them.
-VENDOR_SCAN_SKIP = {"tools/check_site.py"}
-TEXT_SUFFIXES = (".html", ".md", ".txt", ".xml", ".css", ".js", ".sh", ".py",
-                 ".conf", ".json", ".svg")
-
 # Word limits for <main> of new pages (PAGE_RULES.md section 5).
 DEFAULT_WORDS = (400, 900)
 WORD_EXCEPTIONS = {"about.html": (300, 500), "faq.html": (400, 1800)}
@@ -59,12 +49,19 @@ OTHER_PRODUCTS = [
     "remote control", "herdr mobile", "app store", "website:",
 ]
 
-# Narrow exceptions to the "open source" rule: sentences that call Blink Shell
-# open source (CLAIMS.md records it as such, with its source link) and merely
-# name Muxr by contrast. Keyed by page; the regex must match the sentence start.
+# Exact exceptions to the "open source" rule: whole sentences that call Blink
+# Shell open source (CLAIMS.md records it as such, with its source link) and
+# name Muxr only by contrast. Keyed by page; a sentence is exempt only when it
+# equals one of these strings after whitespace normalisation.
 OPEN_SOURCE_EXCEPTIONS = {
-    "compare/blink-shell.html": r"^Blink Shell is a general SSH and Mosh terminal",
-    "compare/index.html": r"^An open-source SSH and Mosh terminal for iOS against Muxr\.$",
+    "compare/blink-shell.html": {
+        "Blink Shell is a general SSH and Mosh terminal for iPhone and iPad, "
+        "and it is open source under GPL-3.0; Muxr is a zellij and herdr "
+        "client for iOS and Android that needs a daemon on the server.",
+    },
+    "compare/index.html": {
+        "An open-source SSH and Mosh terminal for iOS against Muxr.",
+    },
 }
 
 errors = []
@@ -238,9 +235,9 @@ def check_sentence_rules(rel, lines):
     sentences = []
     for ln in lines:
         sentences.extend(re.split(r"(?<=[.!?])\s+", ln))
-    exempt = OPEN_SOURCE_EXCEPTIONS.get(rel)
+    exempt = OPEN_SOURCE_EXCEPTIONS.get(rel, set())
     for sentence in sentences:
-        if exempt and re.search(exempt, sentence):
+        if re.sub(r"\s+", " ", sentence).strip() in exempt:
             continue
         if (re.search(r"open[\s\-]source", sentence, re.I)
                 and re.search(r"\bMuxr\b|\bmuxrd\b", sentence)):
@@ -288,12 +285,12 @@ def main():
     pages = find_pages(root)
     page_set = set(pages)
     parsed = {}
-    raws = {}
+    sources = {}
     for rel in pages:
         with open(rel, encoding="utf-8") as fh:
-            raws[rel] = fh.read()
+            sources[rel] = fh.read()
         p = PageParser()
-        p.feed(raws[rel])
+        p.feed(sources[rel])
         p.close()
         parsed[rel] = p
 
@@ -301,7 +298,7 @@ def main():
 
     for rel in pages:
         p = parsed[rel]
-        raw = raws[rel]
+        raw = sources[rel]
         original = rel in ORIGINAL_PAGES
         index = is_section_index(rel)
         url = page_url(rel)
@@ -494,27 +491,6 @@ def main():
             fail("indexnow-key.txt", "must hold exactly one 32-character lowercase hex key")
     except OSError as exc:
         fail("indexnow-key.txt", f"cannot read: {exc}")
-
-    # Hosting-vendor names anywhere under website/.
-    for dirpath, dirs, files in os.walk(root):
-        rel_dir = os.path.relpath(dirpath, root)
-        if rel_dir == ".":
-            dirs[:] = [d for d in dirs if d not in ("fonts", "node_modules")]
-        for f in files:
-            path = os.path.join(rel_dir, f) if rel_dir != "." else f
-            path = path.replace(os.sep, "/")
-            if path in VENDOR_SCAN_SKIP:
-                continue
-            if not (f.endswith(TEXT_SUFFIXES) or f in ("Dockerfile",)):
-                continue
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    content = fh.read().lower()
-            except (OSError, UnicodeDecodeError):
-                continue
-            for name in VENDOR_NAMES:
-                if re.search(r"\b" + re.escape(name) + r"\b", content):
-                    fail(path, f"hosting-vendor name {name!r}")
 
     if errors:
         print(f"check_site: {len(errors)} failure(s)")

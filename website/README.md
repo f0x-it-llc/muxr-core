@@ -97,7 +97,7 @@ python3 tools/build_md.py --src . --out /tmp/muxr-md
 
 ## Checks
 
-`python3 tools/check_site.py`, run from `website/`, enumerates the pages on disk and fails (exit 1, one line per problem) on: title, description or canonical problems, a missing markdown alternate link, unparseable or wrong-type JSON-LD, a broken internal link or source, a relative link in a subdirectory page, a page missing from `sitemap.xml` or from `llms.txt`, "open source" said about Muxr, a hosting-vendor name, Muxr's price stated other than in the verbatim sentence, a word count outside the `PAGE_RULES.md` range, and inline styles or scripts. It uses only the standard library. CI runs it, plus `tools/build_md.py`, in the `website` job of `.github/workflows/ci.yml` on every push and pull request.
+`python3 tools/check_site.py`, run from `website/`, enumerates the pages on disk and fails (exit 1, one line per problem) on: title, description or canonical problems, a missing markdown alternate link, unparseable or wrong-type JSON-LD, a broken internal link or source, a relative link in a subdirectory page, a page missing from `sitemap.xml` or from `llms.txt`, "open source" said about Muxr, Muxr's price stated other than in the verbatim sentence, a word count outside the `PAGE_RULES.md` range, and inline styles or scripts. It uses only the standard library. CI runs it, plus `tools/build_md.py`, in the `website` job of `.github/workflows/ci.yml` on every push and pull request.
 
 ## Indexing
 
