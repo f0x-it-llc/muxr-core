@@ -12,7 +12,7 @@ Muxr puts your zellij and herdr terminal sessions, including the ones your codin
 - Works with [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
 - Browse, open, create, rename and close sessions, tabs and panes from the app.
 - On herdr, an agents list shows the coding agents running in a session, most urgent first.
-- Pair by scanning a QR code. The code also pins the server's certificate, so the phone trusts only your server.
+- Pair by scanning a QR code. With a self-signed server the code also pins the server's certificate, so the phone trusts only your server.
 - Per-device tokens, including read-only tokens for a view-only phone.
 - Works with a self-signed certificate, a certificate from a certificate authority, or behind a proxy that handles TLS.
 - A tablet layout with a persistent pane rail beside the terminal.
