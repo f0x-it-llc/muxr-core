@@ -82,6 +82,10 @@ page breaks under `/how-to/` or `/compare/`.
       one `<h1>`.
 - [ ] A visible line `<p class="updated">Last updated: 15 November 2026</p>`
       directly under the h1.
+- [ ] Every page under `/compare/`, `/alternatives/` and `/best/` carries the
+      sentence "Published by the makers of Muxr" on or beside the updated line
+      (the section index and the alternatives and best-of pages already carry
+      an equivalent sentence containing "makers of Muxr").
 - [ ] All content sits inside `<main class="article">` so the markdown
       generator can find it. Nav and footer stay outside `<main>`.
 - [ ] No inline style, no `style=` attribute, and no script other than the

@@ -169,7 +169,7 @@
               </svg>
             </div>
             <h3 class="feature-title">TLS + bearer auth</h3>
-            <p class="feature-desc">Every connection is encrypted and authenticated. The gRPC boundary speaks the <code>muxr.v1</code> protobuf contract over fingerprint-pinned TLS with bearer-token auth.</p>
+            <p class="feature-desc">Every connection is encrypted and authenticated. The gRPC boundary speaks the <code>muxr.v1</code> protobuf contract over TLS with bearer-token auth; a self-signed server's certificate is pinned at pairing.</p>
           </article>
 
           <article class="feature-card">
@@ -179,7 +179,7 @@
               </svg>
             </div>
             <h3 class="feature-title">QR-code device pairing</h3>
-            <p class="feature-desc">Pair from the setup TUI by scanning a QR. The code pins the server's TLS certificate fingerprint — cert-pinned trust, no manual cert wrangling.</p>
+            <p class="feature-desc">Pair from the setup TUI by scanning a QR. For a self-signed server the code pins the certificate fingerprint; for a CA-signed server the app uses system trust.</p>
           </article>
 
           <article class="feature-card">

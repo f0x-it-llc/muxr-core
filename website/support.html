@@ -133,7 +133,7 @@
           <p>This is by design. Mutating RPCs — creating, renaming, or closing sessions, tabs, and panes, and server-side pane fullscreen — fail closed on read-only tokens; the app also hides those affordances entirely when connected read-only. If you need to make changes, mint a read-write token instead: <code>muxrd create-token --name mobile</code> (omit <code>--read-only</code>).</p>
 
           <h3 id="push">Does Muxr send push notifications?</h3>
-          <p>Push notifications are not available in the app yet; they are coming soon. See the <a href="/roadmap.html">roadmap</a> for where they stand. When they arrive, the server decides whether push is available: it will require herdr's event kernel, so a zellij-only <code>muxrd</code> will report push as unsupported.</p>
+          <p>Push notifications are not available in the app yet; they are coming soon. See the <a href="/roadmap.html">roadmap</a> for where they stand.</p>
         </section>
 
         <section id="before-you-write-in">
