@@ -127,7 +127,7 @@
 
     <h2>What do I need?</h2>
     <ul>
-      <li>A Linux or Mac machine running zellij 0.45.1 (or herdr). The server needs a Unix host, so Windows does not work.</li>
+      <li>A Linux or Mac machine running zellij (or herdr). The Muxr server, <code>muxrd</code>, is built against zellij 0.45.1 and refuses a mismatched version. It needs a Unix host, so Windows does not work.</li>
       <li>An Android phone or tablet running Android 10 or later, with Muxr installed from Google Play.</li>
       <li>A route from the phone to the machine, ideally a tailnet such as Tailscale.</li>
     </ul>
@@ -153,9 +153,9 @@
     <p>Yes. Saved credentials are kept in the Android Keystore, gated behind your device's biometrics. When you tap a saved server on the Connect screen, a biometric prompt unlocks its token. There is no Muxr account, and the app has no analytics, ads or crash reporting. Saving more than one server needs Muxr Pro.</p>
 
     <h2>Can I do this without installing a server daemon?</h2>
-    <p>Yes. Two other routes need nothing from Muxr, and each has trade-offs. Both are described here as published on 15 November 2026.</p>
+    <p>Yes. Android offers a browser route and an SSH route, each with its own trade-offs; the facts below are as published on 15 November 2026.</p>
     <p><strong>The zellij web client as an installable web app.</strong> It ships with zellij, is off by default and starts with <code>zellij web</code>. The <a href="https://zellij.dev/documentation/web-client" target="_blank" rel="noopener noreferrer">zellij documentation</a> says it detects mobile browsers, offers touch scrolling, on-screen keys, pane and tab pickers and single-pane fullscreen, and can be installed as a web app. HTTPS is required when it listens on anything other than 127.0.0.1, login tokens are required, and a reverse proxy is recommended because there is no built-in rate limiting. It is free, but it is a zellij feature, so it does not attach to herdr. See <a href="/compare/zellij-web-client.html">Compare Muxr with the zellij web client</a>.</p>
-    <p><strong>An SSH app running <code>zellij attach</code>.</strong> <a href="https://termux.dev/en/" target="_blank" rel="noopener noreferrer">Termux</a> is a free Android terminal emulator distributed through F-Droid and GitHub; run <code>ssh</code> inside it and then <code>zellij attach</code>. <a href="https://github.com/connectbot/connectbot" target="_blank" rel="noopener noreferrer">ConnectBot</a> is an Apache-2.0 SSH client for Android that works the same way. The machine needs just an SSH server, and you get the ordinary zellij interface at the phone's screen size. This suits you if you already live in an SSH app or cannot install a daemon. See <a href="/compare/ssh-and-zellij.html">Compare Muxr with SSH and zellij</a>.</p>
+    <p><strong>An SSH app running <code>zellij attach</code>.</strong> <a href="https://termux.dev/en/" target="_blank" rel="noopener noreferrer">Termux</a> is a free Android terminal emulator distributed through F-Droid and GitHub; run <code>ssh</code> inside it and then <code>zellij attach</code>. <a href="https://github.com/connectbot/connectbot" target="_blank" rel="noopener noreferrer">ConnectBot</a> is an Apache-2.0 SSH client for Android. Any SSH client can run <code>zellij attach</code>, and the machine needs just an SSH server. You get the ordinary zellij interface at the phone's screen size. This suits you if you already live in an SSH app or cannot install a daemon. See <a href="/compare/ssh-and-zellij.html">Compare Muxr with SSH and zellij</a>.</p>
 
     <h2>Which gestures and keys work?</h2>
     <ul>
