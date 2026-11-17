@@ -47,6 +47,13 @@ pub use types::{
 };
 pub use zellij::ZellijBackend;
 
+/// `MuxEvent::Exit` reason (sent to the app as control kind `exit`, payload exactly
+/// this string) when a herdr attach stream ends because the attached pane no
+/// longer exists while the daemon still answers. It tells the app "this pane is
+/// gone" apart from "the session is gone" (whose exit carries herdr's own reason,
+/// or no event at all on a bare EOF).
+pub const PANE_EXITED_REASON: &str = "pane-exited";
+
 // Re-export routing helpers at the multiplexer level so relay and grpc can
 // import them as `crate::multiplexer::{make_id, resolve_session, …}` — the
 // correct layer (relay depends on multiplexer, grpc depends on multiplexer;

@@ -1569,3 +1569,88 @@ fn smoke_relay_create_space_switches_the_relay_and_keeps_daemon_focus() {
         .expect("close_space() failed");
     assert!(ack.ok, "cleanup close_space failed: {ack:?}");
 }
+
+// ─── pane exit ────────────────────────────────────────────────────────────────
+
+/// Exit the shell of the attached pane while the workspace and a second pane
+/// survive: the relay must end with `exit` / `pane-exited` (never a bare EOF),
+/// and a fresh attach with resume hints at the surviving pane must work.
+///
+/// herdr's real signal on a pane exit (`ServerShutdown { reason }` or a bare
+/// EOF) is not recorded anywhere else, so the failure messages print what the
+/// wire delivered: a `ServerShutdown` reason shows as the original reason, a
+/// bare EOF as "no exit event". Run on its own (`--test-threads=1`).
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a space"]
+fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
+    let b = backend();
+    let (_focused, other) = focused_and_other_space(&b);
+    let (mut sender, probe) = attach_in_space(&b, &other);
+
+    // A fresh space with one root pane (A), then a second pane (B) the relay
+    // follows. A survives B's exit.
+    let space = sender
+        .create_space(Some(test_session_name()))
+        .expect("relay create_space() failed");
+    let survivor = space.pane;
+    let mark = probe.frames();
+    assert!(probe.frames_grow_past(mark), "stream must follow the space");
+    let doomed = sender
+        .new_pane(false, None)
+        .expect("relay new_pane() failed");
+    assert_ne!(doomed.pane.id, survivor.id, "a second pane must exist");
+    let mark = probe.frames();
+    assert!(
+        probe.frames_grow_past(mark),
+        "stream must follow the second pane"
+    );
+
+    // Make the attached pane's shell exit.
+    sender
+        .send_input_chars("exit\r")
+        .expect("send_input_chars(exit) failed");
+    let ended = probe.ends();
+    let reason = probe.exit_reason.lock().unwrap().clone();
+    println!(
+        "[herdr smoke] pane exit: stream ended={ended}, exit reason={reason:?} \
+         (a ServerShutdown reason would show here verbatim; with no exit event the wire was a bare EOF)"
+    );
+
+    let cleanup = |sender: &mut Box<dyn MuxSender>| {
+        sender.send_client_exited().ok();
+        let _ = b.close_space(&space.space_id, false);
+    };
+    if !ended || reason.as_deref() != Some(muxrd::multiplexer::PANE_EXITED_REASON) {
+        cleanup(&mut sender);
+        panic!(
+            "expected the relay to end with exit/{:?}; stream ended={ended}, exit reason={reason:?} \
+             (None = the wire delivered a bare EOF and no exit event was surfaced)",
+            muxrd::multiplexer::PANE_EXITED_REASON
+        );
+    }
+
+    // A fresh attach with resume hints at the surviving pane succeeds, and a
+    // FocusPane on that new connection is acknowledged.
+    let resume = ResumeTarget {
+        space_id: Some(space.space_id.clone()),
+        tab_id: Some(space.tab_id),
+        pane_id: Some(survivor.id),
+    };
+    let handle = b
+        .open_attach_with_resume(HERDR_SESSION, 24, 80, false, &resume)
+        .expect("fresh attach with resume hints at the surviving pane failed");
+    let view = handle.resumed_view.clone();
+    let (mut sender2, receiver2) = handle.split();
+    let probe2 = StreamProbe::start(receiver2, "survivor");
+    let got_frame = probe2.frames_grow_past(0);
+    let focus = sender2.focus_pane(survivor);
+    sender2.send_client_exited().ok();
+    cleanup(&mut sender);
+    assert_eq!(
+        view.as_ref().map(|v| (v.space_id.as_str(), v.pane.id)),
+        Some((space.space_id.as_str(), survivor.id)),
+        "the fresh attach must resolve to the surviving pane"
+    );
+    assert!(got_frame, "the fresh attach must stream the surviving pane");
+    focus.expect("FocusPane on the fresh connection must be acknowledged ok");
+}

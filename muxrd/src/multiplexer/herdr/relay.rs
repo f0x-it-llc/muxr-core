@@ -97,7 +97,7 @@ use crate::multiplexer::types::{
     FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, ResumeTarget,
     ResumedView,
 };
-use crate::multiplexer::{CreatedView, DualHandle, MuxReceiver, MuxSender};
+use crate::multiplexer::{CreatedView, DualHandle, MuxReceiver, MuxSender, PANE_EXITED_REASON};
 
 use super::api::{PaneInfo, PaneZoomMode};
 use super::backend::DEFAULT_SPLIT_DIRECTION;
@@ -262,6 +262,17 @@ pub fn open_attach(
 
     let resumed_view = resumed_view_for(resume, &target);
 
+    // The reader's stream-end probe asks about the pane the sender is attached to
+    // NOW (a reattach moves it), so both halves share one slot.
+    let attached = Arc::new(Mutex::new(AttachedPane {
+        workspace_id: target.workspace_id.clone(),
+        terminal_id: target.terminal_id.clone(),
+    }));
+    let probe = ControlPaneProbe {
+        control: Arc::clone(&control),
+        attached: Arc::clone(&attached),
+    };
+
     Ok(DualHandle {
         sender: Box::new(HerdrMuxSender {
             write: Arc::clone(&write),
@@ -271,6 +282,7 @@ pub fn open_attach(
             // into another space must report that space's tabs from the first poll.
             workspace_id: target.workspace_id,
             current_terminal_id: target.terminal_id,
+            attached: Arc::clone(&attached),
             swap_pending: Arc::clone(&swap_pending),
             swap_tx,
             rows,
@@ -279,11 +291,14 @@ pub fn open_attach(
             protocol,
             mode,
         }),
-        receiver: Box::new(HerdrMuxReceiver {
-            read: read_half,
-            swap_rx,
-            swap_pending,
-        }),
+        receiver: Box::new(PaneExitReceiver::new(
+            HerdrMuxReceiver {
+                read: read_half,
+                swap_rx,
+                swap_pending,
+            },
+            probe,
+        )),
         session_name,
         resumed_view,
     })
@@ -888,6 +903,10 @@ pub struct HerdrMuxSender {
     workspace_id: String,
     /// `terminal_id` the wire stream is currently attached to (re-attach target).
     current_terminal_id: String,
+    /// Mirror of `workspace_id` / `current_terminal_id` for the reader's
+    /// stream-end pane-exit probe (see [`PaneExitReceiver`]); republished by
+    /// [`Self::publish_attached`] whenever either changes.
+    attached: Arc<Mutex<AttachedPane>>,
     /// Signals [`HerdrMuxReceiver`] that a connection swap is in flight, so the EOF
     /// on the old connection is adopted as a swap rather than misread as teardown.
     /// Set before the `Detach`, cleared once the new read half is handed over.
@@ -918,6 +937,13 @@ pub struct HerdrMuxSender {
 }
 
 impl HerdrMuxSender {
+    /// Publish the current attach position to the reader's pane-exit probe.
+    fn publish_attached(&self) {
+        let mut a = self.attached.lock().unwrap_or_else(|e| e.into_inner());
+        a.workspace_id.clone_from(&self.workspace_id);
+        a.terminal_id.clone_from(&self.current_terminal_id);
+    }
+
     /// Lock the shared write half, recovering from a poisoned mutex. The guarded
     /// critical sections are short framed writes + the reconnect swap, so a torn
     /// state left by a panicking holder cannot matter after teardown — recovering
@@ -1022,6 +1048,7 @@ impl HerdrMuxSender {
                     // now writes to the new connection.
                     *self.lock_write() = write_half;
                     self.current_terminal_id = terminal_id.clone();
+                    self.publish_attached();
                     // Hand the reader its new read half. A send error means the reader
                     // is already gone — the swap cannot complete.
                     if self.swap_tx.send(Some(read_half)).is_err() {
@@ -1079,6 +1106,7 @@ impl HerdrMuxSender {
             )
         })?;
         self.workspace_id = pane.workspace_id.clone();
+        self.publish_attached();
         Ok(CreatedView {
             space_id: pane.workspace_id.clone(),
             tab_id,
@@ -1168,6 +1196,7 @@ impl MuxSender for HerdrMuxSender {
         let (_pane_id, terminal_id) = resolve_focused_terminal(&self.control, space_id)?;
         self.reattach(terminal_id)?;
         self.workspace_id = space_id.to_string();
+        self.publish_attached();
         Ok(())
     }
 
@@ -1334,6 +1363,7 @@ impl MuxSender for HerdrMuxSender {
             control: Arc::clone(&self.control),
             workspace_id: self.workspace_id.clone(),
             current_terminal_id: self.current_terminal_id.clone(),
+            attached: Arc::clone(&self.attached),
             swap_pending: Arc::clone(&self.swap_pending),
             swap_tx: self.swap_tx.clone(),
             rows: self.rows,
@@ -1434,6 +1464,107 @@ impl HerdrMuxReceiver {
                     // Genuine disconnect — propagate immediately (stay silent).
                     None
                 }
+            }
+        }
+    }
+}
+
+// ─── PaneExitReceiver (pane-exit detection) ───────────────────────────────────
+
+/// Where a sender's wire stream is attached, shared with the reader's probe.
+#[derive(Debug, Default)]
+struct AttachedPane {
+    workspace_id: String,
+    terminal_id: String,
+}
+
+/// What the daemon says about the attached pane once a stream has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneState {
+    /// The daemon answered and the pane is still in the workspace.
+    Present,
+    /// The daemon answered and the pane is no longer in the workspace.
+    Absent,
+    /// The daemon did not answer (or the workspace is gone): no verdict.
+    Unknown,
+}
+
+/// Asks the daemon whether the attached pane still exists. Called at most once
+/// per stream end, never per frame.
+trait PaneProbe: Send {
+    fn attached_pane_state(&self) -> PaneState;
+}
+
+/// [`PaneProbe`] over the JSON-API control channel: `pane.list` of the relay's
+/// workspace, looking for the attached terminal.
+struct ControlPaneProbe {
+    control: Arc<HerdrControl>,
+    attached: Arc<Mutex<AttachedPane>>,
+}
+
+impl PaneProbe for ControlPaneProbe {
+    fn attached_pane_state(&self) -> PaneState {
+        let (workspace_id, terminal_id) = {
+            let a = self.attached.lock().unwrap_or_else(|e| e.into_inner());
+            (a.workspace_id.clone(), a.terminal_id.clone())
+        };
+        match self.control.list_panes(&workspace_id) {
+            Ok(panes) if panes.iter().any(|p| p.terminal_id == terminal_id) => PaneState::Present,
+            Ok(_) => PaneState::Absent,
+            Err(e) => {
+                log::debug!("herdr pane-exit probe: pane.list failed (no verdict): {e:#}");
+                PaneState::Unknown
+            }
+        }
+    }
+}
+
+/// Wraps the wire receiver and, when the stream ends because the attached pane
+/// is gone while the daemon still answers, reports
+/// `Exit { reason: PANE_EXITED_REASON }` — for both a `ServerShutdown` and a
+/// bare EOF. Every other ending is passed through unchanged. An EOF that is an
+/// in-flight swap never reaches this layer: the inner receiver adopts it.
+struct PaneExitReceiver<R, P> {
+    inner: R,
+    probe: P,
+    /// The stream ended and the verdict was delivered; further reads end it.
+    done: bool,
+}
+
+impl<R: MuxReceiver, P: PaneProbe> PaneExitReceiver<R, P> {
+    fn new(inner: R, probe: P) -> Self {
+        Self {
+            inner,
+            probe,
+            done: false,
+        }
+    }
+
+    fn pane_exited() -> MuxServerMsg {
+        MuxServerMsg::Event(MuxEvent::Exit {
+            reason: PANE_EXITED_REASON.to_string(),
+        })
+    }
+}
+
+impl<R: MuxReceiver, P: PaneProbe> MuxReceiver for PaneExitReceiver<R, P> {
+    fn recv(&mut self) -> Option<MuxServerMsg> {
+        if self.done {
+            return None;
+        }
+        match self.inner.recv() {
+            Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
+                self.done = true;
+                if self.probe.attached_pane_state() == PaneState::Absent {
+                    Some(Self::pane_exited())
+                } else {
+                    Some(MuxServerMsg::Event(MuxEvent::Exit { reason }))
+                }
+            }
+            Some(msg) => Some(msg),
+            None => {
+                self.done = true;
+                (self.probe.attached_pane_state() == PaneState::Absent).then(Self::pane_exited)
             }
         }
     }
@@ -1558,6 +1689,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-1".into(),
+            attached: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -2541,6 +2673,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2659,6 +2792,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2757,6 +2891,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending: Arc::clone(&swap_pending),
             swap_tx,
             rows: 24,
@@ -2834,6 +2969,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2904,6 +3040,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -3025,6 +3162,143 @@ mod tests {
         let _srv2 = deliver.join().unwrap();
     }
 
+    // ── Pane-exit detection ───────────────────────────────────────────────────
+
+    struct ScriptedReceiver(std::collections::VecDeque<Option<MuxServerMsg>>);
+
+    impl MuxReceiver for ScriptedReceiver {
+        fn recv(&mut self) -> Option<MuxServerMsg> {
+            self.0.pop_front().flatten()
+        }
+    }
+
+    struct FixedProbe {
+        state: PaneState,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PaneProbe for FixedProbe {
+        fn attached_pane_state(&self) -> PaneState {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.state
+        }
+    }
+
+    fn exit_msg(reason: &str) -> Option<MuxServerMsg> {
+        Some(MuxServerMsg::Event(MuxEvent::Exit {
+            reason: reason.into(),
+        }))
+    }
+
+    fn exit_reason(msg: Option<MuxServerMsg>) -> Option<String> {
+        match msg {
+            Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn exit_receiver(
+        script: Vec<Option<MuxServerMsg>>,
+        state: PaneState,
+    ) -> (
+        PaneExitReceiver<ScriptedReceiver, FixedProbe>,
+        Arc<AtomicUsize>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rx = PaneExitReceiver::new(
+            ScriptedReceiver(script.into()),
+            FixedProbe {
+                state,
+                calls: Arc::clone(&calls),
+            },
+        );
+        (rx, calls)
+    }
+
+    #[test]
+    fn shutdown_with_pane_absent_reports_pane_exited() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("bye")], PaneState::Absent);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some(PANE_EXITED_REASON));
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn eof_with_pane_absent_reports_pane_exited() {
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Absent);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some(PANE_EXITED_REASON));
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn shutdown_with_pane_present_keeps_the_original_reason() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("going down")], PaneState::Present);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some("going down"));
+    }
+
+    #[test]
+    fn eof_with_pane_present_ends_silently() {
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Present);
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn unanswered_probe_keeps_todays_behaviour() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("bye")], PaneState::Unknown);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some("bye"));
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Unknown);
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn healthy_stream_never_probes() {
+        let (mut rx, calls) = exit_receiver(
+            vec![
+                Some(MuxServerMsg::Render(b"x".to_vec())),
+                Some(MuxServerMsg::Other),
+            ],
+            PaneState::Absent,
+        );
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Render(_))));
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Other)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// An EOF caused by an in-flight swap is adopted by the inner receiver, so
+    /// the probe never runs and the stream carries on over the new connection.
+    #[test]
+    fn in_flight_swap_eof_is_adopted_not_probed() {
+        let (read1, peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let swap_pending = Arc::new(AtomicBool::new(true));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        swap_tx.send(Some(read2)).unwrap();
+        drop(peer1); // EOF on the old connection
+        let inner = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rx = PaneExitReceiver::new(
+            inner,
+            FixedProbe {
+                state: PaneState::Absent,
+                calls: Arc::clone(&calls),
+            },
+        );
+        let payload = bincode::serde::encode_to_vec(
+            &ServerMessage::TerminalBell { count: 1 },
+            bincode::config::standard(),
+        )
+        .unwrap();
+        peer2
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        peer2.write_all(&payload).unwrap();
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Other)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
     // ── Attach mode: read-only observes, read-write owns ──────────────────────
 
     /// A read-only attach must open the terminal in herdr's **observe** mode, so
@@ -3141,6 +3415,7 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -3213,6 +3488,7 @@ mod tests {
             control,
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -3357,6 +3633,7 @@ mod tests {
             )),
             workspace_id: workspace_id.into(),
             current_terminal_id: attached_terminal.into(),
+            attached: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
