@@ -1572,17 +1572,61 @@ fn smoke_relay_create_space_switches_the_relay_and_keeps_daemon_focus() {
 
 // ─── pane exit ────────────────────────────────────────────────────────────────
 
+/// Records the relay's `herdr stream end: wire delivered …` debug lines, so the
+/// pane-exit test can print the signal herdr's wire actually sent — the relay
+/// maps a `ServerShutdown` and a bare EOF alike to `exit` / `pane-exited`, so
+/// the stream itself no longer shows which one it was.
+struct WireSignalLog(std::sync::Mutex<Vec<String>>);
+
+impl WireSignalLog {
+    const TARGET: &'static str = "muxrd::multiplexer::herdr::relay";
+    const PREFIX: &'static str = "herdr stream end: ";
+
+    /// Install the recorder as the process logger (idempotent) and return it.
+    fn install() -> &'static Self {
+        static LOG: WireSignalLog = WireSignalLog(std::sync::Mutex::new(Vec::new()));
+        if log::set_logger(&LOG).is_ok() {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+        &LOG
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl log::Log for WireSignalLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug && metadata.target() == Self::TARGET
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = record.args().to_string();
+        if let Some(signal) = line.strip_prefix(Self::PREFIX) {
+            self.0.lock().unwrap().push(signal.to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
 /// Exit the shell of the attached pane while the workspace and a second pane
 /// survive: the relay must end with `exit` / `pane-exited` (never a bare EOF),
 /// and a fresh attach with resume hints at the surviving pane must work.
 ///
 /// herdr's real signal on a pane exit (`ServerShutdown { reason }` or a bare
-/// EOF) is not recorded anywhere else, so the failure messages print what the
-/// wire delivered: a `ServerShutdown` reason shows as the original reason, a
-/// bare EOF as "no exit event". Run on its own (`--test-threads=1`).
+/// EOF) is not recorded anywhere else, so the test prints what the wire
+/// delivered — on success too — from the relay's stream-end log line
+/// ([`WireSignalLog`]); pass `--show-output` to see it on a passing run. Run
+/// on its own (`--test-threads=1`).
 #[test]
 #[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a space"]
 fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
+    let wire_log = WireSignalLog::install();
     let b = backend();
     let (_focused, other) = focused_and_other_space(&b);
     let (mut sender, probe) = attach_in_space(&b, &other);
@@ -1606,15 +1650,23 @@ fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
     );
 
     // Make the attached pane's shell exit.
+    let log_mark = wire_log.lines().len();
     sender
         .send_input_chars("exit\r")
         .expect("send_input_chars(exit) failed");
     let ended = probe.ends();
     let reason = probe.exit_reason.lock().unwrap().clone();
-    println!(
-        "[herdr smoke] pane exit: stream ended={ended}, exit reason={reason:?} \
-         (a ServerShutdown reason would show here verbatim; with no exit event the wire was a bare EOF)"
-    );
+    // The stream-end line is logged before the probe sees the ending, so it is
+    // recorded by now. Prefer the doomed pane's own (its pane is Absent).
+    let signals = wire_log.lines().split_off(log_mark);
+    let wire_signal = signals
+        .iter()
+        .find(|s| s.ends_with("attached pane Absent"))
+        .or(signals.first())
+        .cloned()
+        .unwrap_or_else(|| "no stream-end line recorded".to_string());
+    println!("[herdr smoke] pane exit wire signal: {wire_signal}");
+    println!("[herdr smoke] pane exit: stream ended={ended}, exit reason={reason:?}");
 
     let cleanup = |sender: &mut Box<dyn MuxSender>| {
         sender.send_client_exited().ok();
@@ -1623,8 +1675,8 @@ fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
     if !ended || reason.as_deref() != Some(muxrd::multiplexer::PANE_EXITED_REASON) {
         cleanup(&mut sender);
         panic!(
-            "expected the relay to end with exit/{:?}; stream ended={ended}, exit reason={reason:?} \
-             (None = the wire delivered a bare EOF and no exit event was surfaced)",
+            "expected the relay to end with exit/{:?}; stream ended={ended}, exit reason={reason:?}, \
+             wire signal: {wire_signal}",
             muxrd::multiplexer::PANE_EXITED_REASON
         );
     }

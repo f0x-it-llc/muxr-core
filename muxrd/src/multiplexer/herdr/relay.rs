@@ -70,7 +70,9 @@
 //! Because a `reattach` swaps the whole socket, the write half is shared through a
 //! mutex (a swap replaces it under every handle at once) and the reader is handed
 //! its new read half over an `mpsc` channel, arming a [`swap_pending`](HerdrMuxSender)
-//! flag so an EOF during a swap is adopted rather than treated as a disconnect.
+//! flag so the old connection's end during a swap — EOF, or herdr's
+//! `ServerShutdown { "detached" }` reply to the `Detach` — is adopted rather than
+//! treated as a disconnect.
 //!
 //! ## P2.04 wiring
 //!
@@ -966,7 +968,8 @@ impl HerdrMuxSender {
     /// re-pointing leaks the old terminal's resize lock, so we instead:
     ///
     /// 1. arm `swap_pending` **before** `Detach` so the reader adopts the imminent
-    ///    EOF as a swap rather than a disconnect;
+    ///    end of the old connection (EOF, or herdr's `"detached"` shutdown reply) as a
+    ///    swap rather than a disconnect;
     /// 2. best-effort `Detach` the old connection — herdr's `remove_client` then
     ///    frees the old terminal's owner entry + resize lock and the desktop layout
     ///    restores it (write errors are ignored: the server may already be gone);
@@ -1394,18 +1397,68 @@ pub struct HerdrMuxReceiver {
 impl MuxReceiver for HerdrMuxReceiver {
     fn recv(&mut self) -> Option<MuxServerMsg> {
         loop {
-            if let Some(msg) = recv_from(&mut self.read) {
-                return Some(msg);
+            match recv_from(&mut self.read) {
+                Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
+                    // herdr answers a reattach's `Detach` with
+                    // `ServerShutdown { reason: "detached" }` on the OLD connection
+                    // whenever its reply lands before our socket shutdown (a race,
+                    // seen live against 0.9.0). That is the end of the released
+                    // connection, not of the stream: adopt the swap.
+                    if let Some(read) = self.adopt_swap_after_shutdown(&reason) {
+                        self.read = read?;
+                        continue;
+                    }
+                    return Some(MuxServerMsg::Event(MuxEvent::Exit { reason }));
+                }
+                Some(msg) => return Some(msg),
+                // The current connection ended. Adopt a swapped-in connection if a
+                // reattach is in flight; otherwise this is a genuine disconnect
+                // (`?` propagates the `None` and ends the stream).
+                None => self.read = self.try_adopt_swap()?,
             }
-            // The current connection ended. Adopt a swapped-in connection if a
-            // reattach is in flight; otherwise this is a genuine disconnect
-            // (`?` propagates the `None` and ends the stream).
-            self.read = self.try_adopt_swap()?;
         }
     }
 }
 
 impl HerdrMuxReceiver {
+    /// Decide what a `ServerShutdown` read off the current connection means.
+    ///
+    /// - `None`: no reattach is involved — a genuine shutdown the caller surfaces.
+    /// - `Some(Some(stream))`: the shutdown released a connection a reattach is
+    ///   replacing — adopt the new read half and carry on.
+    /// - `Some(None)`: it did, but the reconnect failed — end the stream, exactly
+    ///   as an EOF during that failed swap would.
+    ///
+    /// The flag is read **before** the channel: a swap that completes in between
+    /// leaves its read half queued, so the swap is never missed. A swap that
+    /// already completed (flag clear, read half queued) is the late-read case —
+    /// the reply sat in the old socket while the reconnect finished.
+    fn adopt_swap_after_shutdown(&self, reason: &str) -> Option<Option<UnixStream>> {
+        if self.swap_pending.load(Ordering::SeqCst) {
+            log::debug!(
+                "herdr wire swap: old connection shut down ({reason:?}) mid-swap; adopting"
+            );
+            return Some(self.try_adopt_swap());
+        }
+        match self.swap_rx.try_recv() {
+            Ok(Some(stream)) => {
+                log::debug!(
+                    "herdr wire swap: old connection shut down ({reason:?}) after the swap; \
+                     adopting the queued connection"
+                );
+                Some(Some(stream))
+            }
+            Ok(None) => {
+                log::warn!(
+                    "herdr wire swap: reconnect failed after retries (None sentinel); \
+                     ending the AttachTerminal stream"
+                );
+                Some(None)
+            }
+            Err(_) => None,
+        }
+    }
+
     /// On EOF of the current connection, decide whether a reconnect handed us a new
     /// read half to adopt. Checks the channel **first** (the swap may have completed
     /// before we noticed EOF); on an empty channel, waits up to [`SWAP_GRACE`] only
@@ -1522,8 +1575,9 @@ impl PaneProbe for ControlPaneProbe {
 /// Wraps the wire receiver and, when the stream ends because the attached pane
 /// is gone while the daemon still answers, reports
 /// `Exit { reason: PANE_EXITED_REASON }` — for both a `ServerShutdown` and a
-/// bare EOF. Every other ending is passed through unchanged. An EOF that is an
-/// in-flight swap never reaches this layer: the inner receiver adopts it.
+/// bare EOF. Every other ending is passed through unchanged. The end of a
+/// connection a swap is replacing (EOF or `ServerShutdown`) never reaches this
+/// layer: the inner receiver adopts the swap.
 struct PaneExitReceiver<R, P> {
     inner: R,
     probe: P,
@@ -1552,10 +1606,17 @@ impl<R: MuxReceiver, P: PaneProbe> MuxReceiver for PaneExitReceiver<R, P> {
         if self.done {
             return None;
         }
+        // Each ending logs the wire's own signal before it is mapped, so a run
+        // records what herdr actually sent (the live pane-exit test prints it).
         match self.inner.recv() {
             Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
                 self.done = true;
-                if self.probe.attached_pane_state() == PaneState::Absent {
+                let state = self.probe.attached_pane_state();
+                log::debug!(
+                    "herdr stream end: wire delivered ServerShutdown {{ reason: {reason:?} }}; \
+                     attached pane {state:?}"
+                );
+                if state == PaneState::Absent {
                     Some(Self::pane_exited())
                 } else {
                     Some(MuxServerMsg::Event(MuxEvent::Exit { reason }))
@@ -1564,7 +1625,9 @@ impl<R: MuxReceiver, P: PaneProbe> MuxReceiver for PaneExitReceiver<R, P> {
             Some(msg) => Some(msg),
             None => {
                 self.done = true;
-                (self.probe.attached_pane_state() == PaneState::Absent).then(Self::pane_exited)
+                let state = self.probe.attached_pane_state();
+                log::debug!("herdr stream end: wire delivered EOF; attached pane {state:?}");
+                (state == PaneState::Absent).then(Self::pane_exited)
             }
         }
     }
@@ -2876,6 +2939,129 @@ mod tests {
         );
     }
 
+    /// herdr's reply to a reattach's `Detach`: `ServerShutdown { "detached" }`
+    /// on the old connection, then EOF.
+    fn detached_reply(peer: &mut UnixStream) {
+        peer.write_all(&frame_server_message(&ServerMessage::ServerShutdown {
+            reason: Some("detached".into()),
+        }))
+        .unwrap();
+        peer.flush().unwrap();
+    }
+
+    /// Live herdr 0.9.0 regression: herdr answers the `Detach` a reattach sends
+    /// with `ServerShutdown { "detached" }` on the OLD connection when the reply
+    /// beats our socket shutdown. Read mid-swap, that is the released
+    /// connection's end — the reader must adopt the new connection, not surface
+    /// an `Exit` that ends the relay (which dropped the reader, so the sender's
+    /// hand-over failed with "relay reader gone"). Fails against the pre-fix
+    /// receiver, which returned `Exit("detached")`.
+    #[test]
+    fn recv_adopts_the_swap_across_the_old_connections_detached_shutdown() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let swap_pending = Arc::new(AtomicBool::new(true));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::clone(&swap_pending),
+        };
+
+        detached_reply(&mut peer1);
+        drop(peer1);
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+        // The reconnect lands while the reader is already waiting on it.
+        let deliver = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            swap_tx.send(Some(read2)).unwrap();
+            swap_pending.store(false, Ordering::SeqCst);
+            swap_tx
+        });
+
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "a mid-swap ServerShutdown must be adopted as the old connection's end, got {msg:?}"
+        );
+        let _swap_tx = deliver.join().unwrap();
+    }
+
+    /// The same reply read LATE — the reconnect already finished (flag clear,
+    /// new read half queued) while the reply sat in the old socket. Still the
+    /// old connection's end: adopt the queued connection.
+    #[test]
+    fn recv_adopts_a_completed_swap_when_the_detached_reply_is_read_late() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(false)),
+        };
+
+        detached_reply(&mut peer1);
+        swap_tx.send(Some(read2)).unwrap();
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "a ServerShutdown with a completed swap queued must adopt it, got {msg:?}"
+        );
+    }
+
+    /// A `ServerShutdown` mid-swap whose reconnect then fails ends the stream,
+    /// exactly as an EOF during that failed swap does.
+    #[test]
+    fn shutdown_during_a_failed_swap_ends_the_stream() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(true)),
+        };
+
+        detached_reply(&mut peer1);
+        swap_tx.send(None).unwrap();
+
+        assert!(
+            receiver.recv().is_none(),
+            "a failed swap must end the stream"
+        );
+    }
+
+    /// With no reattach involved, a `ServerShutdown` is genuine: it surfaces as
+    /// `Exit` with its reason, immediately (no swap grace).
+    #[test]
+    fn shutdown_without_a_swap_still_surfaces_the_exit() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (_swap_tx, swap_rx) = mpsc::channel::<Option<UnixStream>>();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(false)),
+        };
+
+        detached_reply(&mut peer1);
+        let start = std::time::Instant::now();
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Event(MuxEvent::Exit { ref reason })) if reason == "detached"),
+            "a ServerShutdown outside a swap must surface as Exit, got {msg:?}"
+        );
+        assert!(
+            start.elapsed() < SWAP_GRACE / 2,
+            "a genuine shutdown must not wait out the swap grace"
+        );
+    }
+
     /// Failed reconnect: the wire socket does not exist, so **both**
     /// [`RECONNECT_ATTEMPTS`] connects fail fast, `reattach` returns `Err`, sends the
     /// `None` sentinel, and the reader at EOF ends the stream.
@@ -3296,6 +3482,36 @@ mod tests {
             .unwrap();
         peer2.write_all(&payload).unwrap();
         assert!(matches!(rx.recv(), Some(MuxServerMsg::Other)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The old connection's `ServerShutdown { "detached" }` during a swap never
+    /// reaches the pane-exit layer either: no probe, no `Exit`, the stream
+    /// carries on over the new connection.
+    #[test]
+    fn in_flight_swap_detached_shutdown_is_adopted_not_probed() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        swap_tx.send(Some(read2)).unwrap();
+        detached_reply(&mut peer1);
+        let inner = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(true)),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rx = PaneExitReceiver::new(
+            inner,
+            FixedProbe {
+                state: PaneState::Present,
+                calls: Arc::clone(&calls),
+            },
+        );
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Render(_))));
         assert_eq!(calls.load(Ordering::SeqCst), 0);
     }
 
