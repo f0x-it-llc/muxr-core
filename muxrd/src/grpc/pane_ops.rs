@@ -180,6 +180,7 @@ impl MuxrService {
             &self.control,
             &req.session,
             &req.connection_id,
+            backend.supports_relay_create(),
             "NewPane",
             move |reply| crate::relay::RelayControl::NewPane {
                 floating,
@@ -840,9 +841,11 @@ mod tests {
 
     use crate::cli::BackendKind;
     use crate::grpc::helpers::create_test_support::{
-        HERDR, RecordingCreates, ZELLIJ, answer_create, created, relay,
+        HERDR, MULTIBYTE_ID, RecordingCreates, ZELLIJ, answer_create, created,
+        created_not_attached, evaluate_log_arguments, relay,
     };
-    use crate::multiplexer::CreateUnsupported;
+    use crate::grpc::helpers::{CREATE_OUTCOME_UNKNOWN, CREATED_NOT_ATTACHED};
+    use crate::multiplexer::CreateOutcomeUnknown;
 
     fn new_pane_on(session: &str, connection_id: &str, read_only: bool) -> Request<NewPaneReq> {
         let mut req = Request::new(NewPaneReq {
@@ -960,17 +963,16 @@ mod tests {
         assert!(backend.calls().is_empty());
     }
 
-    /// zellij: the relay's sender cannot create (`CreateUnsupported`), so the
-    /// request takes the backend path it always took.
+    /// zellij has no relay-routed create, and the handler knows it from the
+    /// backend's capability alone: a create carrying a LIVE connection_id sends
+    /// nothing to that relay (so a busy relay loop cannot delay or fail it) and
+    /// takes the backend path it always took.
     #[tokio::test]
-    async fn new_pane_on_zellij_falls_back_when_the_relay_cannot_create() {
-        let backend = Arc::new(RecordingCreates::default());
+    async fn new_pane_on_zellij_with_a_live_connection_id_skips_the_relay() {
+        let backend = Arc::new(RecordingCreates::zellij());
         let service =
             crate::grpc::helpers::create_test_support::service(BackendKind::Zellij, &backend);
-        let zellij_relay = answer_create(
-            relay(&service, "conn-z", ZELLIJ, false),
-            Some(Err(anyhow::Error::new(CreateUnsupported { op: "NewPane" }))),
-        );
+        let mut zellij_relay = relay(&service, "conn-z", ZELLIJ, false);
 
         let ack = service
             .new_pane_impl(new_pane_on(ZELLIJ, "conn-z", false))
@@ -978,11 +980,14 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        zellij_relay.await.unwrap();
         assert!(ack.ok);
         assert_eq!(
             backend.calls(),
             vec!["new_pane test floating=false name=Some(\"build\")".to_owned()]
+        );
+        assert!(
+            zellij_relay.try_recv().is_err(),
+            "nothing may be sent to a relay that cannot create"
         );
     }
 
@@ -990,7 +995,7 @@ mod tests {
     /// real discriminator there) — the backend path, as today.
     #[tokio::test]
     async fn new_pane_on_zellij_with_a_stale_connection_id_takes_the_backend_path() {
-        let backend = Arc::new(RecordingCreates::default());
+        let backend = Arc::new(RecordingCreates::zellij());
         let service =
             crate::grpc::helpers::create_test_support::service(BackendKind::Zellij, &backend);
 
@@ -1045,6 +1050,84 @@ mod tests {
         caller.await.unwrap();
         assert!(!ack.ok);
         assert!(ack.error.contains("dropped"), "{}", ack.error);
+        assert!(backend.calls().is_empty());
+    }
+
+    /// The split landed but the re-attach to it failed: the ack must say the
+    /// pane EXISTS — `info` names it exactly as a success would, the error
+    /// carries the stable prefix — so a client never retries into a duplicate.
+    #[tokio::test]
+    async fn new_pane_created_but_not_attached_names_the_created_pane() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created_not_attached("ws-b", 7, 42))),
+        );
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok, "the connection did not follow the pane");
+        assert_eq!(ack.info, "terminal_42", "the created pane, success format");
+        assert!(ack.error.starts_with(CREATED_NOT_ATTACHED), "{}", ack.error);
+        assert!(backend.calls().is_empty(), "never created a second time");
+    }
+
+    /// A create whose call broke off mid-flight cannot say whether the pane
+    /// exists: the ack says the outcome is unknown, never that nothing happened.
+    #[tokio::test]
+    async fn new_pane_with_an_unknown_outcome_says_so() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Err(anyhow::Error::new(CreateOutcomeUnknown {
+                op: "NewPane",
+                cause: "herdr pane.split call broke off: read timed out".to_owned(),
+            }))),
+        );
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok);
+        assert!(
+            ack.error.starts_with(CREATE_OUTCOME_UNKNOWN),
+            "{}",
+            ack.error
+        );
+        assert!(backend.calls().is_empty());
+    }
+
+    /// A client-supplied connection_id whose 8th byte sits inside a multibyte
+    /// character is logged (truncated) on both the request and the fail-closed
+    /// path; neither may panic.
+    #[tokio::test]
+    async fn new_pane_with_a_multibyte_connection_id_does_not_panic() {
+        evaluate_log_arguments();
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, MULTIBYTE_ID, false))
+            .await
+            .expect("a refusal is an ack")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
         assert!(backend.calls().is_empty());
     }
 }

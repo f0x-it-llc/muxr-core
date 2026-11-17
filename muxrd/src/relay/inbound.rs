@@ -8,8 +8,8 @@ use tonic::Streaming;
 use tokio::sync::mpsc;
 
 use crate::multiplexer::{
-    CreateUnsupported, CreatedView, FullscreenHint, MuxBackend, MuxMouseKind, MuxSender,
-    PaneFullscreenContext, PaneRef,
+    CreateOutcome, CreateOutcomeUnknown, CreateUnsupported, CreatedView, FullscreenHint,
+    MuxBackend, MuxMouseKind, MuxSender, PaneFullscreenContext, PaneRef,
 };
 use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
@@ -97,6 +97,10 @@ pub(crate) async fn inbound_loop(
     // The guard lives for the body of this task; on any exit path its Drop
     // signals + joins the reader thread.
     let _guard = guard;
+    // Declared AFTER `_guard`, so it drops FIRST: on every exit path the
+    // backend's receiver learns the relay is ending the stream itself before the
+    // guard nudges the reader awake (herdr then runs no pane-exit probe).
+    let _teardown = RelayTeardown(sender.relay_teardown_flag());
 
     // FX-QUERY: monotonic sequence id stamped on each layout query so the render
     // thread can order/replace and so logs are correlatable.
@@ -392,9 +396,7 @@ pub(crate) async fn inbound_loop(
                                 "relay inbound [{session}]: NewPane op panicked — \
                                  tearing down stream"
                             );
-                            let _ = reply.send(Err(anyhow::anyhow!(
-                                "NewPane op panicked; stream torn down"
-                            )));
+                            let _ = reply.send(Err(op_died("NewPane")));
                             break;
                         }
                     }
@@ -410,9 +412,7 @@ pub(crate) async fn inbound_loop(
                                 "relay inbound [{session}]: NewTab op panicked — \
                                  tearing down stream"
                             );
-                            let _ = reply.send(Err(anyhow::anyhow!(
-                                "NewTab op panicked; stream torn down"
-                            )));
+                            let _ = reply.send(Err(op_died("NewTab")));
                             break;
                         }
                     }
@@ -428,9 +428,7 @@ pub(crate) async fn inbound_loop(
                                 "relay inbound [{session}]: CreateSpace op panicked — \
                                  tearing down stream"
                             );
-                            let _ = reply.send(Err(anyhow::anyhow!(
-                                "CreateSpace op panicked; stream torn down"
-                            )));
+                            let _ = reply.send(Err(op_died("CreateSpace")));
                             break;
                         }
                     }
@@ -598,25 +596,51 @@ fn read_only_denies(cmd: &RelayControl) -> Option<&'static str> {
     }
 }
 
+// ─── Relay teardown signal ──────────────────────────────────────────────────
+
+/// Raises the backend's [`MuxSender::relay_teardown_flag`] when dropped — that
+/// is, when the inbound loop ends on any path. Declared after the
+/// [`ShutdownGuard`] binding so it drops before it.
+struct RelayTeardown(Option<Arc<std::sync::atomic::AtomicBool>>);
+
+impl Drop for RelayTeardown {
+    fn drop(&mut self) {
+        if let Some(flag) = &self.0 {
+            flag.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 // ─── Relay-routed creates ───────────────────────────────────────────────────
+
+/// The reply for a create op that panicked on the blocking pool: it may have
+/// created the object before it died, so the outcome is unknown.
+fn op_died(op: &'static str) -> anyhow::Error {
+    anyhow::Error::new(CreateOutcomeUnknown {
+        op,
+        cause: "the op panicked mid-flight; stream torn down".to_owned(),
+    })
+}
 
 /// Record where a successful create left this connection, log the outcome, and
 /// fulfil the RPC's reply.
 ///
-/// On success the connection now renders the new pane, in its tab and space, so
-/// all three are recorded (keyed by `connection_id`, so a co-attached relay's
-/// slot is never touched). A [`CreateUnsupported`] answer is not a failure — the
-/// RPC falls back to the ephemeral backend path — so it is logged at `debug!`.
+/// When the connection followed the create ([`CreateOutcome::Attached`]) it now
+/// renders the new pane, in its tab and space, so all three are recorded (keyed
+/// by `connection_id`, so a co-attached relay's slot is never touched). A create
+/// it could not follow records nothing: the re-point failure is ending this
+/// stream. A [`CreateUnsupported`] answer is not a failure — a backstop the RPC
+/// treats as "take the ephemeral backend path" — so it is logged at `debug!`.
 fn finish_create(
     op: &str,
-    result: anyhow::Result<CreatedView>,
+    result: anyhow::Result<CreateOutcome>,
     reply: CreateReply,
     view_state: &ViewStateRegistry,
     connection_id: &str,
     session: &str,
 ) {
     match &result {
-        Ok(view) => {
+        Ok(CreateOutcome::Attached(view)) => {
             log::info!(
                 "relay inbound [{session}]: {op} landed — now on pane {} (tab {}, space '{}')",
                 view.pane.id,
@@ -626,6 +650,15 @@ fn finish_create(
             if let Some(mut entry) = view_state.get_mut(connection_id) {
                 record_created_view(&mut entry.state, view);
             }
+        }
+        Ok(CreateOutcome::CreatedNotAttached { view, cause }) => {
+            log::warn!(
+                "relay inbound [{session}]: {op} created pane {} (tab {}, space '{}') but this \
+                 connection could not follow it: {cause}",
+                view.pane.id,
+                view.tab_id,
+                view.space_id
+            );
         }
         Err(e) if CreateUnsupported::is(e) => {
             log::debug!("relay inbound [{session}]: {op} unsupported by this sender: {e}");
@@ -1436,6 +1469,9 @@ mod tests {
         created: Option<CreatedView>,
         /// Every create call that reached this sender.
         creates: Arc<Mutex<Vec<String>>>,
+        /// What `relay_teardown_flag` hands the inbound loop (`None`: the trait
+        /// default).
+        teardown: Option<Arc<AtomicBool>>,
     }
 
     impl FakeSender {
@@ -1454,14 +1490,16 @@ mod tests {
                 toggles: Arc::new(Mutex::new(Vec::new())),
                 created: None,
                 creates: Arc::new(Mutex::new(Vec::new())),
+                teardown: None,
             }
         }
 
         /// Record one create and answer it as configured.
-        fn create(&self, call: String, op: &'static str) -> anyhow::Result<CreatedView> {
+        fn create(&self, call: String, op: &'static str) -> anyhow::Result<CreateOutcome> {
             self.creates.lock().unwrap().push(call);
             self.created
                 .clone()
+                .map(CreateOutcome::Attached)
                 .ok_or_else(|| anyhow::Error::new(CreateUnsupported { op }))
         }
     }
@@ -1513,16 +1551,16 @@ mod tests {
             &mut self,
             floating: bool,
             name: Option<String>,
-        ) -> anyhow::Result<CreatedView> {
+        ) -> anyhow::Result<CreateOutcome> {
             self.create(
                 format!("new_pane floating={floating} name={name:?}"),
                 "NewPane",
             )
         }
-        fn new_tab(&mut self, name: Option<String>) -> anyhow::Result<CreatedView> {
+        fn new_tab(&mut self, name: Option<String>) -> anyhow::Result<CreateOutcome> {
             self.create(format!("new_tab name={name:?}"), "NewTab")
         }
-        fn create_space(&mut self, label: Option<String>) -> anyhow::Result<CreatedView> {
+        fn create_space(&mut self, label: Option<String>) -> anyhow::Result<CreateOutcome> {
             self.create(format!("create_space label={label:?}"), "CreateSpace")
         }
         fn box_clone(&self) -> Box<dyn MuxSender> {
@@ -1542,7 +1580,11 @@ mod tests {
                 toggles: self.toggles.clone(),
                 created: self.created.clone(),
                 creates: self.creates.clone(),
+                teardown: self.teardown.clone(),
             })
+        }
+        fn relay_teardown_flag(&self) -> Option<Arc<AtomicBool>> {
+            self.teardown.clone()
         }
     }
 
@@ -2244,6 +2286,20 @@ mod tests {
         backend: NoBackend,
         sender: FakeSender,
     ) -> Rig {
+        let receiver: Box<dyn MuxReceiver> = Box::new(ScriptedRx {
+            msgs: script.into(),
+            park,
+        });
+        spawn_rig_on(receiver, client_ends, backend, sender)
+    }
+
+    /// [`spawn_rig_with`] over a caller-built receiver.
+    fn spawn_rig_on(
+        receiver: Box<dyn MuxReceiver>,
+        client_ends: bool,
+        backend: NoBackend,
+        sender: FakeSender,
+    ) -> Rig {
         let clients = crate::client_count::SessionClients::new();
         let client_guard = clients.attach("s");
         let control: ControlRegistry = Arc::new(dashmap::DashMap::new());
@@ -2269,10 +2325,6 @@ mod tests {
         let (tx, outbound) = mpsc::channel(8);
         let stop = Arc::new(AtomicBool::new(false));
         let (query_tx, query_rx) = std::sync::mpsc::channel::<InFlightQuery>();
-        let receiver: Box<dyn MuxReceiver> = Box::new(ScriptedRx {
-            msgs: script.into(),
-            park,
-        });
         let reader_stop = stop.clone();
         let reader =
             std::thread::spawn(move || render_loop(receiver, tx, reader_stop, "s", query_rx));
@@ -2481,7 +2533,7 @@ mod tests {
             .expect("the reply must not be dropped")
             .expect("the create must succeed");
 
-        assert_eq!(answered, view);
+        assert_eq!(answered, CreateOutcome::Attached(view));
         assert_eq!(
             *creates.lock().unwrap(),
             vec!["new_pane floating=false name=Some(\"build\")".to_owned()]
@@ -2524,6 +2576,61 @@ mod tests {
         assert_eq!(state.active_tab, None);
         assert_eq!(state.current_space, None);
         let _ = tokio::time::timeout(Duration::from_secs(5), rig.task).await;
+    }
+
+    // ─── Relay-initiated end: the teardown flag ──────────────────────────────
+
+    /// A receiver that, like herdr's, ends its stream only once the relay tears
+    /// it down, and records whether the backend's teardown flag was already
+    /// raised at that moment (giving up after 3 s with whatever it saw).
+    struct TeardownWatchRx {
+        flag: Arc<AtomicBool>,
+        raised_at_end: Arc<Mutex<Option<bool>>>,
+    }
+
+    impl MuxReceiver for TeardownWatchRx {
+        fn recv(&mut self) -> Option<MuxServerMsg> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while !self.flag.load(std::sync::atomic::Ordering::SeqCst)
+                && std::time::Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            *self.raised_at_end.lock().unwrap() =
+                Some(self.flag.load(std::sync::atomic::Ordering::SeqCst));
+            None
+        }
+    }
+
+    /// The client detaches: the relay ends the stream itself, so the backend's
+    /// teardown flag must be raised BEFORE the reader's stream ends — that is
+    /// what lets herdr's pane-exit probe skip the control round trip. Fails
+    /// without the inbound loop's teardown signal (the flag is never raised).
+    #[tokio::test]
+    async fn a_relay_initiated_end_raises_the_teardown_flag_before_the_stream_ends() {
+        let flag = Arc::new(AtomicBool::new(false));
+        let raised_at_end = Arc::new(Mutex::new(None));
+        let receiver: Box<dyn MuxReceiver> = Box::new(TeardownWatchRx {
+            flag: Arc::clone(&flag),
+            raised_at_end: Arc::clone(&raised_at_end),
+        });
+        let sender = FakeSender {
+            teardown: Some(Arc::clone(&flag)),
+            ..FakeSender::plain()
+        };
+
+        // `client_ends`: the client closes its request stream at once.
+        let rig = spawn_rig_on(receiver, true, NoBackend::default(), sender);
+        tokio::time::timeout(Duration::from_secs(10), rig.task)
+            .await
+            .expect("the relay must tear down")
+            .expect("the inbound task must not panic");
+
+        assert_eq!(
+            *raised_at_end.lock().unwrap(),
+            Some(true),
+            "the teardown flag must be raised before the reader's stream ends"
+        );
     }
 
     // ─── Fullscreen toggle resolution ────────────────────────────────────────

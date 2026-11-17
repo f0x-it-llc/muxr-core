@@ -56,11 +56,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use muxrd::multiplexer::{
-    AgentSummary, HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind, MuxReceiver, MuxSender,
-    MuxServerMsg, PaneRef, ResumeTarget,
+    AgentSummary, CreateOutcome, CreatedView, HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind,
+    MuxReceiver, MuxSender, MuxServerMsg, PaneRef, ResumeTarget,
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+/// A relay-routed create the connection must have followed: the smoke tests
+/// treat a `CreatedNotAttached` (created, but the re-point failed) as a failure.
+trait Followed {
+    fn followed(self) -> CreatedView;
+}
+
+impl Followed for CreateOutcome {
+    fn followed(self) -> CreatedView {
+        match self {
+            CreateOutcome::Attached(view) => view,
+            CreateOutcome::CreatedNotAttached { view, cause } => {
+                panic!("created {view:?} but the relay could not follow it: {cause}")
+            }
+        }
+    }
+}
 
 /// Construct a `HerdrBackend` from the process environment.
 ///
@@ -1434,7 +1451,8 @@ fn smoke_relay_new_pane_lands_in_the_relays_space_and_keeps_daemon_focus() {
 
     let view = sender
         .new_pane(false, None)
-        .expect("relay new_pane() failed");
+        .expect("relay new_pane() failed")
+        .followed();
     println!("[herdr smoke] relay NewPane → {view:?} (daemon focus {focused:?})");
 
     assert_eq!(
@@ -1481,7 +1499,8 @@ fn smoke_relay_new_tab_lands_in_the_relays_space_and_keeps_daemon_focus() {
 
     let view = sender
         .new_tab(Some(marker("tab")))
-        .expect("relay new_tab() failed");
+        .expect("relay new_tab() failed")
+        .followed();
     println!("[herdr smoke] relay NewTab → {view:?} (daemon focus {focused:?})");
 
     assert_eq!(
@@ -1534,7 +1553,8 @@ fn smoke_relay_create_space_switches_the_relay_and_keeps_daemon_focus() {
 
     let view = sender
         .create_space(Some(test_session_name()))
-        .expect("relay create_space() failed");
+        .expect("relay create_space() failed")
+        .followed();
     println!("[herdr smoke] relay CreateSpace → {view:?} (daemon focus {focused:?})");
 
     assert!(
@@ -1635,13 +1655,15 @@ fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
     // follows. A survives B's exit.
     let space = sender
         .create_space(Some(test_session_name()))
-        .expect("relay create_space() failed");
+        .expect("relay create_space() failed")
+        .followed();
     let survivor = space.pane;
     let mark = probe.frames();
     assert!(probe.frames_grow_past(mark), "stream must follow the space");
     let doomed = sender
         .new_pane(false, None)
-        .expect("relay new_pane() failed");
+        .expect("relay new_pane() failed")
+        .followed();
     assert_ne!(doomed.pane.id, survivor.id, "a second pane must exist");
     let mark = probe.frames();
     assert!(

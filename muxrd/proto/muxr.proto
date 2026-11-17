@@ -642,6 +642,17 @@ message NewPaneReq {
   // On herdr a live id splits THAT connection's attached pane without moving
   // herdr's focus and re-points that stream at the new pane; a non-empty id
   // naming no live connection is refused ("reattach required").
+  // Answer contract for a routed create (live connection_id on herdr):
+  //  - ok:true, info = "terminal_<id>": created, and this connection now shows it;
+  //  - ok:false, info = "terminal_<id>" (same format), error starting with
+  //    "created-not-attached:": the pane WAS created but this connection could
+  //    not be re-pointed at it — do not create it again; reattach to reach it;
+  //  - ok:false, info empty, error starting with "create-outcome-unknown:": the
+  //    server cannot tell whether the pane was created (e.g. no answer in time)
+  //    — re-read the layout before retrying;
+  //  - any other ok:false: nothing was created.
+  // On zellij (no per-connection create) the id is not used for routing and
+  // the request takes the legacy path.
   string connection_id = 4;
 }
 
@@ -685,6 +696,17 @@ message NewTabReq {
   // On herdr a live id creates the tab in THAT connection's space without
   // moving herdr's focus and re-points that stream at the new tab's pane; a
   // non-empty id naming no live connection is refused ("reattach required").
+  // Answer contract for a routed create (live connection_id on herdr):
+  //  - ok:true, info = the new tab id: created, and this connection now shows it;
+  //  - ok:false, info = the new tab id (same format), error starting with
+  //    "created-not-attached:": the tab WAS created but this connection could
+  //    not be re-pointed at it — do not create it again; reattach to reach it;
+  //  - ok:false, info empty, error starting with "create-outcome-unknown:": the
+  //    server cannot tell whether the tab was created (e.g. no answer in time)
+  //    — re-read the layout before retrying;
+  //  - any other ok:false: nothing was created.
+  // On zellij (no per-connection create) the id is not used for routing and
+  // the request takes the legacy path.
   string connection_id = 3;
 }
 
@@ -769,6 +791,17 @@ message CreateSpaceReq {
   // On herdr a live id creates the space without moving herdr's focus and
   // switches THAT connection's stream to it; a non-empty id naming no live
   // connection is refused ("reattach required"); empty = legacy path.
+  // Answer contract for a routed create (live connection_id on herdr):
+  //  - ok:true, info = the new space id: created, and this connection now shows it;
+  //  - ok:false, info = the new space id (same format), error starting with
+  //    "created-not-attached:": the space WAS created but this connection could
+  //    not be re-pointed at it — do not create it again; reattach to reach it;
+  //  - ok:false, info empty, error starting with "create-outcome-unknown:": the
+  //    server cannot tell whether the space was created (e.g. no answer in time)
+  //    — re-read the layout before retrying;
+  //  - any other ok:false: nothing was created.
+  // On zellij (no per-connection create) the id is not used for routing and
+  // the request takes the legacy path.
   string connection_id = 3;
 }
 

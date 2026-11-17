@@ -167,12 +167,35 @@ pub(super) fn try_route_control(
 
 // ─── Relay-routed creates ─────────────────────────────────────────────────────
 
-/// How long a relay-routed create (`NewPane` / `NewTab` / `CreateSpace`) waits
-/// for the relay's outcome. Same budget as a routed `SwitchSpace`
-/// (`space_ops::SWITCH_SPACE_TIMEOUT`): a create is one or two bounded herdr
-/// control calls plus the same release-then-reconnect re-attach a space switch
-/// does.
-pub(super) const CREATE_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(18);
+/// How long a relay-routed re-point RPC — a create (`NewPane` / `NewTab` /
+/// `CreateSpace`) or a `SwitchSpace` — waits for the relay's answer.
+///
+/// Derived from the path's real worst case, never a copied literal:
+/// [`ROUTED_REPOINT_WORST_CASE`](crate::multiplexer::ROUTED_REPOINT_WORST_CASE)
+/// is the herdr sender's own control-call timeouts plus its re-attach attempts
+/// (51 s with today's timeouts), and [`RELAY_HOP_SLACK`] covers the channel hops
+/// and blocking-pool scheduling around it. One definition for both RPCs: a
+/// `SwitchSpace` makes one control call before its re-attach, a create at most
+/// two, so the create's bound covers it.
+pub(super) const ROUTED_REPOINT_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
+    crate::multiplexer::ROUTED_REPOINT_WORST_CASE.as_secs() + RELAY_HOP_SLACK.as_secs(),
+);
+
+/// Slack on top of the relay op's own worst case for the control-channel send,
+/// the blocking-pool hand-off and the oneshot reply.
+const RELAY_HOP_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Stable prefix of a create ack's `error` when the object WAS created but the
+/// caller's connection could not be re-pointed at it. `info` then names the
+/// created object exactly as a success would. Wire contract (see the
+/// `NewPaneReq` / `NewTabReq` / `CreateSpaceReq` comments in `muxr.proto`).
+pub(super) const CREATED_NOT_ATTACHED: &str = "created-not-attached:";
+
+/// Stable prefix of a create ack's `error` when it cannot be said whether the
+/// object was created (the relay did not answer within
+/// [`ROUTED_REPOINT_REPLY_TIMEOUT`], or the create broke off mid-call). Wire
+/// contract, as [`CREATED_NOT_ATTACHED`].
+pub(super) const CREATE_OUTCOME_UNKNOWN: &str = "create-outcome-unknown:";
 
 /// The fail-closed ack for a request naming no live connection.
 fn no_matching_connection() -> ProtoAck {
@@ -201,19 +224,30 @@ pub(super) enum CreateRoute {
 /// is **no session-scoped fallback** (a create must never land in, or re-point,
 /// a co-attached client's view):
 ///
+/// - **backend without relay-routed creates** (`relay_create` is the backend's
+///   [`supports_relay_create`](crate::multiplexer::MuxBackend::supports_relay_create);
+///   zellij) → [`CreateRoute::Fallback`] at once, whatever the `connection_id`:
+///   the relay is never asked, so a busy relay loop cannot delay or fail it;
 /// - **empty `connection_id`** → [`CreateRoute::Fallback`]: today's behaviour,
 ///   byte for byte;
 /// - **live relay** → `make_cmd` is sent to it and its reply awaited (bounded by
-///   [`CREATE_REPLY_TIMEOUT`]): a created view answers `ok:true` with `info(view)`,
-///   a [`CreateUnsupported`] answer (zellij's sender) falls back, any other error
-///   answers `ok:false` with it, and a timeout answers `ok:false`;
+///   [`ROUTED_REPOINT_REPLY_TIMEOUT`]):
+///   - created and followed → `ok:true`, `info(view)`;
+///   - created, re-point failed → `ok:false`, the SAME `info(view)`, and an error
+///     starting [`CREATED_NOT_ATTACHED`];
+///   - outcome unknown (a timeout, or the relay's
+///     [`CreateOutcomeUnknown`](crate::multiplexer::CreateOutcomeUnknown)) →
+///     `ok:false`, error starting [`CREATE_OUTCOME_UNKNOWN`];
+///   - nothing created → `ok:false` with the cause; a
+///     [`CreateUnsupported`] answer (a backstop: the capability said yes, the
+///     sender no) falls back;
 /// - **no live relay** on a collapsed (herdr) session → the fail-closed
 ///   `"reattach required (no matching connection)"` ack, with nothing created;
-///   on a non-collapsed (zellij) session → fall back, as today.
+///   on a non-collapsed session → fall back, as today.
 ///
-/// A relay that goes away before answering (dropped reply: teardown, or the
-/// read-only gate) applied nothing, so herdr answers `ok:false` and zellij falls
-/// back. The read-only gate itself is the caller's job and runs first
+/// A relay that goes away before answering (dropped reply: teardown before the
+/// op started, or the read-only gate) applied nothing, so herdr answers
+/// `ok:false`. The read-only gate itself is the caller's job and runs first
 /// ([`reject_if_read_only`]).
 ///
 /// [`CreateUnsupported`]: crate::multiplexer::CreateUnsupported
@@ -221,16 +255,55 @@ pub(super) async fn route_create<C, I>(
     control: &crate::relay::ControlRegistry,
     session: &str,
     connection_id: &str,
+    relay_create: bool,
     rpc: &'static str,
     make_cmd: C,
     info: I,
 ) -> CreateRoute
 where
     C: FnOnce(
-        tokio::sync::oneshot::Sender<anyhow::Result<crate::multiplexer::CreatedView>>,
+        tokio::sync::oneshot::Sender<anyhow::Result<crate::multiplexer::CreateOutcome>>,
     ) -> crate::relay::RelayControl,
     I: FnOnce(&crate::multiplexer::CreatedView) -> String,
 {
+    route_create_within(
+        ROUTED_REPOINT_REPLY_TIMEOUT,
+        control,
+        session,
+        connection_id,
+        relay_create,
+        rpc,
+        make_cmd,
+        info,
+    )
+    .await
+}
+
+/// [`route_create`] with the reply budget as a parameter, so a test can drive
+/// the timeout path without waiting out the production budget.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn route_create_within<C, I>(
+    budget: std::time::Duration,
+    control: &crate::relay::ControlRegistry,
+    session: &str,
+    connection_id: &str,
+    relay_create: bool,
+    rpc: &'static str,
+    make_cmd: C,
+    info: I,
+) -> CreateRoute
+where
+    C: FnOnce(
+        tokio::sync::oneshot::Sender<anyhow::Result<crate::multiplexer::CreateOutcome>>,
+    ) -> crate::relay::RelayControl,
+    I: FnOnce(&crate::multiplexer::CreatedView) -> String,
+{
+    use crate::multiplexer::{CreateOutcome, CreateOutcomeUnknown, CreateUnsupported};
+
+    if !relay_create {
+        log::debug!("{rpc}: backend has no relay-routed create — ephemeral path");
+        return CreateRoute::Fallback;
+    }
     if connection_id.is_empty() {
         return CreateRoute::Fallback;
     }
@@ -263,42 +336,74 @@ where
         };
     }
 
-    match tokio::time::timeout(CREATE_REPLY_TIMEOUT, reply_rx).await {
-        Ok(Ok(Ok(view))) => CreateRoute::Answered(ProtoAck {
+    let failed = |error: String, info: String| {
+        CreateRoute::Answered(ProtoAck {
+            ok: false,
+            error,
+            info,
+        })
+    };
+    match tokio::time::timeout(budget, reply_rx).await {
+        Ok(Ok(Ok(CreateOutcome::Attached(view)))) => CreateRoute::Answered(ProtoAck {
             ok: true,
             error: String::new(),
             info: info(&view),
         }),
-        Ok(Ok(Err(e))) if crate::multiplexer::CreateUnsupported::is(&e) => {
+        Ok(Ok(Ok(CreateOutcome::CreatedNotAttached { view, cause }))) => {
+            let created = info(&view);
+            log::warn!(
+                "{rpc}: created {created} for '{session}' but the relay could not follow it: \
+                 {cause}"
+            );
+            failed(
+                format!(
+                    "{CREATED_NOT_ATTACHED} {rpc} created {created} but could not re-point \
+                     this connection at it (reattach to reach it): {cause}"
+                ),
+                created,
+            )
+        }
+        Ok(Ok(Err(e))) if CreateUnsupported::is(&e) => {
             log::debug!("{rpc}: relay for '{session}' has no per-connection create ({e})");
             CreateRoute::Fallback
         }
+        Ok(Ok(Err(e))) if CreateOutcomeUnknown::is(&e) => {
+            log::warn!("{rpc}: relay for '{session}' cannot tell whether it created: {e:#}");
+            failed(outcome_unknown(rpc, &format!("{e:#}")), String::new())
+        }
         Ok(Ok(Err(e))) => {
             log::warn!("{rpc}: relay reported failure for '{session}': {e:#}");
-            CreateRoute::Answered(ProtoAck {
-                ok: false,
-                error: format!("{rpc} failed: {e:#}"),
-                info: String::new(),
-            })
+            failed(format!("{rpc} failed: {e:#}"), String::new())
         }
         Ok(Err(_cancelled)) if !collapsed => CreateRoute::Fallback,
         Ok(Err(_cancelled)) => {
             log::warn!("{rpc}: relay for '{session}' dropped the request unanswered");
-            CreateRoute::Answered(ProtoAck {
-                ok: false,
-                error: format!("relay connection dropped the {rpc} before applying it"),
-                info: String::new(),
-            })
+            failed(
+                format!("relay connection dropped the {rpc} before applying it"),
+                String::new(),
+            )
         }
         Err(_elapsed) => {
-            log::warn!("{rpc}: relay for '{session}' timed out after {CREATE_REPLY_TIMEOUT:?}");
-            CreateRoute::Answered(ProtoAck {
-                ok: false,
-                error: format!("{rpc}: timed out waiting for the relay"),
-                info: String::new(),
-            })
+            // The relay's op may still be running — and may still create and
+            // re-point. Say so: never a wording that implies nothing was created.
+            log::warn!("{rpc}: relay for '{session}' timed out after {budget:?}");
+            failed(
+                outcome_unknown(
+                    rpc,
+                    &format!("no answer from the relay within {}s", budget.as_secs()),
+                ),
+                String::new(),
+            )
         }
     }
+}
+
+/// The `error` of a create whose outcome is unknown.
+fn outcome_unknown(rpc: &str, why: &str) -> String {
+    format!(
+        "{CREATE_OUTCOME_UNKNOWN} {rpc} may or may not have been created ({why}); re-read the \
+         layout before retrying"
+    )
 }
 
 // ─── Read-only gate + ack helpers ──────────────────────────────────────────────
@@ -463,13 +568,21 @@ pub(super) fn pane_ref(target: &PaneTarget) -> PaneRef {
 /// logs — use this helper for all gRPC handler breadcrumbs.
 ///
 /// The slice length is clamped with `.min(id.len())` so that empty or short
-/// client-supplied ids (which may be 0–7 chars) never panic.
+/// client-supplied ids (which may be 0–7 chars) never panic, and floored to a
+/// char boundary so a multibyte character across byte 8 never panics either
+/// (the prefix is then shorter than 8 bytes).
 ///
 /// Caller combines the return value with a trailing `…` suffix in the log
 /// format string to visually indicate truncation, e.g.
 /// `"connection_id={}…", short_conn(&connection_id)`.
 pub(super) fn short_conn(id: &str) -> &str {
-    &id[..8.min(id.len())]
+    // Cut at the last char boundary at or below byte 8: the id is client-supplied,
+    // and a byte slice through a multibyte character panics.
+    let mut end = 8.min(id.len());
+    while !id.is_char_boundary(end) {
+        end -= 1;
+    }
+    &id[..end]
 }
 
 // ─── Proto ↔ BackendKind conversions ─────────────────────────────────────────
@@ -1118,6 +1231,74 @@ mod tests {
         assert_eq!(super::short_conn("12345678"), "12345678");
     }
 
+    #[test]
+    fn short_conn_never_cuts_through_a_multibyte_character() {
+        // `é` is two bytes (7 and 8): byte 8 is not a char boundary, so the
+        // prefix stops before it instead of panicking.
+        let id = "abcdefg\u{e9}xyz";
+        assert!(!id.is_char_boundary(8));
+        assert_eq!(super::short_conn(id), "abcdefg");
+        // A 4-byte character starting at byte 6 is dropped whole.
+        assert_eq!(super::short_conn("abcdef\u{1F600}"), "abcdef");
+        assert_eq!(
+            super::short_conn("\u{e9}\u{e9}\u{e9}\u{e9}\u{e9}"),
+            "\u{e9}\u{e9}\u{e9}\u{e9}"
+        );
+    }
+
+    // ─── route_create: reply budget and outcome-unknown ──────────────────────
+
+    /// The routed-create budget is derived from the path's worst case and
+    /// covers it; SwitchSpace shares the same definition.
+    #[test]
+    fn routed_repoint_reply_budget_covers_the_worst_case() {
+        assert!(ROUTED_REPOINT_REPLY_TIMEOUT > crate::multiplexer::ROUTED_REPOINT_WORST_CASE);
+        assert_eq!(
+            ROUTED_REPOINT_REPLY_TIMEOUT,
+            crate::multiplexer::ROUTED_REPOINT_WORST_CASE + RELAY_HOP_SLACK
+        );
+    }
+
+    /// A relay that does not answer within the budget may still create and
+    /// re-point: the ack must say the outcome is UNKNOWN (stable prefix), never
+    /// a wording that implies nothing was created.
+    #[tokio::test]
+    async fn a_timed_out_routed_create_answers_outcome_unknown() {
+        use super::create_test_support::{HERDR, RecordingCreates, relay, service};
+
+        let backend = std::sync::Arc::new(RecordingCreates::default());
+        let svc = service(BackendKind::Herdr, &backend);
+        // Registered and alive, but never answers (the receiver is held).
+        let _silent = relay(&svc, "conn-b", HERDR, false);
+
+        let route = route_create_within(
+            std::time::Duration::from_millis(50),
+            &svc.control,
+            HERDR,
+            "conn-b",
+            true,
+            "NewTab",
+            |reply| crate::relay::RelayControl::NewTab { name: None, reply },
+            |view| view.tab_id.to_string(),
+        )
+        .await;
+
+        let CreateRoute::Answered(ack) = route else {
+            panic!("a timed-out create must answer, not fall back");
+        };
+        assert!(!ack.ok);
+        assert!(
+            ack.error.starts_with(CREATE_OUTCOME_UNKNOWN),
+            "{}",
+            ack.error
+        );
+        assert!(ack.info.is_empty(), "no id is known");
+        assert!(
+            backend.calls().is_empty(),
+            "never retried down the backend path"
+        );
+    }
+
     // ─── reject_if_read_only tests ───────────────────────────────────────────
 
     #[test]
@@ -1276,8 +1457,8 @@ pub(super) mod create_test_support {
     use crate::cli::BackendKind;
     use crate::grpc::MuxrService;
     use crate::multiplexer::{
-        ActionAck, BackendSet, CreatedView, DualHandle, LayoutSnapshot, MuxBackend, PaneRef,
-        ResizeDir, ResizeKind, ScrollDir,
+        ActionAck, BackendSet, CreateOutcome, CreatedView, DualHandle, LayoutSnapshot, MuxBackend,
+        PaneRef, ResizeDir, ResizeKind, ScrollDir,
     };
     use crate::relay::{ControlEntry, RelayControl};
 
@@ -1287,12 +1468,24 @@ pub(super) mod create_test_support {
     pub(crate) const ZELLIJ: &str = "zellij:test";
 
     /// A backend recording every create that reaches it. Anything else panics.
+    ///
+    /// `default()` plays herdr (spaces, relay-routed creates); [`Self::zellij`]
+    /// plays zellij (neither).
     #[derive(Debug, Default)]
     pub(crate) struct RecordingCreates {
         calls: Mutex<Vec<String>>,
+        zellij_like: bool,
     }
 
     impl RecordingCreates {
+        /// A zellij-like backend: no spaces, no relay-routed creates.
+        pub(crate) fn zellij() -> Self {
+            Self {
+                zellij_like: true,
+                ..Self::default()
+            }
+        }
+
         /// The creates that reached the backend, in order.
         pub(crate) fn calls(&self) -> Vec<String> {
             self.calls.lock().expect("calls mutex").clone()
@@ -1311,7 +1504,7 @@ pub(super) mod create_test_support {
 
     impl MuxBackend for RecordingCreates {
         fn supports_spaces(&self) -> bool {
-            true
+            !self.zellij_like
         }
         fn new_pane(
             &self,
@@ -1409,6 +1602,18 @@ pub(super) mod create_test_support {
         }
     }
 
+    /// Turn log-argument evaluation on for this test process: `log` macros only
+    /// evaluate their arguments (`short_conn(..)` among them) above the max
+    /// level, which is `Off` until something raises it. No logger is installed,
+    /// so nothing is printed.
+    pub(crate) fn evaluate_log_arguments() {
+        log::set_max_level(log::LevelFilter::Trace);
+    }
+
+    /// A client-supplied connection_id whose byte 8 falls inside a multibyte
+    /// character (`é` spans bytes 7–8), naming no live relay.
+    pub(crate) const MULTIBYTE_ID: &str = "abcdefg\u{e9}-not-a-live-connection";
+
     /// A service serving `backend` as its only backend, of `kind`.
     pub(crate) fn service(kind: BackendKind, backend: &Arc<RecordingCreates>) -> MuxrService {
         let backend: Arc<dyn MuxBackend> = backend.clone();
@@ -1436,11 +1641,25 @@ pub(super) mod create_test_support {
     }
 
     /// A created view: pane `pane` in tab `tab` of space `space`.
-    pub(crate) fn created(space: &str, tab: u64, pane: u32) -> CreatedView {
+    pub(crate) fn view(space: &str, tab: u64, pane: u32) -> CreatedView {
         CreatedView {
             space_id: space.to_owned(),
             tab_id: tab,
             pane: PaneRef::terminal(pane),
+        }
+    }
+
+    /// A create the connection followed: pane `pane` in tab `tab` of `space`.
+    pub(crate) fn created(space: &str, tab: u64, pane: u32) -> CreateOutcome {
+        CreateOutcome::Attached(view(space, tab, pane))
+    }
+
+    /// A create that landed but whose re-point failed — the herdr sender's answer
+    /// when its re-attach to the new pane fails.
+    pub(crate) fn created_not_attached(space: &str, tab: u64, pane: u32) -> CreateOutcome {
+        CreateOutcome::CreatedNotAttached {
+            view: view(space, tab, pane),
+            cause: "herdr reattach: all 2 connect+handshake attempts failed".to_owned(),
         }
     }
 
@@ -1450,7 +1669,7 @@ pub(super) mod create_test_support {
     /// return what the command carried.
     pub(crate) fn answer_create(
         mut rx: mpsc::UnboundedReceiver<RelayControl>,
-        outcome: Option<anyhow::Result<CreatedView>>,
+        outcome: Option<anyhow::Result<CreateOutcome>>,
     ) -> tokio::task::JoinHandle<String> {
         tokio::spawn(async move {
             let (carried, reply) = match rx.recv().await {

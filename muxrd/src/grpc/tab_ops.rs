@@ -44,6 +44,7 @@ impl MuxrService {
             &self.control,
             &req.session,
             &req.connection_id,
+            backend.supports_relay_create(),
             "NewTab",
             move |reply| crate::relay::RelayControl::NewTab {
                 name: routed_name,
@@ -454,10 +455,11 @@ mod tests {
 
     // ─── NewTab: routed through the caller's relay ───────────────────────────
 
+    use crate::grpc::helpers::CREATED_NOT_ATTACHED;
     use crate::grpc::helpers::create_test_support::{
-        self as support, HERDR, RecordingCreates, ZELLIJ, answer_create, created, relay,
+        self as support, HERDR, MULTIBYTE_ID, RecordingCreates, ZELLIJ, answer_create, created,
+        created_not_attached, evaluate_log_arguments, relay,
     };
-    use crate::multiplexer::CreateUnsupported;
 
     fn new_tab_on(session: &str, connection_id: &str, read_only: bool) -> Request<NewTabReq> {
         let mut req = Request::new(NewTabReq {
@@ -553,15 +555,14 @@ mod tests {
         assert!(backend.calls().is_empty());
     }
 
-    /// zellij: the relay cannot create, so the backend path runs as always.
+    /// zellij has no relay-routed create (the backend's capability says so): a
+    /// create with a LIVE connection_id sends nothing to the relay and takes the
+    /// backend path at once.
     #[tokio::test]
-    async fn new_tab_on_zellij_falls_back_when_the_relay_cannot_create() {
-        let backend = Arc::new(RecordingCreates::default());
+    async fn new_tab_on_zellij_with_a_live_connection_id_skips_the_relay() {
+        let backend = Arc::new(RecordingCreates::zellij());
         let service = support::service(BackendKind::Zellij, &backend);
-        let zellij_relay = answer_create(
-            relay(&service, "conn-z", ZELLIJ, false),
-            Some(Err(anyhow::Error::new(CreateUnsupported { op: "NewTab" }))),
-        );
+        let mut zellij_relay = relay(&service, "conn-z", ZELLIJ, false);
 
         let ack = service
             .new_tab_impl(new_tab_on(ZELLIJ, "conn-z", false))
@@ -569,11 +570,58 @@ mod tests {
             .unwrap()
             .into_inner();
 
-        zellij_relay.await.unwrap();
         assert!(ack.ok);
         assert_eq!(
             backend.calls(),
             vec!["new_tab test name=Some(\"logs\")".to_owned()]
         );
+        assert!(
+            zellij_relay.try_recv().is_err(),
+            "nothing may be sent to a relay that cannot create"
+        );
+    }
+
+    /// The tab landed but the re-attach to its pane failed: `info` names the
+    /// created tab exactly as a success would, and the error carries the stable
+    /// prefix, so a client never retries into a duplicate tab.
+    #[tokio::test]
+    async fn new_tab_created_but_not_attached_names_the_created_tab() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created_not_attached("ws-b", 9, 51))),
+        );
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok, "the connection did not follow the tab");
+        assert_eq!(ack.info, "9", "the created tab, success format");
+        assert!(ack.error.starts_with(CREATED_NOT_ATTACHED), "{}", ack.error);
+        assert!(backend.calls().is_empty(), "never created a second time");
+    }
+
+    /// A multibyte character across byte 8 of a client-supplied connection_id
+    /// must not panic the request or fail-closed log lines.
+    #[tokio::test]
+    async fn new_tab_with_a_multibyte_connection_id_does_not_panic() {
+        evaluate_log_arguments();
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, MULTIBYTE_ID, false))
+            .await
+            .expect("a refusal is an ack")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
+        assert!(backend.calls().is_empty());
     }
 }
