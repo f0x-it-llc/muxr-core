@@ -193,6 +193,7 @@ async fn main() -> Result<()> {
         .new_tab(NewTabReq {
             session: session.clone(),
             tab_name: "d2_newtab".to_owned(),
+            connection_id: String::new(),
         })
         .await
         .context("NewTab RPC failed")?
@@ -450,6 +451,7 @@ async fn main() -> Result<()> {
             .new_tab(NewTabReq {
                 session: "d2demo-renamed".to_owned(),
                 tab_name: String::new(),
+                connection_id: String::new(),
             })
             .await;
         check_permission_denied("NewTab", ro_new_tab, &mut pass);

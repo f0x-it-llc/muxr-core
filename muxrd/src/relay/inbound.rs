@@ -8,13 +8,14 @@ use tonic::Streaming;
 use tokio::sync::mpsc;
 
 use crate::multiplexer::{
-    FullscreenHint, MuxBackend, MuxMouseKind, MuxSender, PaneFullscreenContext, PaneRef,
+    CreateUnsupported, CreatedView, FullscreenHint, MuxBackend, MuxMouseKind, MuxSender,
+    PaneFullscreenContext, PaneRef,
 };
 use crate::proto::{ClientFrame, MouseInput, MouseKind, client_frame};
 
 use super::reader::ShutdownGuard;
 use super::types::{
-    AttachLease, ControlRegistry, FLOAT_QUERY_TIMEOUT, FloatingHint, InFlightQuery,
+    AttachLease, ControlRegistry, CreateReply, FLOAT_QUERY_TIMEOUT, FloatingHint, InFlightQuery,
     MAX_INPUT_FRAME_BYTES, QueryReply, QueryTx, RelayControl, RelayViewState,
     TOKEN_RECHECK_INTERVAL, ToggleFullscreenReply, ViewStateRegistry,
 };
@@ -42,8 +43,9 @@ const READER_EXIT_POLL: std::time::Duration = std::time::Duration::from_millis(2
 ///
 ///   *Dropped for read-only:* `Input` frames — the bytes land in the focused
 ///   pane's application — every non-wheel mouse class, which lands there exactly
-///   the same way, and `ToggleFullscreen`, which rewrites the layout the whole tab
-///   sees. On teardown a read-only relay still wakes its reader with
+///   the same way, `ToggleFullscreen`, which rewrites the layout the whole tab
+///   sees, and the `NewPane` / `NewTab` / `CreateSpace` creates, which add
+///   structure every client sees. On teardown a read-only relay still wakes its reader with
 ///   `ClientExited` rather than a resize nudge ([`ShutdownGuard`]).
 /// - **Major H (token re-validation):** the bearer token is re-checked every
 ///   [`TOKEN_RECHECK_INTERVAL`]; on revocation/expiry/error the loop breaks,
@@ -373,6 +375,75 @@ pub(crate) async fn inbound_loop(
                     handle_query_layout(&mut *sender, &query_tx, reply, seq, &session);
                 }
 
+                // The relay-routed create verbs. A read-only token never reaches
+                // these: `read_only_denies` drops them (each creates a pane, tab
+                // or space every client sees). Each runs its blocking create +
+                // release-then-reconnect on the blocking pool (as SwitchSpace
+                // does), records where it left this connection, and replies —
+                // a `CreateUnsupported` reply sends the RPC down the ephemeral
+                // backend path (zellij).
+                Some(RelayControl::NewPane { floating, name, reply }) => {
+                    let (returned, result) =
+                        run_sender_op(sender, move |s| s.new_pane(floating, name)).await;
+                    match returned {
+                        Some(s) => sender = s,
+                        None => {
+                            log::error!(
+                                "relay inbound [{session}]: NewPane op panicked — \
+                                 tearing down stream"
+                            );
+                            let _ = reply.send(Err(anyhow::anyhow!(
+                                "NewPane op panicked; stream torn down"
+                            )));
+                            break;
+                        }
+                    }
+                    finish_create("NewPane", result, reply, &view_state, &connection_id, &session);
+                }
+                Some(RelayControl::NewTab { name, reply }) => {
+                    let (returned, result) =
+                        run_sender_op(sender, move |s| s.new_tab(name)).await;
+                    match returned {
+                        Some(s) => sender = s,
+                        None => {
+                            log::error!(
+                                "relay inbound [{session}]: NewTab op panicked — \
+                                 tearing down stream"
+                            );
+                            let _ = reply.send(Err(anyhow::anyhow!(
+                                "NewTab op panicked; stream torn down"
+                            )));
+                            break;
+                        }
+                    }
+                    finish_create("NewTab", result, reply, &view_state, &connection_id, &session);
+                }
+                Some(RelayControl::CreateSpace { label, reply }) => {
+                    let (returned, result) =
+                        run_sender_op(sender, move |s| s.create_space(label)).await;
+                    match returned {
+                        Some(s) => sender = s,
+                        None => {
+                            log::error!(
+                                "relay inbound [{session}]: CreateSpace op panicked — \
+                                 tearing down stream"
+                            );
+                            let _ = reply.send(Err(anyhow::anyhow!(
+                                "CreateSpace op panicked; stream torn down"
+                            )));
+                            break;
+                        }
+                    }
+                    finish_create(
+                        "CreateSpace",
+                        result,
+                        reply,
+                        &view_state,
+                        &connection_id,
+                        &session,
+                    );
+                }
+
                 None => {
                     // Nothing to route: either every sender was dropped (registry
                     // entry already gone or being replaced) or `gate_control` just
@@ -493,7 +564,8 @@ fn floored_resize(r: &crate::proto::Resize) -> (u16, u16) {
 /// ([`RelayControl::SwitchSpace`]) — none of which moves any other client — and
 /// it may read ([`RelayControl::QueryLayout`]). It may not change the layout
 /// every client on the tab shares, which is why [`RelayControl::ToggleFullscreen`]
-/// is the one routed control it never gets to apply.
+/// and the three creates ([`RelayControl::NewPane`], [`RelayControl::NewTab`],
+/// [`RelayControl::CreateSpace`]) are the routed controls it never gets to apply.
 ///
 /// Returns the control's name when a read-only token must NOT apply it (the name
 /// goes in the drop log), or `None` when it may. The match is exhaustive on
@@ -502,10 +574,12 @@ fn floored_resize(r: &crate::proto::Resize) -> (u16, u16) {
 ///
 /// A *denied* control that carried a reply channel has that channel dropped by
 /// [`gate_control`], which the waiting RPC sees as a cancelled receiver rather
-/// than an error. The one denied control, `ToggleFullscreen`, carries an
-/// optional reply; its RPC handler (`grpc/pane_ops.rs`) reads a cancelled
-/// receiver as "nothing was applied" and answers `ok:false`, and in practice a
-/// read-only caller is rejected at the RPC gate before routing. A future denied
+/// than an error. Every denied control's RPC handler (`grpc/pane_ops.rs`,
+/// `grpc/tab_ops.rs`, `grpc/space_ops.rs`) reads a cancelled receiver as
+/// "nothing was applied" — answering `ok:false`, or for a create on a
+/// non-collapsed (zellij) session taking the ephemeral backend path it would
+/// have taken anyway — and in practice a read-only caller is rejected at the
+/// RPC gate before routing. A future denied
 /// variant whose caller cannot treat a cancelled receiver that way must be
 /// refused in its own arm, with an explicit reply, instead of here.
 fn read_only_denies(cmd: &RelayControl) -> Option<&'static str> {
@@ -515,7 +589,61 @@ fn read_only_denies(cmd: &RelayControl) -> Option<&'static str> {
         | RelayControl::SwitchSpace { .. }
         | RelayControl::QueryLayout { .. } => None,
         RelayControl::ToggleFullscreen { .. } => Some("ToggleFullscreen"),
+        // Creating a pane, tab or space adds structure every client sees. Their
+        // RPCs reject a read-only token before routing, and read a dropped reply
+        // as "nothing was created" (`ok:false`), so the drop here is safe.
+        RelayControl::NewPane { .. } => Some("NewPane"),
+        RelayControl::NewTab { .. } => Some("NewTab"),
+        RelayControl::CreateSpace { .. } => Some("CreateSpace"),
     }
+}
+
+// ─── Relay-routed creates ───────────────────────────────────────────────────
+
+/// Record where a successful create left this connection, log the outcome, and
+/// fulfil the RPC's reply.
+///
+/// On success the connection now renders the new pane, in its tab and space, so
+/// all three are recorded (keyed by `connection_id`, so a co-attached relay's
+/// slot is never touched). A [`CreateUnsupported`] answer is not a failure — the
+/// RPC falls back to the ephemeral backend path — so it is logged at `debug!`.
+fn finish_create(
+    op: &str,
+    result: anyhow::Result<CreatedView>,
+    reply: CreateReply,
+    view_state: &ViewStateRegistry,
+    connection_id: &str,
+    session: &str,
+) {
+    match &result {
+        Ok(view) => {
+            log::info!(
+                "relay inbound [{session}]: {op} landed — now on pane {} (tab {}, space '{}')",
+                view.pane.id,
+                view.tab_id,
+                view.space_id
+            );
+            if let Some(mut entry) = view_state.get_mut(connection_id) {
+                record_created_view(&mut entry.state, view);
+            }
+        }
+        Err(e) if CreateUnsupported::is(e) => {
+            log::debug!("relay inbound [{session}]: {op} unsupported by this sender: {e}");
+        }
+        Err(e) => log::warn!("relay inbound [{session}]: {op} failed: {e:#}"),
+    }
+    // The receiver may be gone (the RPC timed out) — harmless.
+    let _ = reply.send(result);
+}
+
+/// Apply a landed create to this relay's view state: the connection's stream is
+/// now attached to the new pane, so it is the tracked focus, its tab the tracked
+/// tab (both known from the create's own answer, so they agree), and its space
+/// the connection's current one.
+fn record_created_view(state: &mut RelayViewState, view: &CreatedView) {
+    state.focused_pane = Some(view.pane);
+    state.active_tab = Some(view.tab_id);
+    state.current_space = Some(view.space_id.clone());
 }
 
 /// Apply [`read_only_denies`] to one routed command before the inbound loop acts
@@ -1303,6 +1431,11 @@ mod tests {
         /// Every `toggle_fullscreen` call with its resolved hint, recorded for
         /// the fullscreen resolution tests (empty ⇒ no action was sent).
         toggles: Arc<Mutex<Vec<(PaneRef, FullscreenHint)>>>,
+        /// What the create methods answer: `Some(view)` creates (herdr-like),
+        /// `None` answers `CreateUnsupported` like the trait default (zellij).
+        created: Option<CreatedView>,
+        /// Every create call that reached this sender.
+        creates: Arc<Mutex<Vec<String>>>,
     }
 
     impl FakeSender {
@@ -1319,7 +1452,17 @@ mod tests {
                 tab_switches: Arc::new(Mutex::new(Vec::new())),
                 panic_on_tab: false,
                 toggles: Arc::new(Mutex::new(Vec::new())),
+                created: None,
+                creates: Arc::new(Mutex::new(Vec::new())),
             }
+        }
+
+        /// Record one create and answer it as configured.
+        fn create(&self, call: String, op: &'static str) -> anyhow::Result<CreatedView> {
+            self.creates.lock().unwrap().push(call);
+            self.created
+                .clone()
+                .ok_or_else(|| anyhow::Error::new(CreateUnsupported { op }))
         }
     }
 
@@ -1366,6 +1509,22 @@ mod tests {
         fn send_client_exited(&mut self) -> anyhow::Result<()> {
             Ok(())
         }
+        fn new_pane(
+            &mut self,
+            floating: bool,
+            name: Option<String>,
+        ) -> anyhow::Result<CreatedView> {
+            self.create(
+                format!("new_pane floating={floating} name={name:?}"),
+                "NewPane",
+            )
+        }
+        fn new_tab(&mut self, name: Option<String>) -> anyhow::Result<CreatedView> {
+            self.create(format!("new_tab name={name:?}"), "NewTab")
+        }
+        fn create_space(&mut self, label: Option<String>) -> anyhow::Result<CreatedView> {
+            self.create(format!("create_space label={label:?}"), "CreateSpace")
+        }
         fn box_clone(&self) -> Box<dyn MuxSender> {
             // Sync-layout (herdr) path clones the sender to move it onto the
             // blocking pool; the clone shares the `sync` slot so the cloned
@@ -1381,6 +1540,8 @@ mod tests {
                 tab_switches: self.tab_switches.clone(),
                 panic_on_tab: self.panic_on_tab,
                 toggles: self.toggles.clone(),
+                created: self.created.clone(),
+                creates: self.creates.clone(),
             })
         }
     }
@@ -1683,12 +1844,77 @@ mod tests {
         }
     }
 
+    /// One of each relay-routed create, with a throwaway reply channel.
+    fn the_creates() -> Vec<RelayControl> {
+        vec![
+            RelayControl::NewPane {
+                floating: false,
+                name: None,
+                reply: tokio::sync::oneshot::channel().0,
+            },
+            RelayControl::NewTab {
+                name: None,
+                reply: tokio::sync::oneshot::channel().0,
+            },
+            RelayControl::CreateSpace {
+                label: None,
+                reply: tokio::sync::oneshot::channel().0,
+            },
+        ]
+    }
+
+    /// The three creates add structure every client sees, so they sit on the
+    /// denied side of the boundary with the fullscreen toggle.
+    #[test]
+    fn read_only_denies_the_creates() {
+        let denied: Vec<_> = the_creates().iter().map(read_only_denies).collect();
+        assert_eq!(
+            denied,
+            vec![Some("NewPane"), Some("NewTab"), Some("CreateSpace")]
+        );
+    }
+
+    /// `gate_control` drops every create for a read-only token (its reply is
+    /// dropped with it, which the RPC reads as "nothing created") and passes
+    /// each one through for a read-write token.
+    #[test]
+    fn gate_control_drops_the_creates_for_read_only_token() {
+        for cmd in the_creates() {
+            assert!(gate_control(Some(cmd), true, "s").is_none());
+        }
+        for cmd in the_creates() {
+            assert!(gate_control(Some(cmd), false, "s").is_some());
+        }
+    }
+
+    /// A landed create leaves the connection on the new pane: focus, tab and
+    /// space are all taken from the create's answer.
+    #[test]
+    fn record_created_view_tracks_the_new_pane_tab_and_space() {
+        let mut state = RelayViewState {
+            active_tab: Some(1),
+            focused_pane: Some(PaneRef::terminal(2)),
+            current_space: None,
+        };
+        record_created_view(
+            &mut state,
+            &CreatedView {
+                space_id: "ws-b".into(),
+                tab_id: 7,
+                pane: PaneRef::terminal(42),
+            },
+        );
+        assert_eq!(state.focused_pane, Some(PaneRef::terminal(42)));
+        assert_eq!(state.active_tab, Some(7));
+        assert_eq!(state.current_space.as_deref(), Some("ws-b"));
+    }
+
     /// The control half of the boundary, one assertion per variant: the three
     /// view moves and the layout read are a read-only token's to make, while the
     /// fullscreen toggle — which rewrites the layout every client on the tab sees
-    /// — is not.
+    /// — is not (the creates are covered by `read_only_denies_the_creates`).
     #[test]
-    fn read_only_denies_only_the_fullscreen_toggle() {
+    fn read_only_denies_the_fullscreen_toggle_but_not_the_view_moves() {
         assert!(read_only_denies(&RelayControl::SwitchTab(3)).is_none());
         assert!(read_only_denies(&RelayControl::FocusPane(PaneRef::terminal(9))).is_none());
 
@@ -2192,6 +2418,112 @@ mod tests {
         );
         drop(successor);
         drop(rig.outbound);
+    }
+
+    // ─── Relay-routed creates through the real inbound loop ──────────────────
+
+    /// Spawn a live rig whose sender answers creates as `sender` says, with a
+    /// view-state slot for `conn-1`, and return it plus that relay's control
+    /// sender.
+    fn create_rig(sender: FakeSender) -> (Rig, mpsc::UnboundedSender<RelayControl>) {
+        // Park long enough that the reader outlives the test body; each test
+        // then waits for the relay's own teardown (reader end) instead of
+        // aborting it mid-flight.
+        let rig = spawn_rig_with(
+            vec![],
+            Duration::from_millis(1500),
+            false,
+            NoBackend::default(),
+            sender,
+        );
+        rig.view_state.insert(
+            "conn-1".into(),
+            super::super::ViewStateEntry {
+                session: "s".into(),
+                state: RelayViewState::default(),
+            },
+        );
+        let tx = rig
+            .control
+            .get("conn-1")
+            .map(|entry| entry.sender.clone())
+            .expect("the rig registers conn-1");
+        (rig, tx)
+    }
+
+    /// A routed NewPane reaches THIS relay's sender with the request's fields,
+    /// is replied with the created view, and leaves the relay's view state on
+    /// the new pane (its tab and space too).
+    #[tokio::test]
+    async fn routed_new_pane_reaches_the_sender_replies_and_tracks_the_new_pane() {
+        let view = CreatedView {
+            space_id: "ws-b".into(),
+            tab_id: 7,
+            pane: PaneRef::terminal(42),
+        };
+        let sender = FakeSender {
+            created: Some(view.clone()),
+            ..FakeSender::plain()
+        };
+        let creates = sender.creates.clone();
+        let (rig, tx) = create_rig(sender);
+
+        let (reply, reply_rx) = tokio::sync::oneshot::channel();
+        tx.send(RelayControl::NewPane {
+            floating: false,
+            name: Some("build".into()),
+            reply,
+        })
+        .unwrap();
+        let answered = tokio::time::timeout(Duration::from_secs(3), reply_rx)
+            .await
+            .expect("the relay must answer")
+            .expect("the reply must not be dropped")
+            .expect("the create must succeed");
+
+        assert_eq!(answered, view);
+        assert_eq!(
+            *creates.lock().unwrap(),
+            vec!["new_pane floating=false name=Some(\"build\")".to_owned()]
+        );
+        let state = rig.view_state.get("conn-1").unwrap().state.clone();
+        assert_eq!(state.focused_pane, Some(PaneRef::terminal(42)));
+        assert_eq!(state.active_tab, Some(7));
+        assert_eq!(state.current_space.as_deref(), Some("ws-b"));
+        let _ = tokio::time::timeout(Duration::from_secs(5), rig.task).await;
+    }
+
+    /// A sender without per-connection creates (zellij, the trait default)
+    /// answers `CreateUnsupported` — which the RPC turns into the backend path —
+    /// and leaves the relay's view state untouched.
+    #[tokio::test]
+    async fn routed_create_on_a_sender_without_creates_replies_unsupported() {
+        let (rig, tx) = create_rig(FakeSender::plain());
+
+        for (cmd, rx) in [
+            {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                (RelayControl::NewTab { name: None, reply }, rx)
+            },
+            {
+                let (reply, rx) = tokio::sync::oneshot::channel();
+                (RelayControl::CreateSpace { label: None, reply }, rx)
+            },
+        ] {
+            tx.send(cmd).unwrap();
+            let answered = tokio::time::timeout(Duration::from_secs(3), rx)
+                .await
+                .expect("the relay must answer")
+                .expect("the reply must not be dropped");
+            let err = answered.expect_err("no per-connection create here");
+            assert!(CreateUnsupported::is(&err), "{err:#}");
+        }
+
+        let state = rig.view_state.get("conn-1").unwrap().state.clone();
+        assert_eq!(state.focused_pane, None);
+        assert_eq!(state.active_tab, None);
+        assert_eq!(state.current_space, None);
+        let _ = tokio::time::timeout(Duration::from_secs(5), rig.task).await;
     }
 
     // ─── Fullscreen toggle resolution ────────────────────────────────────────

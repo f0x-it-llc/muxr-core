@@ -92,13 +92,15 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::multiplexer::types::ActionAck;
 use crate::multiplexer::types::{
     FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, ResumeTarget,
     ResumedView,
 };
-use crate::multiplexer::{DualHandle, MuxReceiver, MuxSender};
+use crate::multiplexer::{CreatedView, DualHandle, MuxReceiver, MuxSender};
 
 use super::api::{PaneInfo, PaneZoomMode};
+use super::backend::DEFAULT_SPLIT_DIRECTION;
 use super::control::HerdrControl;
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 use super::wire::{
@@ -1056,6 +1058,73 @@ impl HerdrMuxSender {
         );
         Err(err)
     }
+
+    /// Finish a relay-routed create: register the new pane and its tab in the
+    /// shared registries (so the ids reported back are the ones `GetLayout`
+    /// emits), re-point THIS connection's stream at it, and adopt its workspace
+    /// as the current one (a no-op for a pane or tab, the switch for a space).
+    ///
+    /// The create has already happened by the time a re-point fails, so that
+    /// error says so: the stream is torn down (see [`Self::reattach`]) and the
+    /// client's auto-reattach takes over, but the new pane exists.
+    fn adopt_created(&mut self, pane: &PaneInfo, op: &str) -> Result<CreatedView> {
+        let pane_id = self
+            .control
+            .pane_registry()
+            .assign_or_get(&pane.pane_id, &pane.terminal_id);
+        let tab_id = self.control.tab_registry().assign_or_get(&pane.tab_id);
+        self.reattach(pane.terminal_id.clone()).with_context(|| {
+            format!(
+                "herdr {op}: created pane {pane_id} but could not re-point this connection at it"
+            )
+        })?;
+        self.workspace_id = pane.workspace_id.clone();
+        Ok(CreatedView {
+            space_id: pane.workspace_id.clone(),
+            tab_id,
+            pane: PaneRef::terminal(pane_id),
+        })
+    }
+}
+
+/// The herdr `pane_id` of the pane whose terminal THIS connection is attached to,
+/// looked up in its workspace's live pane list (registering every pane, as
+/// [`resolve_focused_terminal`] does).
+///
+/// The sender tracks only the attached `terminal_id`; `pane.split` addresses a
+/// pane. An attached pane missing from the list (closed, or the workspace gone)
+/// is an error — never a fallback to herdr's focused pane, which is exactly the
+/// daemon-global target a relay-routed create must not use.
+fn attached_herdr_pane(
+    control: &HerdrControl,
+    workspace_id: &str,
+    terminal_id: &str,
+) -> Result<String> {
+    let panes = control
+        .list_panes(workspace_id)
+        .with_context(|| format!("list herdr panes for workspace '{workspace_id}'"))?;
+    let reg = control.pane_registry();
+    let mut attached = None;
+    for pane in &panes {
+        reg.assign_or_get(&pane.pane_id, &pane.terminal_id);
+        if pane.terminal_id == terminal_id {
+            attached = Some(pane.pane_id.clone());
+        }
+    }
+    attached.ok_or_else(|| {
+        anyhow!(
+            "herdr: this connection's attached pane is no longer in workspace \
+             '{workspace_id}' — reattach required"
+        )
+    })
+}
+
+/// A herdr refusal of a relay-routed create, as the error the RPC reports.
+fn create_refused(method: &str, ack: &ActionAck) -> anyhow::Error {
+    anyhow!(
+        "herdr refused {method}: {}",
+        ack.error.as_deref().unwrap_or("no reason given")
+    )
 }
 
 impl MuxSender for HerdrMuxSender {
@@ -1100,6 +1169,59 @@ impl MuxSender for HerdrMuxSender {
         self.reattach(terminal_id)?;
         self.workspace_id = space_id.to_string();
         Ok(())
+    }
+
+    /// Split THIS connection's attached pane — explicit `target_pane_id`, in
+    /// `self.workspace_id`, `focus: false` — then re-point the stream at the new
+    /// pane exactly as [`focus_pane`](Self::focus_pane) does. herdr's
+    /// daemon-global focus never moves, so a co-attached desktop client keeps its
+    /// pane; the legacy `HerdrBackend::new_pane` (split whatever herdr focused,
+    /// focus it) is untouched.
+    ///
+    /// `floating` and `name` are ignored for the same reasons the legacy path
+    /// ignores them: herdr has no floating layer and `pane.split` carries no label.
+    fn new_pane(&mut self, floating: bool, name: Option<String>) -> Result<CreatedView> {
+        if floating {
+            log::debug!("herdr relay new_pane: ignoring floating=true (no floating layer)");
+        }
+        if name.is_some() {
+            log::debug!("herdr relay new_pane: ignoring the pane name (pane.split has no label)");
+        }
+        let target =
+            attached_herdr_pane(&self.control, &self.workspace_id, &self.current_terminal_id)?;
+        let pane = self
+            .control
+            .split_pane_created(
+                &self.workspace_id,
+                &target,
+                DEFAULT_SPLIT_DIRECTION,
+                false, // never move herdr's daemon-global focus
+            )?
+            .map_err(|ack| create_refused("pane.split", &ack))?;
+        self.adopt_created(&pane, "NewPane")
+    }
+
+    /// Create a tab in `self.workspace_id` with `focus: false`, then re-point the
+    /// stream at its root pane — the tab is created where THIS connection is,
+    /// never where herdr's focus is, and no other client follows.
+    fn new_tab(&mut self, name: Option<String>) -> Result<CreatedView> {
+        let pane = self
+            .control
+            .create_tab_created(&self.workspace_id, name, false)?
+            .map_err(|ack| create_refused("tab.create", &ack))?;
+        self.adopt_created(&pane, "NewTab")
+    }
+
+    /// Create a workspace with `focus: false`, then switch THIS connection to it
+    /// as [`switch_space`](Self::switch_space) does: re-point the stream at the
+    /// new workspace's root pane and record it as the current workspace. The
+    /// daemon-global focus — every desktop client's view — stays where it was.
+    fn create_space(&mut self, label: Option<String>) -> Result<CreatedView> {
+        let pane = self
+            .control
+            .create_workspace_created(label, false)?
+            .map_err(|ack| create_refused("workspace.create", &ack))?;
+        self.adopt_created(&pane, "CreateSpace")
     }
 
     fn toggle_fullscreen(&mut self, pane: PaneRef, hint: FullscreenHint) -> Result<()> {
@@ -3120,5 +3242,382 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&sock);
+    }
+
+    // ── Relay-routed creates (NewPane / NewTab / CreateSpace) ─────────────────
+    //
+    // Driven over a scripted fake herdr: a JSON-API socket that answers each
+    // connection-per-request call from a `method → result` table and records
+    // every request, plus a wire socket that serves the re-attach handshake.
+    // The assertions pin what the bug was about: the create names THIS
+    // connection's workspace (and, for a split, its attached pane — not herdr's
+    // focused one), carries `focus: false`, and the stream follows the result.
+
+    /// Scripted fake herdr JSON-API: answers `n` sequential requests from the
+    /// `method → "result":{…}` table (anything else gets `invalid_request`) and
+    /// returns every request it saw, in order.
+    fn fake_api(
+        sock: &std::path::Path,
+        n: usize,
+        responses: Vec<(&'static str, String)>,
+    ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+        use std::io::{BufRead, BufReader};
+        let listener = UnixListener::bind(sock).expect("bind fake herdr API socket");
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let Ok((conn, _)) = listener.accept() else {
+                    break;
+                };
+                let mut line = String::new();
+                if BufReader::new(&conn).read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value =
+                    serde_json::from_str(line.trim_end()).expect("request must be JSON");
+                let method = req["method"].as_str().unwrap_or_default().to_string();
+                let id = req["id"].as_str().unwrap_or("muxrd-0").to_string();
+                let body = responses
+                    .iter()
+                    .find(|(m, _)| *m == method)
+                    .map(|(_, b)| b.clone())
+                    .unwrap_or_else(|| {
+                        r#""error":{"code":"invalid_request","message":"unscripted"}"#.to_string()
+                    });
+                let _ = (&conn).write_all(format!("{{\"id\":\"{id}\",{body}}}\n").as_bytes());
+                seen.push(req);
+            }
+            seen
+        })
+    }
+
+    /// herdr's `PaneInfo` JSON for one pane.
+    fn pane_json(pane_id: &str, terminal_id: &str, ws: &str, tab: &str, focused: bool) -> String {
+        serde_json::json!({
+            "pane_id": pane_id, "terminal_id": terminal_id, "workspace_id": ws,
+            "tab_id": tab, "focused": focused, "agent_status": "idle", "revision": 1
+        })
+        .to_string()
+    }
+
+    fn tab_json(tab_id: &str, ws: &str) -> String {
+        serde_json::json!({
+            "tab_id": tab_id, "workspace_id": ws, "number": 2, "label": "new",
+            "focused": false, "pane_count": 1, "agent_status": "idle"
+        })
+        .to_string()
+    }
+
+    fn pong() -> (&'static str, String) {
+        (
+            "ping",
+            format!(
+                r#""result":{{"type":"pong","version":"0.9.5","protocol":{HERDR_MAX_TESTED_PROTOCOL}}}"#
+            ),
+        )
+    }
+
+    /// A sender attached to `attached_terminal` in `workspace_id`, whose control
+    /// client talks to a scripted fake API answering `api_calls` requests and
+    /// whose re-attach goes to a fake wire server. Returns the sender, the
+    /// reader's swap channel, the API trace and the re-attach message.
+    #[allow(clippy::type_complexity)]
+    fn create_harness(
+        tag: &str,
+        workspace_id: &str,
+        attached_terminal: &str,
+        api_calls: usize,
+        responses: Vec<(&'static str, String)>,
+    ) -> (
+        HerdrMuxSender,
+        mpsc::Receiver<Option<UnixStream>>,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+        std::thread::JoinHandle<ClientMessage>,
+        UnixStream,
+        Vec<PathBuf>,
+    ) {
+        let api_sock = unique_socket_path(&format!("{tag}a"));
+        let wire_sock = unique_socket_path(&format!("{tag}w"));
+        let api = fake_api(&api_sock, api_calls, responses);
+        let listener = UnixListener::bind(&wire_sock).unwrap();
+        let wire = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let (_hello, attach) = serve_handshake(&mut conn);
+            attach
+        });
+
+        let (old, old_peer) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(old)),
+            control: Arc::new(HerdrControl::new(
+                api_sock.clone(),
+                Arc::new(HerdrPaneRegistry::new()),
+                Arc::new(HerdrTabRegistry::new()),
+            )),
+            workspace_id: workspace_id.into(),
+            current_terminal_id: attached_terminal.into(),
+            swap_pending: Arc::new(AtomicBool::new(false)),
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: wire_sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
+        };
+        (
+            sender,
+            swap_rx,
+            api,
+            wire,
+            old_peer,
+            vec![api_sock, wire_sock],
+        )
+    }
+
+    fn cleanup(socks: &[PathBuf]) {
+        for sock in socks {
+            let _ = std::fs::remove_file(sock);
+        }
+    }
+
+    /// NewPane splits the relay's OWN attached pane — not herdr's focused one —
+    /// in its own workspace with `focus: false`, then re-points at the new pane.
+    #[test]
+    fn new_pane_splits_the_attached_pane_unfocused_and_follows_it() {
+        let panes = format!(
+            "[{},{}]",
+            pane_json("w2:p1", "term-mine", "ws-b", "w2:t1", false),
+            // herdr's focus is on ANOTHER pane (a desktop client's): never the target.
+            pane_json("w2:p2", "term-desktop", "ws-b", "w2:t1", true),
+        );
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "np",
+            "ws-b",
+            "term-mine",
+            3,
+            vec![
+                (
+                    "pane.list",
+                    format!(r#""result":{{"type":"pane_list","panes":{panes}}}"#),
+                ),
+                (
+                    "pane.split",
+                    format!(
+                        r#""result":{{"type":"pane_info","pane":{}}}"#,
+                        pane_json("w2:p3", "term-new", "ws-b", "w2:t1", false)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .new_pane(true, Some("ignored".into()))
+            .expect("new_pane must succeed");
+
+        let reqs = api.join().unwrap();
+        let methods: Vec<&str> = reqs.iter().map(|r| r["method"].as_str().unwrap()).collect();
+        assert_eq!(methods, vec!["pane.list", "pane.split", "ping"]);
+        assert_eq!(reqs[0]["params"]["workspace_id"], "ws-b");
+        let split = &reqs[1]["params"];
+        assert_eq!(split["workspace_id"], "ws-b", "the relay's own workspace");
+        assert_eq!(
+            split["target_pane_id"], "w2:p1",
+            "the relay's attached pane, never herdr's focused one"
+        );
+        assert_eq!(split["focus"], false, "herdr's focus must not move");
+        assert_eq!(split["direction"], "right");
+
+        let attach = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-new"),
+            "the stream must follow the new pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(sender.current_terminal_id, "term-new");
+        assert_eq!(sender.workspace_id, "ws-b");
+
+        let reg = sender.control.pane_registry();
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(
+            view.pane,
+            PaneRef::terminal(reg.id_for_herdr_pane("w2:p3").unwrap())
+        );
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t1")
+        );
+        cleanup(&socks);
+    }
+
+    /// The attached pane vanished: refuse rather than fall back to splitting
+    /// whatever herdr has focused. Nothing is split and the stream stays put.
+    #[test]
+    fn new_pane_refuses_when_the_attached_pane_is_gone() {
+        let panes = format!(
+            "[{}]",
+            pane_json("w2:p2", "term-desktop", "ws-b", "w2:t1", true)
+        );
+        let api_sock = unique_socket_path("npg");
+        let api = fake_api(
+            &api_sock,
+            1,
+            vec![(
+                "pane.list",
+                format!(r#""result":{{"type":"pane_list","panes":{panes}}}"#),
+            )],
+        );
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+        sender.workspace_id = "ws-b".into();
+        sender.current_terminal_id = "term-mine".into();
+
+        let err = sender.new_pane(false, None).expect_err("must refuse");
+        assert!(format!("{err:#}").contains("reattach required"), "{err:#}");
+        let methods: Vec<String> = api
+            .join()
+            .unwrap()
+            .iter()
+            .map(|r| r["method"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(methods, vec!["pane.list"], "no split may be sent");
+        assert_eq!(sender.current_terminal_id, "term-mine");
+        cleanup(&[api_sock]);
+    }
+
+    /// NewTab creates the tab in the relay's OWN workspace with `focus: false`
+    /// and re-points at the new tab's root pane.
+    #[test]
+    fn new_tab_creates_in_the_relays_workspace_unfocused_and_follows_it() {
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "nt",
+            "ws-b",
+            "term-mine",
+            2,
+            vec![
+                (
+                    "tab.create",
+                    format!(
+                        r#""result":{{"type":"tab_created","tab":{},"root_pane":{}}}"#,
+                        tab_json("w2:t9", "ws-b"),
+                        pane_json("w2:p9", "term-tab", "ws-b", "w2:t9", true)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .new_tab(Some("logs".into()))
+            .expect("new_tab must succeed");
+
+        let reqs = api.join().unwrap();
+        assert_eq!(reqs[0]["method"], "tab.create");
+        let params = &reqs[0]["params"];
+        assert_eq!(params["workspace_id"], "ws-b", "the relay's own workspace");
+        assert_eq!(params["focus"], false, "herdr's focus must not move");
+        assert_eq!(params["label"], "logs");
+
+        let attach = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-tab"),
+            "the stream must follow the new tab's pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(sender.current_terminal_id, "term-tab");
+        assert_eq!(sender.workspace_id, "ws-b");
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t9")
+        );
+        cleanup(&socks);
+    }
+
+    /// CreateSpace creates the workspace with `focus: false` and switches THIS
+    /// relay to it: the stream follows its root pane and the relay's workspace
+    /// becomes the new one.
+    #[test]
+    fn create_space_creates_unfocused_and_switches_this_relay_to_it() {
+        let workspace = serde_json::json!({
+            "workspace_id": "ws-new", "number": 3, "label": "scratch", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "w3:t1", "agent_status": "idle"
+        });
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "ns",
+            "ws-b",
+            "term-mine",
+            2,
+            vec![
+                (
+                    "workspace.create",
+                    format!(
+                        r#""result":{{"type":"workspace_created","workspace":{workspace},"tab":{},"root_pane":{}}}"#,
+                        tab_json("w3:t1", "ws-new"),
+                        pane_json("w3:p1", "term-space", "ws-new", "w3:t1", true)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .create_space(Some("scratch".into()))
+            .expect("create_space must succeed");
+
+        let reqs = api.join().unwrap();
+        assert_eq!(reqs[0]["method"], "workspace.create");
+        let params = &reqs[0]["params"];
+        assert_eq!(params["focus"], false, "herdr's focus must not move");
+        assert_eq!(params["label"], "scratch");
+
+        let attach = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-space"),
+            "the stream must follow the new space's pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(
+            sender.workspace_id, "ws-new",
+            "this relay switched to the new space"
+        );
+        assert_eq!(view.space_id, "ws-new");
+        cleanup(&socks);
+    }
+
+    /// A herdr refusal is the create's failure: nothing to re-point at, so no
+    /// re-attach is attempted and the stream stays where it was.
+    #[test]
+    fn a_refused_create_does_not_touch_the_stream() {
+        let api_sock = unique_socket_path("rf");
+        let api = fake_api(
+            &api_sock,
+            1,
+            vec![(
+                "tab.create",
+                r#""error":{"code":"invalid_request","message":"no such workspace"}"#.to_string(),
+            )],
+        );
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+
+        let err = sender.new_tab(None).expect_err("a refusal is an error");
+        assert!(format!("{err:#}").contains("no such workspace"), "{err:#}");
+        assert!(!crate::multiplexer::CreateUnsupported::is(&err));
+        assert_eq!(api.join().unwrap().len(), 1);
+        assert_eq!(sender.current_terminal_id, "term-1");
+        assert_eq!(sender.workspace_id, "ws-1");
+        cleanup(&[api_sock]);
     }
 }

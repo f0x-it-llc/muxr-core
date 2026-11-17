@@ -11,8 +11,8 @@ use crate::proto::{
 
 use super::MuxrService;
 use super::helpers::{
-    pane_ref, reject_if_read_only, run_action, session_is_read_only, short_conn, try_route_control,
-    validate_display_name,
+    CreateRoute, pane_ref, reject_if_read_only, route_create, run_action, session_is_read_only,
+    short_conn, try_route_control, validate_display_name,
 };
 
 /// Upper bound on a single `WriteToPane` payload (1 MiB).  Guards against a
@@ -147,6 +147,14 @@ impl MuxrService {
     }
 
     /// Open a new pane; the new pane id surfaces in `ActionAck.info`. MUTATING.
+    ///
+    /// With a `connection_id` naming the caller's live relay, the pane is created
+    /// THROUGH that relay (`route_create`): on herdr it splits that connection's
+    /// attached pane without moving herdr's focus, and the connection's stream
+    /// follows the new pane (`info` = `terminal_<id>`). A non-empty id naming no
+    /// live relay fails closed on herdr. An empty id, or a backend whose relay
+    /// cannot create (zellij), takes the ephemeral backend path below — today's
+    /// behaviour, which on herdr splits whatever pane herdr has focused.
     pub(super) async fn new_pane_impl(
         &self,
         request: Request<NewPaneReq>,
@@ -161,7 +169,34 @@ impl MuxrService {
             validate_display_name(&req.pane_name, "pane")?;
             Some(req.pane_name)
         };
-        log::info!("NewPane: session='{session}' floating={floating} name={pane_name:?}");
+        // FS3: full connection_id must not appear in info/warn logs.
+        log::info!(
+            "NewPane: session='{session}' floating={floating} name={pane_name:?} \
+             connection_id={}…",
+            short_conn(&req.connection_id)
+        );
+        let routed_name = pane_name.clone();
+        if let CreateRoute::Answered(ack) = route_create(
+            &self.control,
+            &req.session,
+            &req.connection_id,
+            "NewPane",
+            move |reply| crate::relay::RelayControl::NewPane {
+                floating,
+                name: routed_name,
+                reply,
+            },
+            |view| format!("terminal_{}", view.pane.id),
+        )
+        .await
+        {
+            log::info!(
+                "NewPane: routed via relay client (session='{session}') ok={} {}",
+                ack.ok,
+                ack.error
+            );
+            return Ok(Response::new(ack));
+        }
         run_action("NewPane", move || {
             backend.new_pane(&session, floating, pane_name)
         })
@@ -452,6 +487,7 @@ mod tests {
             session: "zellij:test".to_owned(),
             floating: false,
             pane_name: String::new(),
+            connection_id: String::new(),
         });
         req.extensions_mut().insert(SessionReadOnly(read_only));
         req
@@ -792,5 +828,223 @@ mod tests {
         assert!(!ack.ok);
         assert!(ack.error.contains("dropped"), "{}", ack.error);
         relay.await.unwrap();
+    }
+
+    // ─── NewPane: routed through the caller's relay ──────────────────────────
+    //
+    // The bug: on herdr a NewPane split whatever pane herdr had focused (often
+    // a DESKTOP client's), in that client's space, and focused it. With the
+    // caller's connection_id it now acts on the caller's relay only.
+
+    use std::sync::Arc;
+
+    use crate::cli::BackendKind;
+    use crate::grpc::helpers::create_test_support::{
+        HERDR, RecordingCreates, ZELLIJ, answer_create, created, relay,
+    };
+    use crate::multiplexer::CreateUnsupported;
+
+    fn new_pane_on(session: &str, connection_id: &str, read_only: bool) -> Request<NewPaneReq> {
+        let mut req = Request::new(NewPaneReq {
+            session: session.to_owned(),
+            floating: false,
+            pane_name: "build".to_owned(),
+            connection_id: connection_id.to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    /// A live connection_id: the create goes to THAT relay (never a co-attached
+    /// one), never reaches the backend's focus-following path, and the ack names
+    /// the new pane the relay now renders.
+    #[tokio::test]
+    async fn new_pane_with_a_live_connection_id_is_created_through_that_relay() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let mut desktop_side = relay(&service, "conn-a", HERDR, false);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created("ws-b", 7, 42))),
+        );
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-b", false))
+            .await
+            .expect("a routed create is an ack")
+            .into_inner();
+
+        assert!(ack.ok, "routed create must succeed: {}", ack.error);
+        assert_eq!(ack.info, "terminal_42", "the ack names the new pane");
+        assert_eq!(
+            caller.await.unwrap(),
+            "NewPane floating=false name=Some(\"build\")"
+        );
+        assert!(
+            backend.calls().is_empty(),
+            "a routed create must not also take the backend path: {:?}",
+            backend.calls()
+        );
+        assert!(
+            desktop_side.try_recv().is_err(),
+            "a co-attached relay must never receive another connection's create"
+        );
+    }
+
+    /// An empty connection_id is today's request: the backend path, unchanged,
+    /// and no relay is asked — even with relays attached.
+    #[tokio::test]
+    async fn new_pane_with_an_empty_connection_id_takes_the_backend_path_unchanged() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let mut attached = relay(&service, "conn-a", HERDR, false);
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "", false))
+            .await
+            .expect("the backend path answers an ack")
+            .into_inner();
+
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["new_pane herdr floating=false name=Some(\"build\")".to_owned()]
+        );
+        assert_eq!(
+            ack.info, "backend new_pane herdr floating=false name=Some(\"build\")",
+            "the backend's own ack is forwarded verbatim"
+        );
+        assert!(attached.try_recv().is_err(), "no relay is asked");
+    }
+
+    /// A non-empty connection_id naming no live relay fails closed on herdr:
+    /// nothing is created, and no other relay is steered.
+    #[tokio::test]
+    async fn new_pane_with_a_stale_connection_id_fails_closed_on_herdr() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let mut live = relay(&service, "conn-live", HERDR, false);
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-gone", false))
+            .await
+            .expect("a refusal is an ack, not a Status")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
+        assert!(backend.calls().is_empty(), "nothing may be created");
+        assert!(live.try_recv().is_err(), "no other relay may be steered");
+    }
+
+    /// The read-only gate still runs first: a read-only token naming its own
+    /// live relay is refused before anything is routed or created.
+    #[tokio::test]
+    async fn new_pane_read_only_with_a_live_relay_is_refused_before_routing() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let mut own = relay(&service, "conn-ro", HERDR, true);
+
+        let err = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-ro", true))
+            .await
+            .expect_err("NewPane must stay refused for read-only sessions");
+
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+        assert!(own.try_recv().is_err());
+        assert!(backend.calls().is_empty());
+    }
+
+    /// zellij: the relay's sender cannot create (`CreateUnsupported`), so the
+    /// request takes the backend path it always took.
+    #[tokio::test]
+    async fn new_pane_on_zellij_falls_back_when_the_relay_cannot_create() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Zellij, &backend);
+        let zellij_relay = answer_create(
+            relay(&service, "conn-z", ZELLIJ, false),
+            Some(Err(anyhow::Error::new(CreateUnsupported { op: "NewPane" }))),
+        );
+
+        let ack = service
+            .new_pane_impl(new_pane_on(ZELLIJ, "conn-z", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        zellij_relay.await.unwrap();
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["new_pane test floating=false name=Some(\"build\")".to_owned()]
+        );
+    }
+
+    /// zellij: a stale connection_id is not fail-closed (session names are a
+    /// real discriminator there) — the backend path, as today.
+    #[tokio::test]
+    async fn new_pane_on_zellij_with_a_stale_connection_id_takes_the_backend_path() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Zellij, &backend);
+
+        let ack = service
+            .new_pane_impl(new_pane_on(ZELLIJ, "conn-gone", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(ack.ok);
+        assert_eq!(backend.calls().len(), 1);
+    }
+
+    /// A create the relay tried and failed answers ok:false with the cause, and
+    /// is never retried down the backend's focus-following path.
+    #[tokio::test]
+    async fn new_pane_relay_failure_answers_ok_false_without_a_backend_retry() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Err(anyhow::anyhow!("herdr refused pane.split: no room"))),
+        );
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok);
+        assert!(ack.error.contains("no room"), "{}", ack.error);
+        assert!(backend.calls().is_empty());
+    }
+
+    /// A herdr relay that drops the request (teardown) created nothing: ok:false.
+    #[tokio::test]
+    async fn new_pane_unanswered_by_a_herdr_relay_answers_ok_false() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service =
+            crate::grpc::helpers::create_test_support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(relay(&service, "conn-b", HERDR, false), None);
+
+        let ack = service
+            .new_pane_impl(new_pane_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok);
+        assert!(ack.error.contains("dropped"), "{}", ack.error);
+        assert!(backend.calls().is_empty());
     }
 }

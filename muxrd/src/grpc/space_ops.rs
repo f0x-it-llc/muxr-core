@@ -15,10 +15,15 @@
 //!   [`RelayControl::SwitchSpace`] to the connection's relay and awaits the oneshot
 //!   ack — the relay re-points its wire stream at the target workspace with no
 //!   daemon-global focus change.
-//! - **CreateSpace / RenameSpace / CloseSpace** are control-plane: they mutate the
-//!   daemon's globally-shared workspaces directly through the backend (spaces are
-//!   daemon-global objects). After a create the client issues GetSpaces +
-//!   SwitchSpace.
+//! - **CreateSpace** with the caller's live `connection_id` is relay-routed
+//!   ([`RelayControl::CreateSpace`]): herdr creates the workspace without moving
+//!   its daemon-global focus and the caller's relay switches to it in place. With
+//!   an empty `connection_id` it is control-plane, as before; a non-empty one
+//!   naming no live relay fails closed.
+//! - **RenameSpace / CloseSpace** (and an unrouted CreateSpace) are control-plane:
+//!   they mutate the daemon's globally-shared workspaces directly through the
+//!   backend (spaces are daemon-global objects). After an unrouted create the
+//!   client issues GetSpaces + SwitchSpace.
 //!
 //! [`MuxBackend`]: crate::multiplexer::MuxBackend
 //! [`MuxSender`]: crate::multiplexer::MuxSender
@@ -37,7 +42,7 @@ use crate::proto::{
 use crate::relay::RelayControl;
 
 use super::MuxrService;
-use super::helpers::{reject_if_read_only, short_conn};
+use super::helpers::{CreateRoute, reject_if_read_only, route_create, short_conn};
 
 /// Max length (bytes) accepted for a user-supplied space label.
 const MAX_SPACE_LABEL_LEN: usize = 64;
@@ -232,7 +237,15 @@ impl MuxrService {
 
     // ── CreateSpace ───────────────────────────────────────────────────────────
 
-    /// Create a new space (herdr workspace). MUTATING. Control-plane (daemon-global).
+    /// Create a new space (herdr workspace). MUTATING.
+    ///
+    /// With a `connection_id` naming the caller's live relay, the space is created
+    /// THROUGH that relay (`route_create`): herdr creates it without moving its
+    /// daemon-global focus and the caller's connection switches to it in place, as
+    /// `SwitchSpace` does (`info` = the new space id). A non-empty id naming no
+    /// live relay fails closed. An empty id — or a backend whose relay cannot
+    /// create — takes the control-plane path below, today's behaviour (herdr
+    /// creates the workspace and focuses it).
     pub(super) async fn create_space_impl(
         &self,
         request: Request<CreateSpaceReq>,
@@ -251,11 +264,35 @@ impl MuxrService {
         };
         // Error hygiene: keep the raw label at debug only; info stays label-free.
         log::debug!("CreateSpace: session='{}' label={label:?}", req.session);
+        // FS3: full connection_id must not appear in info/warn logs.
         log::info!(
-            "CreateSpace: session='{}' (auto_name={})",
+            "CreateSpace: session='{}' (auto_name={}) connection_id={}…",
             req.session,
-            label.is_none()
+            label.is_none(),
+            short_conn(&req.connection_id)
         );
+        let routed_label = label.clone();
+        if let CreateRoute::Answered(ack) = route_create(
+            &self.control,
+            &req.session,
+            &req.connection_id,
+            "CreateSpace",
+            move |reply| RelayControl::CreateSpace {
+                label: routed_label,
+                reply,
+            },
+            |view| view.space_id.clone(),
+        )
+        .await
+        {
+            log::info!(
+                "CreateSpace: routed via relay client (session='{}') ok={} {}",
+                req.session,
+                ack.ok,
+                ack.error
+            );
+            return Ok(Response::new(ack));
+        }
         run_space_action("CreateSpace", move || backend.create_space(label)).await
     }
 
@@ -1520,5 +1557,137 @@ mod tests {
             .expect_err("CloseSpace must stay refused for read-only sessions");
         assert_eq!(err.code(), tonic::Code::PermissionDenied);
         assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    // ─── CreateSpace: routed through the caller's relay ──────────────────────
+
+    use crate::grpc::helpers::create_test_support::{
+        self as support, HERDR, RecordingCreates, ZELLIJ, answer_create, created, relay,
+    };
+    use crate::multiplexer::CreateUnsupported;
+
+    fn create_space_on(
+        session: &str,
+        connection_id: &str,
+        read_only: bool,
+    ) -> Request<CreateSpaceReq> {
+        let mut req = Request::new(CreateSpaceReq {
+            session: session.to_owned(),
+            label: "scratch".to_owned(),
+            connection_id: connection_id.to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    /// A live connection_id: the space is created through THAT relay (which
+    /// switches to it without moving herdr's focus) and the ack names it.
+    #[tokio::test]
+    async fn create_space_with_a_live_connection_id_is_created_through_that_relay() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut desktop_side = relay(&service, "conn-a", HERDR, false);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created("ws-new", 3, 60))),
+        );
+
+        let ack = service
+            .create_space_impl(create_space_on(HERDR, "conn-b", false))
+            .await
+            .expect("a routed create is an ack")
+            .into_inner();
+
+        assert!(ack.ok, "routed create must succeed: {}", ack.error);
+        assert_eq!(ack.info, "ws-new", "the ack names the new space");
+        assert_eq!(caller.await.unwrap(), "CreateSpace label=Some(\"scratch\")");
+        assert!(backend.calls().is_empty());
+        assert!(desktop_side.try_recv().is_err());
+    }
+
+    /// An empty connection_id is today's request: the control-plane path.
+    #[tokio::test]
+    async fn create_space_with_an_empty_connection_id_takes_the_backend_path_unchanged() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut attached = relay(&service, "conn-a", HERDR, false);
+
+        let ack = service
+            .create_space_impl(create_space_on(HERDR, "", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["create_space label=Some(\"scratch\")".to_owned()]
+        );
+        assert_eq!(ack.info, "backend create_space label=Some(\"scratch\")");
+        assert!(attached.try_recv().is_err());
+    }
+
+    /// A non-empty connection_id naming no live relay fails closed on herdr.
+    #[tokio::test]
+    async fn create_space_with_a_stale_connection_id_fails_closed_on_herdr() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut live = relay(&service, "conn-live", HERDR, false);
+
+        let ack = service
+            .create_space_impl(create_space_on(HERDR, "conn-gone", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
+        assert!(backend.calls().is_empty(), "nothing may be created");
+        assert!(live.try_recv().is_err());
+    }
+
+    /// The read-only gate still runs first, before any routing.
+    #[tokio::test]
+    async fn create_space_read_only_with_a_live_relay_is_refused_before_routing() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut own = relay(&service, "conn-ro", HERDR, true);
+
+        let err = service
+            .create_space_impl(create_space_on(HERDR, "conn-ro", true))
+            .await
+            .expect_err("CreateSpace must stay refused for read-only sessions");
+
+        assert_eq!(err.code(), tonic::Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+        assert!(own.try_recv().is_err());
+        assert!(backend.calls().is_empty());
+    }
+
+    /// zellij: the relay cannot create, so the request takes the backend path
+    /// (whose space ops answer zellij's usual unsupported ack in production).
+    #[tokio::test]
+    async fn create_space_on_zellij_falls_back_when_the_relay_cannot_create() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Zellij, &backend);
+        let zellij_relay = answer_create(
+            relay(&service, "conn-z", ZELLIJ, false),
+            Some(Err(anyhow::Error::new(CreateUnsupported {
+                op: "CreateSpace",
+            }))),
+        );
+
+        let ack = service
+            .create_space_impl(create_space_on(ZELLIJ, "conn-z", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        zellij_relay.await.unwrap();
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["create_space label=Some(\"scratch\")".to_owned()]
+        );
     }
 }

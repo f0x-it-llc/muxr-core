@@ -181,6 +181,7 @@ async fn main() -> Result<()> {
             session: session.clone(),
             floating: false,
             pane_name: "d1_newpane".to_owned(),
+            connection_id: String::new(),
         })
         .await
         .context("NewPane RPC failed")?
@@ -362,6 +363,7 @@ async fn main() -> Result<()> {
                 session: session.clone(),
                 floating: false,
                 pane_name: String::new(),
+                connection_id: String::new(),
             })
             .await
         {

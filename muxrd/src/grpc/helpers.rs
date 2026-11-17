@@ -165,6 +165,142 @@ pub(super) fn try_route_control(
     }
 }
 
+// ─── Relay-routed creates ─────────────────────────────────────────────────────
+
+/// How long a relay-routed create (`NewPane` / `NewTab` / `CreateSpace`) waits
+/// for the relay's outcome. Same budget as a routed `SwitchSpace`
+/// (`space_ops::SWITCH_SPACE_TIMEOUT`): a create is one or two bounded herdr
+/// control calls plus the same release-then-reconnect re-attach a space switch
+/// does.
+pub(super) const CREATE_REPLY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(18);
+
+/// The fail-closed ack for a request naming no live connection.
+fn no_matching_connection() -> ProtoAck {
+    ProtoAck {
+        ok: false,
+        error: "reattach required (no matching connection)".to_owned(),
+        info: String::new(),
+    }
+}
+
+/// What [`route_create`] decided for one create RPC.
+#[derive(Debug)]
+pub(super) enum CreateRoute {
+    /// The caller's relay was asked (or a herdr request named no live relay):
+    /// answer the RPC with this ack.
+    Answered(ProtoAck),
+    /// Take today's ephemeral backend path, unchanged.
+    Fallback,
+}
+
+/// Route a create verb through the CALLER's live relay, so it acts on that
+/// connection's view instead of the backend's global focus.
+///
+/// The match is the exact rule `FocusPane` uses — a non-empty `connection_id`
+/// naming a registered relay whose stored session equals `session` — and there
+/// is **no session-scoped fallback** (a create must never land in, or re-point,
+/// a co-attached client's view):
+///
+/// - **empty `connection_id`** → [`CreateRoute::Fallback`]: today's behaviour,
+///   byte for byte;
+/// - **live relay** → `make_cmd` is sent to it and its reply awaited (bounded by
+///   [`CREATE_REPLY_TIMEOUT`]): a created view answers `ok:true` with `info(view)`,
+///   a [`CreateUnsupported`] answer (zellij's sender) falls back, any other error
+///   answers `ok:false` with it, and a timeout answers `ok:false`;
+/// - **no live relay** on a collapsed (herdr) session → the fail-closed
+///   `"reattach required (no matching connection)"` ack, with nothing created;
+///   on a non-collapsed (zellij) session → fall back, as today.
+///
+/// A relay that goes away before answering (dropped reply: teardown, or the
+/// read-only gate) applied nothing, so herdr answers `ok:false` and zellij falls
+/// back. The read-only gate itself is the caller's job and runs first
+/// ([`reject_if_read_only`]).
+///
+/// [`CreateUnsupported`]: crate::multiplexer::CreateUnsupported
+pub(super) async fn route_create<C, I>(
+    control: &crate::relay::ControlRegistry,
+    session: &str,
+    connection_id: &str,
+    rpc: &'static str,
+    make_cmd: C,
+    info: I,
+) -> CreateRoute
+where
+    C: FnOnce(
+        tokio::sync::oneshot::Sender<anyhow::Result<crate::multiplexer::CreatedView>>,
+    ) -> crate::relay::RelayControl,
+    I: FnOnce(&crate::multiplexer::CreatedView) -> String,
+{
+    if connection_id.is_empty() {
+        return CreateRoute::Fallback;
+    }
+    let collapsed = crate::multiplexer::is_collapsed_backend_session(session);
+    // Clone the sender out so the DashMap shard guard is released before the
+    // send and the await below.
+    let exact = control
+        .get(connection_id)
+        .filter(|entry| entry.session == session)
+        .map(|entry| entry.sender.clone());
+    let Some(tx) = exact else {
+        if collapsed {
+            log::info!(
+                "{rpc}: no matching connection for '{session}' (connection_id={}…) — fail-closed",
+                short_conn(connection_id)
+            );
+            return CreateRoute::Answered(no_matching_connection());
+        }
+        return CreateRoute::Fallback;
+    };
+
+    let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
+    if tx.send(make_cmd(reply_tx)).is_err() {
+        // The relay is tearing down: its connection is gone.
+        log::info!("{rpc}: relay for '{session}' is tearing down");
+        return if collapsed {
+            CreateRoute::Answered(no_matching_connection())
+        } else {
+            CreateRoute::Fallback
+        };
+    }
+
+    match tokio::time::timeout(CREATE_REPLY_TIMEOUT, reply_rx).await {
+        Ok(Ok(Ok(view))) => CreateRoute::Answered(ProtoAck {
+            ok: true,
+            error: String::new(),
+            info: info(&view),
+        }),
+        Ok(Ok(Err(e))) if crate::multiplexer::CreateUnsupported::is(&e) => {
+            log::debug!("{rpc}: relay for '{session}' has no per-connection create ({e})");
+            CreateRoute::Fallback
+        }
+        Ok(Ok(Err(e))) => {
+            log::warn!("{rpc}: relay reported failure for '{session}': {e:#}");
+            CreateRoute::Answered(ProtoAck {
+                ok: false,
+                error: format!("{rpc} failed: {e:#}"),
+                info: String::new(),
+            })
+        }
+        Ok(Err(_cancelled)) if !collapsed => CreateRoute::Fallback,
+        Ok(Err(_cancelled)) => {
+            log::warn!("{rpc}: relay for '{session}' dropped the request unanswered");
+            CreateRoute::Answered(ProtoAck {
+                ok: false,
+                error: format!("relay connection dropped the {rpc} before applying it"),
+                info: String::new(),
+            })
+        }
+        Err(_elapsed) => {
+            log::warn!("{rpc}: relay for '{session}' timed out after {CREATE_REPLY_TIMEOUT:?}");
+            CreateRoute::Answered(ProtoAck {
+                ok: false,
+                error: format!("{rpc}: timed out waiting for the relay"),
+                info: String::new(),
+            })
+        }
+    }
+}
+
 // ─── Read-only gate + ack helpers ──────────────────────────────────────────────
 
 /// Read the caller's read-only status as a plain `bool`, without rejecting the
@@ -1121,5 +1257,220 @@ mod tests {
             (6, 1, 2, 1, 1, 1)
         );
         assert_eq!(wire.kinds, vec!["b".to_owned(), "a".to_owned()]);
+    }
+}
+
+// ─── Test support: relay-routed creates ───────────────────────────────────────
+
+/// Shared fixtures for the create-verb tests here and in `pane_ops`, `tab_ops`
+/// and `space_ops`: a backend that records every ephemeral create it is asked
+/// for (the fallback path), a registered relay, and a stand-in for the relay's
+/// inbound task that answers one routed create.
+#[cfg(test)]
+pub(super) mod create_test_support {
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use crate::cli::BackendKind;
+    use crate::grpc::MuxrService;
+    use crate::multiplexer::{
+        ActionAck, BackendSet, CreatedView, DualHandle, LayoutSnapshot, MuxBackend, PaneRef,
+        ResizeDir, ResizeKind, ScrollDir,
+    };
+    use crate::relay::{ControlEntry, RelayControl};
+
+    /// The collapsed herdr session id every herdr relay registers under.
+    pub(crate) const HERDR: &str = "herdr:herdr";
+    /// A zellij session id (not collapsed: per-session names).
+    pub(crate) const ZELLIJ: &str = "zellij:test";
+
+    /// A backend recording every create that reaches it. Anything else panics.
+    #[derive(Debug, Default)]
+    pub(crate) struct RecordingCreates {
+        calls: Mutex<Vec<String>>,
+    }
+
+    impl RecordingCreates {
+        /// The creates that reached the backend, in order.
+        pub(crate) fn calls(&self) -> Vec<String> {
+            self.calls.lock().expect("calls mutex").clone()
+        }
+
+        fn record(&self, call: String) -> anyhow::Result<ActionAck> {
+            let info = format!("backend {call}");
+            self.calls.lock().expect("calls mutex").push(call);
+            Ok(ActionAck {
+                ok: true,
+                error: None,
+                info: Some(info),
+            })
+        }
+    }
+
+    impl MuxBackend for RecordingCreates {
+        fn supports_spaces(&self) -> bool {
+            true
+        }
+        fn new_pane(
+            &self,
+            session: &str,
+            floating: bool,
+            name: Option<String>,
+        ) -> anyhow::Result<ActionAck> {
+            self.record(format!(
+                "new_pane {session} floating={floating} name={name:?}"
+            ))
+        }
+        fn new_tab(&self, session: &str, name: Option<String>) -> anyhow::Result<ActionAck> {
+            self.record(format!("new_tab {session} name={name:?}"))
+        }
+        fn create_space(&self, label: Option<String>) -> anyhow::Result<ActionAck> {
+            self.record(format!("create_space label={label:?}"))
+        }
+
+        // ── Everything else is out of these tests' scope ─────────────────────
+        fn list_sessions(&self) -> anyhow::Result<Vec<(String, Duration)>> {
+            unimplemented!()
+        }
+        fn list_sessions_with_resurrectables(&self) -> anyhow::Result<Vec<(String, u64, bool)>> {
+            unimplemented!()
+        }
+        fn validate_session_name(&self, _: &str) -> Result<(), String> {
+            unimplemented!()
+        }
+        fn create_session(&self, _: &str, _: Option<String>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn kill_session(&self, _: &str) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_session(&self, _: &str, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn write_to_pane(&self, _: &str, _: PaneRef, _: Vec<u8>) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn focus_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_pane(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_pane(&self, _: &str, _: PaneRef, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn resize_pane(
+            &self,
+            _: &str,
+            _: PaneRef,
+            _: ResizeKind,
+            _: Option<ResizeDir>,
+        ) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_floating(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn toggle_pane_fullscreen(&self, _: &str, _: PaneRef) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn scroll_pane(&self, _: &str, _: PaneRef, _: ScrollDir) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn close_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn go_to_tab(&self, _: &str, _: u64) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn rename_tab(&self, _: &str, _: u64, _: String) -> anyhow::Result<ActionAck> {
+            unimplemented!()
+        }
+        fn query_layout(&self, _: &str) -> anyhow::Result<LayoutSnapshot> {
+            unimplemented!()
+        }
+        fn query_session_size(&self, _: &str) -> anyhow::Result<(u16, u16)> {
+            unimplemented!()
+        }
+        fn pane_is_floating_with_visibility(
+            &self,
+            _: &str,
+            _: PaneRef,
+        ) -> anyhow::Result<(bool, bool, Option<PaneRef>)> {
+            unimplemented!()
+        }
+        fn open_attach(&self, _: &str, _: u16, _: u16, _: bool) -> anyhow::Result<DualHandle> {
+            unimplemented!()
+        }
+        fn backend_version(&self) -> String {
+            "recording-creates-stub".to_owned()
+        }
+    }
+
+    /// A service serving `backend` as its only backend, of `kind`.
+    pub(crate) fn service(kind: BackendKind, backend: &Arc<RecordingCreates>) -> MuxrService {
+        let backend: Arc<dyn MuxBackend> = backend.clone();
+        MuxrService::with_backends(BackendSet::single(kind, backend))
+    }
+
+    /// Register a live relay `connection_id` on `session`; returns its control
+    /// receiver (the relay's inbound end).
+    pub(crate) fn relay(
+        service: &MuxrService,
+        connection_id: &str,
+        session: &str,
+        read_only: bool,
+    ) -> mpsc::UnboundedReceiver<RelayControl> {
+        let (tx, rx) = mpsc::unbounded_channel();
+        service.control.insert(
+            connection_id.to_owned(),
+            ControlEntry {
+                session: session.to_owned(),
+                sender: tx,
+                read_only,
+            },
+        );
+        rx
+    }
+
+    /// A created view: pane `pane` in tab `tab` of space `space`.
+    pub(crate) fn created(space: &str, tab: u64, pane: u32) -> CreatedView {
+        CreatedView {
+            space_id: space.to_owned(),
+            tab_id: tab,
+            pane: PaneRef::terminal(pane),
+        }
+    }
+
+    /// Play the relay's inbound task for ONE routed create: take the next
+    /// command (which must be a create), answer it with `outcome` (`None` drops
+    /// the reply unanswered, as a tearing-down or read-only relay would), and
+    /// return what the command carried.
+    pub(crate) fn answer_create(
+        mut rx: mpsc::UnboundedReceiver<RelayControl>,
+        outcome: Option<anyhow::Result<CreatedView>>,
+    ) -> tokio::task::JoinHandle<String> {
+        tokio::spawn(async move {
+            let (carried, reply) = match rx.recv().await {
+                Some(RelayControl::NewPane {
+                    floating,
+                    name,
+                    reply,
+                }) => (format!("NewPane floating={floating} name={name:?}"), reply),
+                Some(RelayControl::NewTab { name, reply }) => {
+                    (format!("NewTab name={name:?}"), reply)
+                }
+                Some(RelayControl::CreateSpace { label, reply }) => {
+                    (format!("CreateSpace label={label:?}"), reply)
+                }
+                other => panic!("expected a routed create, got {other:?}"),
+            };
+            if let Some(outcome) = outcome {
+                let _ = reply.send(outcome);
+            }
+            carried
+        })
     }
 }

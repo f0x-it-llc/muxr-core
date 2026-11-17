@@ -527,6 +527,54 @@ impl DualHandle {
     }
 }
 
+/// Where a create made through a live attach ([`MuxSender::new_pane`],
+/// [`MuxSender::new_tab`], [`MuxSender::create_space`]) left THIS connection:
+/// the new pane its stream is now attached to, that pane's tab and its space.
+///
+/// The ids are the neutral ones a `GetLayout` emits (registry ids on herdr), so a
+/// client can match them against its next layout read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedView {
+    /// Opaque space id (herdr `workspace_id`) the new pane lives in.
+    pub space_id: String,
+    /// Neutral tab id of the new pane's tab.
+    pub tab_id: u64,
+    /// The new pane, which the connection's stream now renders.
+    pub pane: PaneRef,
+}
+
+/// The error a [`MuxSender`] create default answers with: this backend cannot
+/// create through a live attach, so the caller should take the ephemeral
+/// [`MuxBackend`] path instead.
+///
+/// Typed (rather than a bare message) so the gRPC layer can tell "not supported
+/// here, fall back" apart from "tried and failed" by downcasting, without
+/// matching on error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateUnsupported {
+    /// The create verb that was declined (`"NewPane"`, `"NewTab"`, `"CreateSpace"`).
+    pub op: &'static str,
+}
+
+impl std::fmt::Display for CreateUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: unsupported through a live attach on this backend",
+            self.op
+        )
+    }
+}
+
+impl std::error::Error for CreateUnsupported {}
+
+impl CreateUnsupported {
+    /// `true` when `err` is (or wraps) a [`CreateUnsupported`].
+    pub fn is(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<Self>().is_some()
+    }
+}
+
 /// The input/control half of a [`DualHandle`].
 ///
 /// Exposes the neutral operations the relay's inbound task + `ShutdownGuard`
@@ -551,6 +599,37 @@ pub trait MuxSender: Send {
     fn switch_space(&mut self, space_id: &str) -> anyhow::Result<()> {
         let _ = space_id;
         Err(anyhow::anyhow!("this backend does not support spaces"))
+    }
+
+    /// Open a new pane next to THIS rendering client's attached pane, without
+    /// moving any other client's focus, and re-point this connection at it.
+    ///
+    /// The herdr sender splits its own attached pane (explicit target, its own
+    /// workspace, `focus=false`) and re-attaches its wire stream to the new pane.
+    /// The **default errors** with [`CreateUnsupported`]: a backend whose attach
+    /// follows the server's own focus (zellij) has no per-connection create, and
+    /// the gRPC handler answers that by taking the ephemeral backend path.
+    fn new_pane(&mut self, floating: bool, name: Option<String>) -> anyhow::Result<CreatedView> {
+        let _ = (floating, name);
+        Err(anyhow::Error::new(CreateUnsupported { op: "NewPane" }))
+    }
+
+    /// Open a new tab in THIS rendering client's space, without moving any other
+    /// client's focus, and re-point this connection at the new tab's pane.
+    ///
+    /// The **default errors** with [`CreateUnsupported`] (see [`Self::new_pane`]).
+    fn new_tab(&mut self, name: Option<String>) -> anyhow::Result<CreatedView> {
+        let _ = name;
+        Err(anyhow::Error::new(CreateUnsupported { op: "NewTab" }))
+    }
+
+    /// Create a new space without moving the daemon-global focus, and switch THIS
+    /// rendering client's view to it in place (as [`Self::switch_space`] does).
+    ///
+    /// The **default errors** with [`CreateUnsupported`] (see [`Self::new_pane`]).
+    fn create_space(&mut self, label: Option<String>) -> anyhow::Result<CreatedView> {
+        let _ = label;
+        Err(anyhow::Error::new(CreateUnsupported { op: "CreateSpace" }))
     }
 
     /// Toggle fullscreen / floating-fill for `pane`, given the resolved floating

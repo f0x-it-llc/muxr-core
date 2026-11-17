@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use crate::multiplexer::{LayoutSnapshot, PaneRef};
+use crate::multiplexer::{CreatedView, LayoutSnapshot, PaneRef};
 use crate::proto::ServerFrame;
 
 // ─── RelayControl ─────────────────────────────────────────────────────────────
@@ -40,6 +40,15 @@ pub struct FloatingHint {
 /// the toggle is skipped with nothing sent, since the RPC has already answered
 /// `ok:false`.
 pub type ToggleFullscreenReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+/// Reply channel of the relay-routed create verbs ([`RelayControl::NewPane`],
+/// [`RelayControl::NewTab`], [`RelayControl::CreateSpace`]): where the create
+/// left this connection, or why it did not happen. A
+/// [`CreateUnsupported`](crate::multiplexer::CreateUnsupported) error means the
+/// backend has no per-connection create (zellij) and the RPC takes the ephemeral
+/// backend path instead; any other error is the create's failure. A dropped
+/// sender (relay teardown, or the read-only gate) means nothing was created.
+pub type CreateReply = tokio::sync::oneshot::Sender<anyhow::Result<CreatedView>>;
 
 /// Control command routed to a live relay's AttachClient connection
 /// (W2.0a/b spike). Sent by the unary `GoToTab`/`FocusPane` RPCs through the
@@ -116,6 +125,37 @@ pub enum RelayControl {
     QueryLayout {
         reply: tokio::sync::oneshot::Sender<anyhow::Result<LayoutSnapshot>>,
     },
+    /// Open a new pane as THIS connection: next to its attached pane, in its
+    /// space, without moving herdr's daemon-global focus — then re-point this
+    /// connection's stream at the new pane.
+    ///
+    /// Replied like [`SwitchSpace`](Self::SwitchSpace): the inbound arm calls
+    /// [`MuxSender::new_pane`](crate::multiplexer::MuxSender::new_pane) on the
+    /// blocking pool, records the new pane (and its tab and space) in this
+    /// relay's view state on success, and fulfills `reply`. A mutating control:
+    /// a read-only relay drops it.
+    NewPane {
+        floating: bool,
+        name: Option<String>,
+        reply: CreateReply,
+    },
+    /// Open a new tab in THIS connection's space without moving herdr's focus,
+    /// then re-point this connection's stream at the new tab's pane. Replied and
+    /// gated like [`NewPane`](Self::NewPane), through
+    /// [`MuxSender::new_tab`](crate::multiplexer::MuxSender::new_tab).
+    NewTab {
+        name: Option<String>,
+        reply: CreateReply,
+    },
+    /// Create a new space without moving herdr's daemon-global focus, then switch
+    /// THIS connection's view to it in place, as
+    /// [`SwitchSpace`](Self::SwitchSpace) does. Replied and gated like
+    /// [`NewPane`](Self::NewPane), through
+    /// [`MuxSender::create_space`](crate::multiplexer::MuxSender::create_space).
+    CreateSpace {
+        label: Option<String>,
+        reply: CreateReply,
+    },
 }
 
 // ─── RelayViewState ───────────────────────────────────────────────────────────
@@ -138,8 +178,10 @@ pub enum RelayControl {
 /// focus move may switch tabs and the arm does no layout read); an enter / fill
 /// toggle the target and the target's tab (`None` for a client-hinted one); a
 /// floating hide clears the focus and keeps the tab it was verified on;
-/// SwitchSpace clears both. So an `active_tab` never outlives the move that set
-/// it, and both fields agree whenever both are set.
+/// SwitchSpace clears both; a relay-routed NewPane / NewTab / CreateSpace records
+/// the new pane, its tab and its space, all three taken from the create's own
+/// answer. So an `active_tab` never outlives the move that set it, and both
+/// fields agree whenever both are set.
 #[derive(Debug, Clone, Default)]
 pub struct RelayViewState {
     /// The tab_id of the tab this relay client's own last move landed on.

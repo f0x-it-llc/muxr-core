@@ -73,9 +73,11 @@ use super::relay;
 /// gRPC `GetSessionSize` reply sane rather than `0×0`.
 const DEFAULT_SESSION_SIZE: (u16, u16) = (24, 80);
 
-/// Default split direction for [`MuxBackend::new_pane`]. herdr only models
-/// `Right` / `Down`; `Right` mirrors zellij's default "split vertically".
-const DEFAULT_SPLIT_DIRECTION: SplitDirection = SplitDirection::Right;
+/// Default split direction for [`MuxBackend::new_pane`] and the relay-routed
+/// `MuxSender::new_pane` (`relay.rs`), so both create paths split the same way.
+/// herdr only models `Right` / `Down`; `Right` mirrors zellij's default "split
+/// vertically".
+pub(super) const DEFAULT_SPLIT_DIRECTION: SplitDirection = SplitDirection::Right;
 
 /// Bare-name sentinel for herdr's single collapsed muxr session (Option A —
 /// herdr Spaces). A herdr daemon has no session container; muxrd presents the
