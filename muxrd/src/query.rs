@@ -173,7 +173,7 @@ fn session_socket_path(session_name: &str) -> PathBuf {
 
 /// Query `ListTabs` for a session and return the JSON string (the single Log line).
 ///
-/// Caller parses into `Vec<TabInfo>` using `serde_json::from_str`.
+/// Caller parses with [`parse_list_tabs_json`].
 pub fn query_list_tabs_json(session: &str) -> Result<String> {
     let action = Action::ListTabs {
         show_state: true,
@@ -207,13 +207,69 @@ pub fn query_list_tabs_json(session: &str) -> Result<String> {
 /// [`pane_is_floating_with_visibility`] and the layout parse
 /// (`multiplexer::zellij::parse_zellij_layout`) all go through it.
 pub(crate) fn parse_list_tabs_json(json: &str) -> Result<zellij_utils::data::ListTabsResponse> {
+    use zellij_utils::data::TabInfo;
+
     let mut values: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    let defaults = serde_json::to_value(TabInfo::default())?;
     for (index, value) in values.iter_mut().enumerate() {
-        if let Some(tab) = value.as_object_mut()
-            && !tab.contains_key("position")
-        {
+        let Some(tab) = value.as_object_mut() else {
+            continue;
+        };
+        // Shape check first, so the fill below cannot make a pane entry decode
+        // as a tab: a tab has `active` and never `is_plugin`.
+        if !tab.contains_key("active") || tab.contains_key("is_plugin") {
+            bail!("ListTabs element at index {index} is not a tab object");
+        }
+        if !tab.contains_key("position") {
             tab.insert("position".to_owned(), serde_json::Value::from(index));
         }
+        fill_missing_keys(tab, &defaults);
+    }
+    values
+        .into_iter()
+        .map(|value| serde_json::from_value(value).map_err(anyhow::Error::from))
+        .collect()
+}
+
+/// Insert every key of `defaults` that `object` lacks; present keys are kept.
+fn fill_missing_keys(
+    object: &mut serde_json::Map<String, serde_json::Value>,
+    defaults: &serde_json::Value,
+) {
+    if let Some(defaults) = defaults.as_object() {
+        for (key, value) in defaults {
+            if !object.contains_key(key) {
+                object.insert(key.clone(), value.clone());
+            }
+        }
+    }
+}
+
+/// Parse a `ListPanes` JSON payload into a `ListPanesResponse`, accepting the
+/// reply of a zellij 0.45.1 or 0.46.0 server.
+///
+/// 0.46.0 added `PaneInfo` fields that carry no serde default, so a 0.45.1
+/// reply lacks them. Each pane object gets every absent key from the
+/// serialized `PaneInfo::default()` (present keys are never overwritten)
+/// before the typed decode. An element without `is_plugin` and `id` is not a
+/// pane entry (a `ListTabs` array fails here) and is a decode error.
+///
+/// This is the single `ListPanes` decode: [`pane_is_floating_with_visibility`]
+/// and the layout parse (`multiplexer::zellij::parse_zellij_layout`) go
+/// through it.
+pub(crate) fn parse_list_panes_json(json: &str) -> Result<zellij_utils::data::ListPanesResponse> {
+    use zellij_utils::data::PaneInfo;
+
+    let mut values: Vec<serde_json::Value> = serde_json::from_str(json)?;
+    let defaults = serde_json::to_value(PaneInfo::default())?;
+    for (index, value) in values.iter_mut().enumerate() {
+        let Some(entry) = value.as_object_mut() else {
+            continue;
+        };
+        if !entry.contains_key("is_plugin") || !entry.contains_key("id") {
+            bail!("ListPanes element at index {index} is not a pane entry");
+        }
+        fill_missing_keys(entry, &defaults);
     }
     values
         .into_iter()
@@ -223,7 +279,7 @@ pub(crate) fn parse_list_tabs_json(json: &str) -> Result<zellij_utils::data::Lis
 
 /// Query `ListPanes` for a session and return the JSON string.
 ///
-/// Caller parses into `Vec<PaneListEntry>` using `serde_json::from_str`.
+/// Caller parses with [`parse_list_panes_json`].
 pub fn query_list_panes_json(session: &str) -> Result<String> {
     let action = Action::ListPanes {
         show_tab: true,
@@ -341,7 +397,7 @@ pub fn pane_is_floating_with_visibility(
 
     // ── IPC 1: pane list — determines is_floating + focused_floating_pane ───
     let panes_json = query_list_panes_json(session)?;
-    let panes: ListPanesResponse = serde_json::from_str(&panes_json).with_context(|| {
+    let panes: ListPanesResponse = parse_list_panes_json(&panes_json).with_context(|| {
         format!("pane_is_floating_with_visibility: parse ListPanes for '{session}'")
     })?;
     let is_floating = panes.iter().any(|entry| {
@@ -417,4 +473,128 @@ pub fn list_sessions_with_resurrectables() -> Result<Vec<(String, u64, bool)>> {
     }
 
     Ok(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use zellij_utils::data::{PaneInfo, PaneListEntry, TabInfo};
+
+    const TAB_KEYS_ADDED_IN_046: [&str; 2] = ["attention", "other_focused_client_slots"];
+    const PANE_KEYS_ADDED_IN_046: [&str; 5] = [
+        "attention",
+        "command_state",
+        "is_collapsed",
+        "nested_session_name",
+        "program_status",
+    ];
+
+    fn sample_tabs() -> Vec<TabInfo> {
+        vec![
+            TabInfo {
+                position: 0,
+                name: "one".into(),
+                active: true,
+                tab_id: 4,
+                is_fullscreen_active: true,
+                display_area_rows: 40,
+                display_area_columns: 120,
+                ..Default::default()
+            },
+            TabInfo {
+                position: 1,
+                name: "two".into(),
+                tab_id: 9,
+                are_floating_panes_visible: true,
+                ..Default::default()
+            },
+        ]
+    }
+
+    fn sample_panes() -> Vec<PaneListEntry> {
+        let pane = |id: u32, plugin: bool| PaneListEntry {
+            pane_info: PaneInfo {
+                id,
+                is_plugin: plugin,
+                is_focused: id == 1,
+                is_floating: id == 2,
+                title: format!("pane-{id}"),
+                pane_x: 3,
+                pane_y: 4,
+                pane_rows: 20,
+                pane_columns: 80,
+                ..Default::default()
+            },
+            tab_id: 4,
+            tab_position: 0,
+            tab_name: "one".into(),
+            pane_command: (!plugin).then(|| "sh".to_owned()),
+            pane_cwd: (!plugin).then(|| "/tmp".to_owned()),
+        };
+        vec![pane(0, true), pane(1, false), pane(2, false)]
+    }
+
+    fn strip(items: &[impl serde::Serialize], keys: &[&str]) -> String {
+        let mut value = serde_json::to_value(items).unwrap();
+        for item in value.as_array_mut().unwrap() {
+            for key in keys {
+                item.as_object_mut().unwrap().remove(*key);
+            }
+        }
+        serde_json::to_string_pretty(&value).unwrap()
+    }
+
+    #[test]
+    fn tabs_from_a_045_server_decode() {
+        let tabs = sample_tabs();
+        let json = strip(&tabs, &TAB_KEYS_ADDED_IN_046);
+        assert!(serde_json::from_str::<zellij_utils::data::ListTabsResponse>(&json).is_err());
+        let parsed = parse_list_tabs_json(&json).expect("0.45.1 tabs decode");
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].name, "one");
+        assert!(parsed[0].active && parsed[0].is_fullscreen_active);
+        assert_eq!(parsed[1].tab_id, 9);
+        assert!(parsed[1].are_floating_panes_visible);
+    }
+
+    #[test]
+    fn panes_from_a_045_server_decode() {
+        let panes = sample_panes();
+        let json = strip(&panes, &PANE_KEYS_ADDED_IN_046);
+        assert!(serde_json::from_str::<zellij_utils::data::ListPanesResponse>(&json).is_err());
+        let parsed = parse_list_panes_json(&json).expect("0.45.1 panes decode");
+        assert_eq!(parsed.len(), 3);
+        assert!(parsed[0].pane_info.is_plugin);
+        assert_eq!(parsed[1].pane_command.as_deref(), Some("sh"));
+        assert_eq!(parsed[1].pane_cwd.as_deref(), Some("/tmp"));
+        assert!(parsed[2].pane_info.is_floating);
+        assert_eq!(parsed[2].pane_info.pane_columns, 80);
+    }
+
+    #[test]
+    fn a_046_shaped_payload_decodes_to_the_serialized_values() {
+        let tabs = sample_tabs();
+        let tabs_json = serde_json::to_string(&tabs).unwrap();
+        let parsed = parse_list_tabs_json(&tabs_json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::to_value(&tabs).unwrap()
+        );
+
+        let panes = sample_panes();
+        let panes_json = serde_json::to_string(&panes).unwrap();
+        let parsed = parse_list_panes_json(&panes_json).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed).unwrap(),
+            serde_json::to_value(&panes).unwrap()
+        );
+    }
+
+    #[test]
+    fn the_two_payload_kinds_do_not_decode_as_each_other() {
+        let panes_json = serde_json::to_string(&sample_panes()).unwrap();
+        let tabs_json = serde_json::to_string(&sample_tabs()).unwrap();
+        assert!(parse_list_tabs_json(&panes_json).is_err());
+        assert!(parse_list_panes_json(&tabs_json).is_err());
+    }
 }
