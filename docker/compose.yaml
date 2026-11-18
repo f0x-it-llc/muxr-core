@@ -39,6 +39,8 @@ services:
       # Explicit target so `docker compose up` builds ONLY the zellij runtime and
       # never the opt-in herdr stage (runtime-herdr).
       target: runtime
+      args:
+        ZELLIJ_VERSION: "${ZELLIJ_VERSION:-0.46.0}"   # 0.46.0 or 0.45.1, the zellij versions muxrd supports
     image: muxr-grpc-rig
     container_name: muxr-grpc-rig
     # BIND_ADDR controls which host interface the ports are published on.
@@ -85,6 +87,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime-herdr
       args:
+        ZELLIJ_VERSION: "${ZELLIJ_VERSION:-0.46.0}"   # 0.46.0 or 0.45.1, the zellij versions muxrd supports
         HERDR_VERSION: "${HERDR_VERSION:-0.9.5}"   # pinned to the last TESTED release (protocol 22); bump with wire.rs — see Dockerfile
     image: muxr-herdr-rig
     container_name: muxr-herdr-rig
@@ -126,6 +129,7 @@ services:
       dockerfile: docker/Dockerfile
       target: runtime-herdr
       args:
+        ZELLIJ_VERSION: "${ZELLIJ_VERSION:-0.46.0}"   # 0.46.0 or 0.45.1, the zellij versions muxrd supports
         HERDR_VERSION: "${HERDR_VERSION:-0.9.5}"   # pinned to the last TESTED release (protocol 22); bump with wire.rs — see Dockerfile
     image: muxr-both-rig
     container_name: muxr-both-rig

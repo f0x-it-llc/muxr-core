@@ -4,10 +4,11 @@
 # Multi-stage build:
 #   builder        — rust:1.95-alpine, static musl binaries (muxrd + muxrctl +
 #                    muxr-notify — the whole workspace). 1.95 is the workspace's
-#                    `rust-version` floor (raised for zellij 0.45.1) and cargo
+#                    `rust-version` floor (raised for zellij-utils 0.45.1) and cargo
 #                    enforces it per package, so an older base image cannot build
 #                    this workspace at all
-#   runtime        — debian:trixie-slim with full terminal tooling + zellij 0.45.1,
+#   runtime        — debian:trixie-slim with full terminal tooling + zellij
+#                    (build argument ZELLIJ_VERSION: 0.46.0 by default, or 0.45.1),
 #                    an SSH server, muxrctl to configure/start the server, and
 #                    muxr-notify (started in-container by the entrypoint in
 #                    FCM_MODE=log, so `MUXRD_NOTIFY_RELAY_URL` has a local target
@@ -102,7 +103,7 @@ RUN OPENSSL_STATIC=1 PKG_CONFIG_ALL_STATIC=1 \
     cargo build --release --workspace
 
 # ══════════════════════════════════════════════════════════════════════════════
-# Stage 2 — runtime: Debian tooling image + zellij 0.45.1 pinned (DEFAULT image)
+# Stage 2 — runtime: Debian tooling image + zellij (DEFAULT image)
 # ══════════════════════════════════════════════════════════════════════════════
 FROM debian:trixie-slim AS runtime
 
@@ -130,32 +131,39 @@ RUN apt-get install -y --no-install-recommends \
       cmatrix sl cowsay fortune-mod fastfetch ; \
     rm -rf /var/lib/apt/lists/*
 
-# ── Zellij PINNED v0.45.1 (the version muxrd is compiled against) ──────
-# muxrd refuses to start on any other version — do NOT change this. The version
-# in the URL and the version asserted below are ONE pin in two places: moving
-# either alone ships a mismatched server or fails the build for the wrong reason.
+# ── Zellij (ZELLIJ_VERSION: 0.46.0 by default, or 0.45.1) ─────────────────────
+# muxrd supports the current zellij release line and the newest one; this
+# argument selects which of them the rig runs. The rig is for the versions
+# muxrd supports, so any other value fails the build here rather than giving
+# an image whose muxrd refuses to start. The same variable builds the URL and
+# the assertion, so the two cannot drift apart.
 #
 # Architecture-aware: `TARGETARCH` is `amd64`/`arm64`, while zellij names its
 # assets after Rust target triples — hence the mapping to `x86_64`/`aarch64`.
 ARG TARGETARCH
+ARG ZELLIJ_VERSION=0.46.0
 RUN set -eux; \
+    case "${ZELLIJ_VERSION}" in \
+      0.45.1|0.46.0) ;; \
+      *) echo "ERROR: ZELLIJ_VERSION='${ZELLIJ_VERSION}' is not a zellij version this rig supports (0.45.1 or 0.46.0)" >&2; exit 1 ;; \
+    esac; \
     case "${TARGETARCH:-amd64}" in \
       amd64) zj_arch=x86_64 ;; \
       arm64) zj_arch=aarch64 ;; \
       *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
     esac; \
     curl -fsSL \
-      "https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
+      "https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin; \
     chmod +x /usr/local/bin/zellij; \
     zellij --version; \
-    zellij --version | grep -q "0.45.1" || { echo "ERROR: zellij version is not 0.45.1" >&2; exit 1; }
+    zellij --version | grep -qx "zellij ${ZELLIJ_VERSION}" || { echo "ERROR: zellij version is not ${ZELLIJ_VERSION}" >&2; exit 1; }
 
 # ── lazygit (release binary; not in apt) ─────────────────────────────────────
 # lazygit spells its ARM asset `arm64`, NOT `aarch64` like zellij and herdr, so
 # it maps `TARGETARCH` on its own — reusing the zellij/herdr token here would
-# build fine on amd64 and 404 only on an arm64 host.
-ARG TARGETARCH
+# build fine on amd64 and 404 only on an arm64 host. (`TARGETARCH` is already
+# declared in this stage, above the zellij step.)
 RUN set -eux; \
     case "${TARGETARCH:-amd64}" in \
       amd64) lg_arch=x86_64 ;; \
@@ -243,7 +251,7 @@ ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 # Stage 3 — runtime-herdr: the runtime image (zellij) + a pinned, UNMODIFIED herdr
 #           binary → an image carrying BOTH backends
 # ══════════════════════════════════════════════════════════════════════════════
-# Opt-in variant. Because it extends `runtime` (which already has zellij 0.45.1)
+# Opt-in variant. Because it extends `runtime` (which already has zellij)
 # and adds the herdr binary, this single image can run muxrd against herdr alone
 # (`BACKEND=herdr`) OR against zellij AND herdr simultaneously (`BACKEND=both`,
 # Phase 3 serve-all — the on-device multi-backend test rig). The entrypoint

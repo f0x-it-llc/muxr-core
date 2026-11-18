@@ -6,8 +6,10 @@ Zellij session and a full set of terminal tools so the mobile client has a real,
 interesting target. You SSH into the container and drive everything with
 `muxrctl`.
 
-**Zellij is pinned to v0.45.1** (the version muxrd was compiled against;
-it refuses to start on any other version).
+**The rig runs zellij 0.46.0 by default, or 0.45.1** — the two versions muxrd
+supports (0.45.x from 0.45.1, and 0.46.x). Choose with the `ZELLIJ_VERSION`
+build argument: `ZELLIJ_VERSION=0.45.1 ./docker/run.sh`. Any other value fails
+the image build.
 
 > The rig defaults to the **zellij** backend. To exercise muxrd's **herdr**
 > backend instead, use the opt-in herdr profile — see
@@ -24,7 +26,8 @@ it refuses to start on any other version).
   `muxrd`'s notifier has a local e2e target. Set `NOTIFY_ENABLED=0` to skip it. See
   [`muxr-notify/README.md`](../muxr-notify/README.md) — it is a **separate,
   independently-deployed artifact**, never part of the muxr-core release suite.
-- **Zellij v0.45.1** running a pre-populated `backend-dev` session (see `layout.kdl`):
+- **Zellij** (0.46.0 by default, 0.45.1 with `ZELLIJ_VERSION=0.45.1`) running a
+  pre-populated `backend-dev` session (see `layout.kdl`):
   an `editor` tab (nvim + shell + btop), a `shell` tab (shell + htop), and a
   `logs` tab (live log stream).
 - Terminal tooling: **Neovim + NvChad**, **btop**, htop, lazygit, ripgrep, fd,
@@ -267,27 +270,52 @@ cache: use `./docker/run.sh --fresh` (scoped `--no-cache` rebuild) or
 
 ## Troubleshooting
 
-### Upgrading zellij: kill stale servers first
+### Two zellij versions, one socket directory
 
-zellij's client–server contract version did **not** change between 0.44.3 and
-0.45.1 (`CLIENT_SERVER_CONTRACT_VERSION = 1` in both), so the two releases share
-one socket directory (`…/contract_version_1`). A zellij **server** left running
-from the old release therefore survives the upgrade: it stays listable with
-`zellij list-sessions`, and a 0.45.1-linked `muxrd` will connect to it — muxrd's
-version gate checks the installed `zellij` **binary**, not each live session. The
-mismatch then shows up as odd behaviour at attach time instead of a clean
-startup error.
+zellij's client–server contract version is the same in 0.44.3, 0.45.1 and
+0.46.0 (`CLIENT_SERVER_CONTRACT_VERSION = 1`), so every one of these releases
+uses one socket directory (`…/contract_version_1`). A zellij **server** left
+running from an older release therefore survives an upgrade of the binary: it
+stays listable with `zellij list-sessions`, and `muxrd` will connect to it —
+muxrd's version gate checks the installed `zellij` **binary**, not each live
+session.
 
-After upgrading, kill the old servers before starting new ones:
+What that means per version:
+
+- **0.45.1 and 0.46.0 together are supported.** A muxrd built from this
+  checkout drives sessions of both in one socket directory. zellij 0.46.0
+  names a new session's socket after a generated id and resolves names through
+  its session index; a name the index does not know resolves to the socket of
+  that name, which is where a 0.45.1 server listens. zellij 0.46.0 also keeps
+  a session's index entry after the session is killed; muxrd falls back to the
+  name-named socket when the id-named one is gone, so a 0.45.1 session that
+  reuses the name stays reachable.
+- **A muxrd release up to 0.5.3** requires the installed zellij to be exactly
+  0.45.1.
+- **A server older than 0.45.1** (0.44.3, say) is not supported by any current
+  muxrd. Left running across an upgrade it shows up as odd behaviour at attach
+  time instead of a clean startup error: kill it.
+
+zellij 0.46.0 does not create a new tab in a session that no client has
+attached to yet (once a client has attached, tabs are created detached as
+well). muxrd then answers `NewTab` with a failed ack that tells the user to
+open the session first.
+
+To clear old servers **inside the rig container**:
 
 ```bash
+# inside the container (./docker/ssh.sh), never on the host:
 zellij kill-all-sessions               # stop every running server
 zellij delete-all-sessions --yes       # also drop resurrectable session state
 ```
 
+Both commands act on every session in the socket directory. Do **not** run
+them on the host: there they stop and delete all of your own zellij sessions.
+On a host, kill only the stale session by name (`zellij kill-session <name>`).
+
 A rig started fresh with `./docker/run.sh` is unaffected — a new container has an
-empty socket directory. The trap applies to a zellij on the **host**, and to a
-long-lived rig container whose zellij was upgraded in place.
+empty socket directory. The trap applies to a long-lived rig container whose
+zellij was changed in place.
 
 ## Notes
 
@@ -302,10 +330,13 @@ long-lived rig container whose zellij was upgraded in place.
   dev-rig only). `SSH_PORT` changes the published SSH port (default `2222`).
   Connect via `./docker/ssh.sh` — host keys change on every rebuild, so plain
   `ssh` trips the known_hosts check (see Quickstart).
-- **Zellij version:** must remain 0.45.1. Upgrading zellij without recompiling
-  muxrd will cause a version-mismatch error at startup. Moving *up* from 0.44.3
-  has a second trap — a server left running from the old release survives the
-  upgrade; see [Troubleshooting](#troubleshooting).
+- **Zellij version:** 0.46.0 (default) or 0.45.1, set with `ZELLIJ_VERSION`.
+  When zellij is the requested backend, as in this rig, muxrd refuses to start
+  if the installed zellij is outside its supported set and names the supported
+  versions in the error. (With backends auto-detected, an unsupported zellij
+  is left out instead and muxrd serves the others.) A server left running
+  from another release survives a change of the binary; see
+  [Troubleshooting](#troubleshooting).
 - **muxr-notify:** `NOTIFY_ENABLED` (default `1`) and `NOTIFY_PORT` (default `8090`)
   control the in-container relay. It always runs `FCM_MODE=log` in the rig — no
   real FCM send happens, the would-be message is logged (`docker exec <container>
