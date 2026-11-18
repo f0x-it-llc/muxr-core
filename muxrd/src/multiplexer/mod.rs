@@ -47,6 +47,13 @@ pub use types::{
 };
 pub use zellij::ZellijBackend;
 
+/// `MuxEvent::Exit` reason (sent to the app as control kind `exit`, payload exactly
+/// this string) when a herdr attach stream ends because the attached pane no
+/// longer exists while the daemon still answers. It tells the app "this pane is
+/// gone" apart from "the session is gone" (whose exit carries herdr's own reason,
+/// or no event at all on a bare EOF).
+pub const PANE_EXITED_REASON: &str = "pane-exited";
+
 // Re-export routing helpers at the multiplexer level so relay and grpc can
 // import them as `crate::multiplexer::{make_id, resolve_session, …}` — the
 // correct layer (relay depends on multiplexer, grpc depends on multiplexer;
@@ -63,6 +70,10 @@ pub(crate) use herdr::backend::HERDR_SESSION;
 /// integration test harness.  The herdr sub-module remains `pub(crate)` to keep
 /// its wire/API internals crate-private; only the public entry point is lifted.
 pub use herdr::backend::HerdrBackend;
+/// Worst case of one relay-routed re-point op (a create or a `SwitchSpace`),
+/// derived from the herdr sender's own timeouts and retry count; the gRPC layer
+/// builds its reply budget for those RPCs on it.
+pub(crate) use herdr::relay::ROUTED_REPOINT_WORST_CASE;
 /// The herdr event-kernel spawn entry point (task 01). Re-exported publicly so
 /// `bin/muxrd.rs::serve()` can start the persistent `events.subscribe` consumer
 /// without reaching into the crate-private `herdr` sub-module. Only spawned when
@@ -256,6 +267,27 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
     /// an empty list is a legitimate answer for a live spaces backend.
     fn supports_spaces(&self) -> bool {
         false
+    }
+
+    /// Whether a live attach of this backend can create a pane, tab or space AS
+    /// ITS OWN CONNECTION ([`MuxSender::new_pane`], [`MuxSender::new_tab`],
+    /// [`MuxSender::create_space`]) — so a create RPC carrying a `connection_id`
+    /// is worth routing into that connection's relay at all.
+    ///
+    /// A cheap, side-effect-free capability predicate (no I/O), asked by the gRPC
+    /// create handlers BEFORE they touch the relay: a backend answering `false`
+    /// takes the ephemeral [`MuxBackend`] create path immediately, with no relay
+    /// round trip (and so no wait behind a busy relay loop).
+    ///
+    /// The **default is [`Self::supports_spaces`]**: a relay-routed create rests on
+    /// the per-connection view model spaces already require — an attach that
+    /// renders one connection's own pane and is re-pointed per connection (herdr).
+    /// A backend whose attach follows the server's own focus (zellij, no spaces)
+    /// has no per-connection create and answers `false`. An override must agree
+    /// with the backend's sender: `true` only where its create methods do more
+    /// than answer [`CreateUnsupported`].
+    fn supports_relay_create(&self) -> bool {
+        self.supports_spaces()
     }
 
     /// Build a neutral [`LayoutSnapshot`] for a **specific** space of `session`.
@@ -527,6 +559,110 @@ impl DualHandle {
     }
 }
 
+/// What a create made through a live attach ([`MuxSender::new_pane`],
+/// [`MuxSender::new_tab`], [`MuxSender::create_space`]) created: the new pane,
+/// that pane's tab and its space — where THIS connection now is when the
+/// re-point succeeded ([`CreateOutcome::Attached`]).
+///
+/// The ids are the neutral ones a `GetLayout` emits (registry ids on herdr), so a
+/// client can match them against its next layout read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreatedView {
+    /// Opaque space id (herdr `workspace_id`) the new pane lives in.
+    pub space_id: String,
+    /// Neutral tab id of the new pane's tab.
+    pub tab_id: u64,
+    /// The new pane, which the connection's stream now renders.
+    pub pane: PaneRef,
+}
+
+/// What a create made through a live attach did, once the backend created the
+/// object: either this connection now renders it, or it exists but this
+/// connection could not be re-pointed at it.
+///
+/// The second case is deliberately an `Ok` outcome, not an error: the object
+/// EXISTS, so the caller must be told which one (a plain failure invites a retry
+/// that creates a duplicate). A create that never happened is an `Err`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateOutcome {
+    /// Created, and this connection's stream now renders the new pane.
+    Attached(CreatedView),
+    /// Created, but re-pointing this connection at it failed (`cause`). `view`
+    /// names the created object; the connection's stream is torn down and the
+    /// client's auto-reattach takes over.
+    CreatedNotAttached {
+        /// The created pane, its tab and its space.
+        view: CreatedView,
+        /// Why the re-point failed (operator detail, already logged).
+        cause: String,
+    },
+}
+
+/// The error a relay-routed create answers with when it cannot say whether the
+/// object was created: the create call itself broke off after it may have reached
+/// the backend (a transport failure mid-call), or the op died mid-flight.
+///
+/// Typed so the gRPC layer answers the caller "outcome unknown" — never a wording
+/// that implies nothing was created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateOutcomeUnknown {
+    /// The create verb (`"NewPane"`, `"NewTab"`, `"CreateSpace"`).
+    pub op: &'static str,
+    /// What broke off (operator detail).
+    pub cause: String,
+}
+
+impl std::fmt::Display for CreateOutcomeUnknown {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: outcome unknown ({}); it may have been created",
+            self.op, self.cause
+        )
+    }
+}
+
+impl std::error::Error for CreateOutcomeUnknown {}
+
+impl CreateOutcomeUnknown {
+    /// `true` when `err` is (or wraps) a [`CreateOutcomeUnknown`].
+    pub fn is(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<Self>().is_some()
+    }
+}
+
+/// The error a [`MuxSender`] create default answers with: this backend cannot
+/// create through a live attach, so the caller should take the ephemeral
+/// [`MuxBackend`] path instead.
+///
+/// Typed (rather than a bare message) so the gRPC layer can tell "not supported
+/// here, fall back" apart from "tried and failed" by downcasting, without
+/// matching on error text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateUnsupported {
+    /// The create verb that was declined (`"NewPane"`, `"NewTab"`, `"CreateSpace"`).
+    pub op: &'static str,
+}
+
+impl std::fmt::Display for CreateUnsupported {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}: unsupported through a live attach on this backend",
+            self.op
+        )
+    }
+}
+
+impl std::error::Error for CreateUnsupported {}
+
+impl CreateUnsupported {
+    /// `true` when `err` is (or wraps) a [`CreateUnsupported`].
+    pub fn is(err: &anyhow::Error) -> bool {
+        err.downcast_ref::<Self>().is_some()
+    }
+}
+
 /// The input/control half of a [`DualHandle`].
 ///
 /// Exposes the neutral operations the relay's inbound task + `ShutdownGuard`
@@ -551,6 +687,57 @@ pub trait MuxSender: Send {
     fn switch_space(&mut self, space_id: &str) -> anyhow::Result<()> {
         let _ = space_id;
         Err(anyhow::anyhow!("this backend does not support spaces"))
+    }
+
+    /// Open a new pane next to THIS rendering client's attached pane, without
+    /// moving any other client's focus, and re-point this connection at it.
+    ///
+    /// The herdr sender splits its own attached pane (explicit target, its own
+    /// workspace, `focus=false`) and re-attaches its wire stream to the new pane.
+    ///
+    /// Outcomes: `Ok(`[`CreateOutcome::Attached`]`)` — created and followed;
+    /// `Ok(`[`CreateOutcome::CreatedNotAttached`]`)` — created, but the re-point
+    /// failed (the ids are still reported, so no caller retries into a
+    /// duplicate); `Err` — nothing was created, or ([`CreateOutcomeUnknown`]) it
+    /// cannot be said whether it was.
+    ///
+    /// The **default errors** with [`CreateUnsupported`]: a backend whose attach
+    /// follows the server's own focus (zellij) has no per-connection create. The
+    /// gRPC handler never routes there in the first place
+    /// ([`MuxBackend::supports_relay_create`]); the typed error is the backstop.
+    fn new_pane(&mut self, floating: bool, name: Option<String>) -> anyhow::Result<CreateOutcome> {
+        let _ = (floating, name);
+        Err(anyhow::Error::new(CreateUnsupported { op: "NewPane" }))
+    }
+
+    /// Open a new tab in THIS rendering client's space, without moving any other
+    /// client's focus, and re-point this connection at the new tab's pane.
+    ///
+    /// Outcomes and the **default** ([`CreateUnsupported`]) as [`Self::new_pane`].
+    fn new_tab(&mut self, name: Option<String>) -> anyhow::Result<CreateOutcome> {
+        let _ = name;
+        Err(anyhow::Error::new(CreateUnsupported { op: "NewTab" }))
+    }
+
+    /// Create a new space without moving the daemon-global focus, and switch THIS
+    /// rendering client's view to it in place (as [`Self::switch_space`] does).
+    ///
+    /// Outcomes and the **default** ([`CreateUnsupported`]) as [`Self::new_pane`].
+    fn create_space(&mut self, label: Option<String>) -> anyhow::Result<CreateOutcome> {
+        let _ = label;
+        Err(anyhow::Error::new(CreateUnsupported { op: "CreateSpace" }))
+    }
+
+    /// The flag the relay raises when IT ends this attach — client detach,
+    /// eviction, token revocation, any inbound-loop exit — before its teardown
+    /// nudges the reader awake.
+    ///
+    /// A receiver that inspects the backend when its stream ends (herdr's
+    /// pane-exit probe) reads it to skip that inspection: a stream the relay
+    /// ended itself needs no verdict, and teardown must cost no control round
+    /// trip. The **default is `None`** (no receiver of this backend probes).
+    fn relay_teardown_flag(&self) -> Option<std::sync::Arc<std::sync::atomic::AtomicBool>> {
+        None
     }
 
     /// Toggle fullscreen / floating-fill for `pane`, given the resolved floating

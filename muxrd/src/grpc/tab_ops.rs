@@ -6,14 +6,21 @@ use crate::proto::{ActionAck as ProtoAck, NewTabReq, RenameTabReq, TabTarget};
 
 use super::MuxrService;
 use super::helpers::{
-    reject_if_read_only, run_action, session_is_read_only, short_conn, try_route_control,
-    validate_display_name,
+    CreateRoute, reject_if_read_only, route_create, run_action, session_is_read_only, short_conn,
+    try_route_control, validate_display_name,
 };
 
 impl MuxrService {
     // ── Tab ops (D2) ──────────────────────────────────────────────────────────
 
     /// Open a new tab; new tab id/name surface in ActionAck.info. MUTATING.
+    ///
+    /// With a `connection_id` naming the caller's live relay, the tab is created
+    /// THROUGH that relay (`route_create`): on herdr in that connection's space,
+    /// without moving herdr's focus, and the connection's stream follows the new
+    /// tab's pane (`info` = the new tab id). A non-empty id naming no live relay
+    /// fails closed on herdr. An empty id, or a backend whose relay cannot create
+    /// (zellij), takes the ephemeral backend path — today's behaviour.
     pub(super) async fn new_tab_impl(
         &self,
         request: Request<NewTabReq>,
@@ -27,7 +34,33 @@ impl MuxrService {
             validate_display_name(&req.tab_name, "tab")?;
             Some(req.tab_name)
         };
-        log::info!("NewTab: session='{session}' name={tab_name:?}");
+        // FS3: full connection_id must not appear in info/warn logs.
+        log::info!(
+            "NewTab: session='{session}' name={tab_name:?} connection_id={}…",
+            short_conn(&req.connection_id)
+        );
+        let routed_name = tab_name.clone();
+        if let CreateRoute::Answered(ack) = route_create(
+            &self.control,
+            &req.session,
+            &req.connection_id,
+            backend.supports_relay_create(),
+            "NewTab",
+            move |reply| crate::relay::RelayControl::NewTab {
+                name: routed_name,
+                reply,
+            },
+            |view| view.tab_id.to_string(),
+        )
+        .await
+        {
+            log::info!(
+                "NewTab: routed via relay client (session='{session}') ok={} {}",
+                ack.ok,
+                ack.error
+            );
+            return Ok(Response::new(ack));
+        }
         run_action("NewTab", move || backend.new_tab(&session, tab_name)).await
     }
 
@@ -255,6 +288,7 @@ mod tests {
         let mut req = Request::new(NewTabReq {
             session: "zellij:test".to_owned(),
             tab_name: String::new(),
+            connection_id: String::new(),
         });
         req.extensions_mut().insert(SessionReadOnly(read_only));
         req
@@ -417,5 +451,177 @@ mod tests {
             .expect_err("RenameTab must stay refused for read-only sessions");
         assert_eq!(err.code(), Code::PermissionDenied);
         assert_eq!(err.message(), READ_ONLY_MESSAGE);
+    }
+
+    // ─── NewTab: routed through the caller's relay ───────────────────────────
+
+    use crate::grpc::helpers::CREATED_NOT_ATTACHED;
+    use crate::grpc::helpers::create_test_support::{
+        self as support, HERDR, MULTIBYTE_ID, RecordingCreates, ZELLIJ, answer_create, created,
+        created_not_attached, evaluate_log_arguments, relay,
+    };
+
+    fn new_tab_on(session: &str, connection_id: &str, read_only: bool) -> Request<NewTabReq> {
+        let mut req = Request::new(NewTabReq {
+            session: session.to_owned(),
+            tab_name: "logs".to_owned(),
+            connection_id: connection_id.to_owned(),
+        });
+        req.extensions_mut().insert(SessionReadOnly(read_only));
+        req
+    }
+
+    /// A live connection_id: the tab is created through THAT relay (in its
+    /// space, not herdr's focused one), and the ack names the new tab.
+    #[tokio::test]
+    async fn new_tab_with_a_live_connection_id_is_created_through_that_relay() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut desktop_side = relay(&service, "conn-a", HERDR, false);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created("ws-b", 9, 51))),
+        );
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, "conn-b", false))
+            .await
+            .expect("a routed create is an ack")
+            .into_inner();
+
+        assert!(ack.ok, "routed create must succeed: {}", ack.error);
+        assert_eq!(ack.info, "9", "the ack names the new tab");
+        assert_eq!(caller.await.unwrap(), "NewTab name=Some(\"logs\")");
+        assert!(backend.calls().is_empty());
+        assert!(desktop_side.try_recv().is_err());
+    }
+
+    /// An empty connection_id is today's request: the backend path, unchanged.
+    #[tokio::test]
+    async fn new_tab_with_an_empty_connection_id_takes_the_backend_path_unchanged() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut attached = relay(&service, "conn-a", HERDR, false);
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, "", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["new_tab herdr name=Some(\"logs\")".to_owned()]
+        );
+        assert_eq!(ack.info, "backend new_tab herdr name=Some(\"logs\")");
+        assert!(attached.try_recv().is_err());
+    }
+
+    /// A non-empty connection_id naming no live relay fails closed on herdr.
+    #[tokio::test]
+    async fn new_tab_with_a_stale_connection_id_fails_closed_on_herdr() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut live = relay(&service, "conn-live", HERDR, false);
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, "conn-gone", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
+        assert!(backend.calls().is_empty(), "nothing may be created");
+        assert!(live.try_recv().is_err());
+    }
+
+    /// The read-only gate still runs first, before any routing.
+    #[tokio::test]
+    async fn new_tab_read_only_with_a_live_relay_is_refused_before_routing() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let mut own = relay(&service, "conn-ro", HERDR, true);
+
+        let err = service
+            .new_tab_impl(new_tab_on(HERDR, "conn-ro", true))
+            .await
+            .expect_err("NewTab must stay refused for read-only sessions");
+
+        assert_eq!(err.code(), Code::PermissionDenied);
+        assert_eq!(err.message(), READ_ONLY_MESSAGE);
+        assert!(own.try_recv().is_err());
+        assert!(backend.calls().is_empty());
+    }
+
+    /// zellij has no relay-routed create (the backend's capability says so): a
+    /// create with a LIVE connection_id sends nothing to the relay and takes the
+    /// backend path at once.
+    #[tokio::test]
+    async fn new_tab_on_zellij_with_a_live_connection_id_skips_the_relay() {
+        let backend = Arc::new(RecordingCreates::zellij());
+        let service = support::service(BackendKind::Zellij, &backend);
+        let mut zellij_relay = relay(&service, "conn-z", ZELLIJ, false);
+
+        let ack = service
+            .new_tab_impl(new_tab_on(ZELLIJ, "conn-z", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        assert!(ack.ok);
+        assert_eq!(
+            backend.calls(),
+            vec!["new_tab test name=Some(\"logs\")".to_owned()]
+        );
+        assert!(
+            zellij_relay.try_recv().is_err(),
+            "nothing may be sent to a relay that cannot create"
+        );
+    }
+
+    /// The tab landed but the re-attach to its pane failed: `info` names the
+    /// created tab exactly as a success would, and the error carries the stable
+    /// prefix, so a client never retries into a duplicate tab.
+    #[tokio::test]
+    async fn new_tab_created_but_not_attached_names_the_created_tab() {
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+        let caller = answer_create(
+            relay(&service, "conn-b", HERDR, false),
+            Some(Ok(created_not_attached("ws-b", 9, 51))),
+        );
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, "conn-b", false))
+            .await
+            .unwrap()
+            .into_inner();
+
+        caller.await.unwrap();
+        assert!(!ack.ok, "the connection did not follow the tab");
+        assert_eq!(ack.info, "9", "the created tab, success format");
+        assert!(ack.error.starts_with(CREATED_NOT_ATTACHED), "{}", ack.error);
+        assert!(backend.calls().is_empty(), "never created a second time");
+    }
+
+    /// A multibyte character across byte 8 of a client-supplied connection_id
+    /// must not panic the request or fail-closed log lines.
+    #[tokio::test]
+    async fn new_tab_with_a_multibyte_connection_id_does_not_panic() {
+        evaluate_log_arguments();
+        let backend = Arc::new(RecordingCreates::default());
+        let service = support::service(BackendKind::Herdr, &backend);
+
+        let ack = service
+            .new_tab_impl(new_tab_on(HERDR, MULTIBYTE_ID, false))
+            .await
+            .expect("a refusal is an ack")
+            .into_inner();
+
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "reattach required (no matching connection)");
+        assert!(backend.calls().is_empty());
     }
 }

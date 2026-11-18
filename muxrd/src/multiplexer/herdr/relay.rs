@@ -70,7 +70,9 @@
 //! Because a `reattach` swaps the whole socket, the write half is shared through a
 //! mutex (a swap replaces it under every handle at once) and the reader is handed
 //! its new read half over an `mpsc` channel, arming a [`swap_pending`](HerdrMuxSender)
-//! flag so an EOF during a swap is adopted rather than treated as a disconnect.
+//! flag so the old connection's end during a swap — EOF, or herdr's
+//! `ServerShutdown { "detached" }` reply to the `Detach` — is adopted rather than
+//! treated as a disconnect.
 //!
 //! ## P2.04 wiring
 //!
@@ -92,14 +94,19 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 
+use crate::multiplexer::types::ActionAck;
 use crate::multiplexer::types::{
     FullscreenHint, LayoutSnapshot, MuxEvent, MuxMouseKind, MuxServerMsg, PaneRef, ResumeTarget,
     ResumedView,
 };
-use crate::multiplexer::{DualHandle, MuxReceiver, MuxSender};
+use crate::multiplexer::{
+    CreateOutcome, CreateOutcomeUnknown, CreatedView, DualHandle, MuxReceiver, MuxSender,
+    PANE_EXITED_REASON,
+};
 
 use super::api::{PaneInfo, PaneZoomMode};
-use super::control::HerdrControl;
+use super::backend::DEFAULT_SPLIT_DIRECTION;
+use super::control::{HerdrControl, READ_TIMEOUT};
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
 use super::wire::{
     AttachScrollDirection, AttachScrollSource, ClientMessage, FramingError,
@@ -182,6 +189,44 @@ const SWAP_GRACE: Duration = Duration::from_secs(
         + SWAP_SLACK.as_secs(),
 );
 
+/// Worst case of ONE JSON-API control call ([`HerdrControl`]'s connection per
+/// request): the request write and the response read are each bounded by
+/// [`READ_TIMEOUT`], and the (unbounded, kernel-local) connect gets the same
+/// [`CONNECT_SLACK`] allowance the wire path uses. `3 + 3 + 1 = 7 s`.
+const CONTROL_CALL_WORST: Duration =
+    Duration::from_secs(2 * READ_TIMEOUT.as_secs() + CONNECT_SLACK.as_secs());
+
+/// Worst case of one [`HerdrMuxSender::reattach`], step by step as the code runs
+/// it: the `Detach` write on the old connection ([`WIRE_TIMEOUT`]), then
+/// [`RECONNECT_ATTEMPTS`] attempts, each a protocol re-discovery (one `ping`
+/// control call, [`CONTROL_CALL_WORST`]) plus a connect ([`CONNECT_SLACK`]) and
+/// three [`WIRE_TIMEOUT`]-bounded handshake ops. `3 + 2 × (7 + 1 + 9) = 37 s`.
+const REATTACH_WORST: Duration = Duration::from_secs(
+    WIRE_TIMEOUT.as_secs()
+        + RECONNECT_ATTEMPTS as u64
+            * (CONTROL_CALL_WORST.as_secs() + CONNECT_SLACK.as_secs() + 3 * WIRE_TIMEOUT.as_secs()),
+);
+
+/// The most control calls a relay-routed re-point makes BEFORE its reattach:
+/// `NewPane` lists the workspace's panes and then splits (2); `NewTab`,
+/// `CreateSpace` and `SwitchSpace` make one (`tab.create`, `workspace.create`,
+/// `pane.list`).
+const MAX_CONTROL_CALLS_BEFORE_REPOINT: u64 = 2;
+
+/// Worst case of one relay-routed re-point op on the herdr sender — a create
+/// (`NewPane` / `NewTab` / `CreateSpace`) or a `SwitchSpace` — from the moment the
+/// relay starts it to its answer: [`MAX_CONTROL_CALLS_BEFORE_REPOINT`] control
+/// calls plus one [`REATTACH_WORST`]. `2 × 7 + 37 = 51 s`.
+///
+/// Derived, not chosen: the gRPC layer's reply budget for those RPCs is built on
+/// it, so a change to any timeout or to the retry count above moves the budget
+/// with it. It covers the op itself, not time queued behind an earlier op on the
+/// same relay (the inbound loop serializes them) — a create the budget still
+/// cannot cover answers "outcome unknown".
+pub(crate) const ROUTED_REPOINT_WORST_CASE: Duration = Duration::from_secs(
+    MAX_CONTROL_CALLS_BEFORE_REPOINT * CONTROL_CALL_WORST.as_secs() + REATTACH_WORST.as_secs(),
+);
+
 // ─── open_attach (P2.04 entry point) ──────────────────────────────────────────
 
 /// Open a herdr wire attach for `workspace_id`, returning the split
@@ -260,6 +305,20 @@ pub fn open_attach(
 
     let resumed_view = resumed_view_for(resume, &target);
 
+    // The reader's stream-end probe asks about the pane the sender is attached to
+    // NOW (a reattach moves it), so both halves share one slot.
+    let attached = Arc::new(Mutex::new(AttachedPane {
+        workspace_id: target.workspace_id.clone(),
+        terminal_id: target.terminal_id.clone(),
+    }));
+    let probe = ControlPaneProbe {
+        control: Arc::clone(&control),
+        attached: Arc::clone(&attached),
+    };
+    // Raised when the relay ends this attach itself, so the reader's stream end
+    // then skips the probe (teardown costs no control round trip).
+    let teardown = Arc::new(AtomicBool::new(false));
+
     Ok(DualHandle {
         sender: Box::new(HerdrMuxSender {
             write: Arc::clone(&write),
@@ -269,6 +328,8 @@ pub fn open_attach(
             // into another space must report that space's tabs from the first poll.
             workspace_id: target.workspace_id,
             current_terminal_id: target.terminal_id,
+            attached: Arc::clone(&attached),
+            teardown: Arc::clone(&teardown),
             swap_pending: Arc::clone(&swap_pending),
             swap_tx,
             rows,
@@ -277,11 +338,15 @@ pub fn open_attach(
             protocol,
             mode,
         }),
-        receiver: Box::new(HerdrMuxReceiver {
-            read: read_half,
-            swap_rx,
-            swap_pending,
-        }),
+        receiver: Box::new(PaneExitReceiver::new(
+            HerdrMuxReceiver {
+                read: read_half,
+                swap_rx,
+                swap_pending,
+            },
+            probe,
+            teardown,
+        )),
         session_name,
         resumed_view,
     })
@@ -886,6 +951,15 @@ pub struct HerdrMuxSender {
     workspace_id: String,
     /// `terminal_id` the wire stream is currently attached to (re-attach target).
     current_terminal_id: String,
+    /// Mirror of `workspace_id` / `current_terminal_id` for the reader's
+    /// stream-end pane-exit probe (see [`PaneExitReceiver`]). Written only by
+    /// [`Self::publish_attached`], which sets both fields under one lock, so the
+    /// probe never reads a terminal paired with another re-point's workspace.
+    attached: Arc<Mutex<AttachedPane>>,
+    /// Raised when the relay ends this attach itself (its teardown, or a
+    /// [`MuxSender::send_client_exited`]), shared with the reader's
+    /// [`PaneExitReceiver`] so that stream end runs no probe.
+    teardown: Arc<AtomicBool>,
     /// Signals [`HerdrMuxReceiver`] that a connection swap is in flight, so the EOF
     /// on the old connection is adopted as a swap rather than misread as teardown.
     /// Set before the `Detach`, cleared once the new read half is handed over.
@@ -916,6 +990,14 @@ pub struct HerdrMuxSender {
 }
 
 impl HerdrMuxSender {
+    /// Publish the current attach position — workspace AND terminal, together,
+    /// under one lock — to the reader's pane-exit probe.
+    fn publish_attached(&self) {
+        let mut a = self.attached.lock().unwrap_or_else(|e| e.into_inner());
+        a.workspace_id.clone_from(&self.workspace_id);
+        a.terminal_id.clone_from(&self.current_terminal_id);
+    }
+
     /// Lock the shared write half, recovering from a poisoned mutex. The guarded
     /// critical sections are short framed writes + the reconnect swap, so a torn
     /// state left by a panicking holder cannot matter after teardown — recovering
@@ -938,7 +1020,8 @@ impl HerdrMuxSender {
     /// re-pointing leaks the old terminal's resize lock, so we instead:
     ///
     /// 1. arm `swap_pending` **before** `Detach` so the reader adopts the imminent
-    ///    EOF as a swap rather than a disconnect;
+    ///    end of the old connection (EOF, or herdr's `"detached"` shutdown reply) as a
+    ///    swap rather than a disconnect;
     /// 2. best-effort `Detach` the old connection — herdr's `remove_client` then
     ///    frees the old terminal's owner entry + resize lock and the desktop layout
     ///    restores it (write errors are ignored: the server may already be gone);
@@ -954,7 +1037,19 @@ impl HerdrMuxSender {
     /// ends the stream, and the client-side auto-reattach flow takes over — no
     /// half-attached state. Both the per-attempt failure (`warn!`) and the final
     /// teardown (`error!`) are logged so prod incidents are self-diagnosing.
+    ///
+    /// This form keeps the current workspace (a tab or pane move inside it); a
+    /// re-point that lands in another workspace uses [`Self::reattach_into`].
     fn reattach(&mut self, terminal_id: String) -> Result<()> {
+        let workspace_id = self.workspace_id.clone();
+        self.reattach_into(workspace_id, terminal_id)
+    }
+
+    /// [`Self::reattach`] into `workspace_id`: on success the sender's workspace
+    /// and terminal are updated and published to the pane-exit probe **together,
+    /// in one step** — before the reader is handed the new connection — so the
+    /// probe can never pair the new terminal with the old workspace.
+    fn reattach_into(&mut self, workspace_id: String, terminal_id: String) -> Result<()> {
         // 1. Arm the swap BEFORE Detach: the reader must not misread the EOF as a
         //    genuine disconnect.
         self.swap_pending.store(true, Ordering::SeqCst);
@@ -1020,6 +1115,8 @@ impl HerdrMuxSender {
                     // now writes to the new connection.
                     *self.lock_write() = write_half;
                     self.current_terminal_id = terminal_id.clone();
+                    self.workspace_id = workspace_id;
+                    self.publish_attached();
                     // Hand the reader its new read half. A send error means the reader
                     // is already gone — the swap cannot complete.
                     if self.swap_tx.send(Some(read_half)).is_err() {
@@ -1056,6 +1153,93 @@ impl HerdrMuxSender {
         );
         Err(err)
     }
+
+    /// Finish a relay-routed create: register the new pane and its tab in the
+    /// shared registries (so the ids reported back are the ones `GetLayout`
+    /// emits), re-point THIS connection's stream at it, and adopt its workspace
+    /// as the current one (a no-op for a pane or tab, the switch for a space).
+    ///
+    /// The create has already happened by the time a re-point fails, so that is
+    /// not an error: it answers [`CreateOutcome::CreatedNotAttached`] with the
+    /// created ids (the stream is torn down — see [`Self::reattach`] — and the
+    /// client's auto-reattach takes over, but the new object exists and the
+    /// caller must not create it again).
+    fn adopt_created(&mut self, pane: &PaneInfo, op: &str) -> CreateOutcome {
+        let pane_id = self
+            .control
+            .pane_registry()
+            .assign_or_get(&pane.pane_id, &pane.terminal_id);
+        let tab_id = self.control.tab_registry().assign_or_get(&pane.tab_id);
+        let view = CreatedView {
+            space_id: pane.workspace_id.clone(),
+            tab_id,
+            pane: PaneRef::terminal(pane_id),
+        };
+        match self.reattach_into(pane.workspace_id.clone(), pane.terminal_id.clone()) {
+            Ok(()) => CreateOutcome::Attached(view),
+            Err(e) => {
+                log::warn!(
+                    "herdr {op}: created pane {pane_id} (tab {tab_id}, space '{}') but could \
+                     not re-point this connection at it: {e:#}",
+                    view.space_id
+                );
+                CreateOutcome::CreatedNotAttached {
+                    view,
+                    cause: format!("{e:#}"),
+                }
+            }
+        }
+    }
+}
+
+/// A create call that broke off at the transport (`Err` from [`HerdrControl`]):
+/// the request may already have reached herdr, so whether the object exists is
+/// unknown — never reported as "nothing was created".
+fn create_call_broke_off(op: &'static str, method: &str, err: &anyhow::Error) -> anyhow::Error {
+    anyhow::Error::new(CreateOutcomeUnknown {
+        op,
+        cause: format!("herdr {method} call broke off: {err:#}"),
+    })
+}
+
+/// The herdr `pane_id` of the pane whose terminal THIS connection is attached to,
+/// looked up in its workspace's live pane list (registering every pane, as
+/// [`resolve_focused_terminal`] does).
+///
+/// The sender tracks only the attached `terminal_id`; `pane.split` addresses a
+/// pane. An attached pane missing from the list (closed, or the workspace gone)
+/// is an error — never a fallback to herdr's focused pane, which is exactly the
+/// daemon-global target a relay-routed create must not use.
+fn attached_herdr_pane(
+    control: &HerdrControl,
+    workspace_id: &str,
+    terminal_id: &str,
+) -> Result<String> {
+    let panes = control
+        .list_panes(workspace_id)
+        .with_context(|| format!("list herdr panes for workspace '{workspace_id}'"))?;
+    let reg = control.pane_registry();
+    let mut attached = None;
+    for pane in &panes {
+        reg.assign_or_get(&pane.pane_id, &pane.terminal_id);
+        if pane.terminal_id == terminal_id {
+            attached = Some(pane.pane_id.clone());
+        }
+    }
+    attached.ok_or_else(|| {
+        anyhow!(
+            "herdr: this connection's attached pane is no longer in workspace \
+             '{workspace_id}' — reattach required"
+        )
+    })
+}
+
+/// A herdr refusal of a relay-routed create, as the error the RPC reports.
+fn create_refused(method: &str, ack: &ActionAck) -> anyhow::Error {
+    anyhow!(
+        "herdr refused {method}: {}",
+        ack.error.as_deref().unwrap_or("no reason given")
+    )
 }
 
 impl MuxSender for HerdrMuxSender {
@@ -1084,6 +1268,11 @@ impl MuxSender for HerdrMuxSender {
             .pane_registry()
             .terminal_id(pane.id)
             .ok_or_else(|| anyhow!("herdr focus_pane: unknown pane id {}", pane.id))?;
+        // The registry id is global, so the target may live in another workspace
+        // than `self.workspace_id`, and the registry does not say which. The
+        // published (workspace, terminal) pair is therefore only a hint for the
+        // pane-exit probe, which resolves the terminal across workspaces before
+        // it reports a pane gone (`ControlPaneProbe`).
         self.reattach(terminal_id)
     }
 
@@ -1097,9 +1286,71 @@ impl MuxSender for HerdrMuxSender {
         // wire is workspace-agnostic (terminal_ids are globally unique), so this
         // reuses the shared pane/tab registries safely across workspaces.
         let (_pane_id, terminal_id) = resolve_focused_terminal(&self.control, space_id)?;
-        self.reattach(terminal_id)?;
-        self.workspace_id = space_id.to_string();
-        Ok(())
+        // Workspace and terminal are recorded and published together.
+        self.reattach_into(space_id.to_string(), terminal_id)
+    }
+
+    /// Split THIS connection's attached pane — explicit `target_pane_id`, in
+    /// `self.workspace_id`, `focus: false` — then re-point the stream at the new
+    /// pane exactly as [`focus_pane`](Self::focus_pane) does. herdr's
+    /// daemon-global focus never moves, so a co-attached desktop client keeps its
+    /// pane; the legacy `HerdrBackend::new_pane` (split whatever herdr focused,
+    /// focus it) is untouched.
+    ///
+    /// `floating` and `name` are ignored for the same reasons the legacy path
+    /// ignores them: herdr has no floating layer and `pane.split` carries no label.
+    ///
+    /// Outcomes ([`MuxSender::new_pane`]): a refusal, or a failed lookup of the
+    /// attached pane, creates nothing (`Err`); a `pane.split` call that breaks
+    /// off at the transport is [`CreateOutcomeUnknown`]; a split followed by a
+    /// failed re-point is [`CreateOutcome::CreatedNotAttached`].
+    fn new_pane(&mut self, floating: bool, name: Option<String>) -> Result<CreateOutcome> {
+        if floating {
+            log::debug!("herdr relay new_pane: ignoring floating=true (no floating layer)");
+        }
+        if name.is_some() {
+            log::debug!("herdr relay new_pane: ignoring the pane name (pane.split has no label)");
+        }
+        let target =
+            attached_herdr_pane(&self.control, &self.workspace_id, &self.current_terminal_id)?;
+        let pane = self
+            .control
+            .split_pane_created(
+                &self.workspace_id,
+                &target,
+                DEFAULT_SPLIT_DIRECTION,
+                false, // never move herdr's daemon-global focus
+            )
+            .map_err(|e| create_call_broke_off("NewPane", "pane.split", &e))?
+            .map_err(|ack| create_refused("pane.split", &ack))?;
+        Ok(self.adopt_created(&pane, "NewPane"))
+    }
+
+    /// Create a tab in `self.workspace_id` with `focus: false`, then re-point the
+    /// stream at its root pane — the tab is created where THIS connection is,
+    /// never where herdr's focus is, and no other client follows.
+    /// Outcomes as [`Self::new_pane`].
+    fn new_tab(&mut self, name: Option<String>) -> Result<CreateOutcome> {
+        let pane = self
+            .control
+            .create_tab_created(&self.workspace_id, name, false)
+            .map_err(|e| create_call_broke_off("NewTab", "tab.create", &e))?
+            .map_err(|ack| create_refused("tab.create", &ack))?;
+        Ok(self.adopt_created(&pane, "NewTab"))
+    }
+
+    /// Create a workspace with `focus: false`, then switch THIS connection to it
+    /// as [`switch_space`](Self::switch_space) does: re-point the stream at the
+    /// new workspace's root pane and record it as the current workspace. The
+    /// daemon-global focus — every desktop client's view — stays where it was.
+    /// Outcomes as [`Self::new_pane`].
+    fn create_space(&mut self, label: Option<String>) -> Result<CreateOutcome> {
+        let pane = self
+            .control
+            .create_workspace_created(label, false)
+            .map_err(|e| create_call_broke_off("CreateSpace", "workspace.create", &e))?
+            .map_err(|ack| create_refused("workspace.create", &ack))?;
+        Ok(self.adopt_created(&pane, "CreateSpace"))
     }
 
     fn toggle_fullscreen(&mut self, pane: PaneRef, hint: FullscreenHint) -> Result<()> {
@@ -1192,6 +1443,10 @@ impl MuxSender for HerdrMuxSender {
     }
 
     fn send_client_exited(&mut self) -> Result<()> {
+        // The relay is ending this attach itself: the stream end this causes is
+        // not a pane exit, so the reader must not spend a probe on it. Raised
+        // BEFORE the Detach so the reader cannot see that end first.
+        self.teardown.store(true, Ordering::SeqCst);
         // Detach, then close the socket ourselves — herdr does not close a
         // Detached client's connection, so without the shutdown the relay's
         // blocking reader thread would never see EOF at teardown.
@@ -1200,6 +1455,10 @@ impl MuxSender for HerdrMuxSender {
             log::debug!("herdr client-exit: connection shutdown failed (ignored): {e}");
         }
         sent
+    }
+
+    fn relay_teardown_flag(&self) -> Option<Arc<AtomicBool>> {
+        Some(Arc::clone(&self.teardown))
     }
 
     fn box_clone(&self) -> Box<dyn MuxSender> {
@@ -1212,6 +1471,8 @@ impl MuxSender for HerdrMuxSender {
             control: Arc::clone(&self.control),
             workspace_id: self.workspace_id.clone(),
             current_terminal_id: self.current_terminal_id.clone(),
+            attached: Arc::clone(&self.attached),
+            teardown: Arc::clone(&self.teardown),
             swap_pending: Arc::clone(&self.swap_pending),
             swap_tx: self.swap_tx.clone(),
             rows: self.rows,
@@ -1242,18 +1503,68 @@ pub struct HerdrMuxReceiver {
 impl MuxReceiver for HerdrMuxReceiver {
     fn recv(&mut self) -> Option<MuxServerMsg> {
         loop {
-            if let Some(msg) = recv_from(&mut self.read) {
-                return Some(msg);
+            match recv_from(&mut self.read) {
+                Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
+                    // herdr answers a reattach's `Detach` with
+                    // `ServerShutdown { reason: "detached" }` on the OLD connection
+                    // whenever its reply lands before our socket shutdown (a race,
+                    // seen live against 0.9.0). That is the end of the released
+                    // connection, not of the stream: adopt the swap.
+                    if let Some(read) = self.adopt_swap_after_shutdown(&reason) {
+                        self.read = read?;
+                        continue;
+                    }
+                    return Some(MuxServerMsg::Event(MuxEvent::Exit { reason }));
+                }
+                Some(msg) => return Some(msg),
+                // The current connection ended. Adopt a swapped-in connection if a
+                // reattach is in flight; otherwise this is a genuine disconnect
+                // (`?` propagates the `None` and ends the stream).
+                None => self.read = self.try_adopt_swap()?,
             }
-            // The current connection ended. Adopt a swapped-in connection if a
-            // reattach is in flight; otherwise this is a genuine disconnect
-            // (`?` propagates the `None` and ends the stream).
-            self.read = self.try_adopt_swap()?;
         }
     }
 }
 
 impl HerdrMuxReceiver {
+    /// Decide what a `ServerShutdown` read off the current connection means.
+    ///
+    /// - `None`: no reattach is involved — a genuine shutdown the caller surfaces.
+    /// - `Some(Some(stream))`: the shutdown released a connection a reattach is
+    ///   replacing — adopt the new read half and carry on.
+    /// - `Some(None)`: it did, but the reconnect failed — end the stream, exactly
+    ///   as an EOF during that failed swap would.
+    ///
+    /// The flag is read **before** the channel: a swap that completes in between
+    /// leaves its read half queued, so the swap is never missed. A swap that
+    /// already completed (flag clear, read half queued) is the late-read case —
+    /// the reply sat in the old socket while the reconnect finished.
+    fn adopt_swap_after_shutdown(&self, reason: &str) -> Option<Option<UnixStream>> {
+        if self.swap_pending.load(Ordering::SeqCst) {
+            log::debug!(
+                "herdr wire swap: old connection shut down ({reason:?}) mid-swap; adopting"
+            );
+            return Some(self.try_adopt_swap());
+        }
+        match self.swap_rx.try_recv() {
+            Ok(Some(stream)) => {
+                log::debug!(
+                    "herdr wire swap: old connection shut down ({reason:?}) after the swap; \
+                     adopting the queued connection"
+                );
+                Some(Some(stream))
+            }
+            Ok(None) => {
+                log::warn!(
+                    "herdr wire swap: reconnect failed after retries (None sentinel); \
+                     ending the AttachTerminal stream"
+                );
+                Some(None)
+            }
+            Err(_) => None,
+        }
+    }
+
     /// On EOF of the current connection, decide whether a reconnect handed us a new
     /// read half to adopt. Checks the channel **first** (the swap may have completed
     /// before we noticed EOF); on an empty channel, waits up to [`SWAP_GRACE`] only
@@ -1312,6 +1623,179 @@ impl HerdrMuxReceiver {
                     // Genuine disconnect — propagate immediately (stay silent).
                     None
                 }
+            }
+        }
+    }
+}
+
+// ─── PaneExitReceiver (pane-exit detection) ───────────────────────────────────
+
+/// Where a sender's wire stream is attached, shared with the reader's probe.
+#[derive(Debug, Default)]
+struct AttachedPane {
+    workspace_id: String,
+    terminal_id: String,
+}
+
+/// What the daemon says about the attached pane once a stream has ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PaneState {
+    /// The daemon answered and the pane still exists (in any workspace).
+    Present,
+    /// The daemon answered for every workspace and the pane is in none of them.
+    Absent,
+    /// The daemon did not answer (or the recorded workspace is gone): no verdict.
+    Unknown,
+}
+
+/// Asks the daemon whether the attached pane still exists. Called at most once
+/// per stream end, never per frame, and never for a stream the relay ended.
+trait PaneProbe: Send {
+    fn attached_pane_state(&self) -> PaneState;
+}
+
+/// [`PaneProbe`] over the JSON-API control channel: is the attached terminal
+/// still in the workspace it lives in?
+///
+/// The published workspace is where the terminal is looked up first (one
+/// `pane.list`, the common case). It is not proof of absence, though: a
+/// `focus_pane` re-points by a global registry id whose workspace the sender does
+/// not know, so on a miss the probe resolves the terminal across every workspace
+/// (`workspace.list`, then `pane.list` per other workspace) and reports
+/// [`PaneState::Absent`] only when the daemon answered every one of those reads
+/// and the terminal is in none.
+struct ControlPaneProbe {
+    control: Arc<HerdrControl>,
+    attached: Arc<Mutex<AttachedPane>>,
+}
+
+impl PaneProbe for ControlPaneProbe {
+    fn attached_pane_state(&self) -> PaneState {
+        let (workspace_id, terminal_id) = {
+            let a = self.attached.lock().unwrap_or_else(|e| e.into_inner());
+            (a.workspace_id.clone(), a.terminal_id.clone())
+        };
+        terminal_state(&self.control, &workspace_id, &terminal_id)
+    }
+}
+
+/// Where `terminal_id` is, asked of the daemon: `workspace_id` first, then every
+/// other workspace (see [`ControlPaneProbe`]).
+fn terminal_state(control: &HerdrControl, workspace_id: &str, terminal_id: &str) -> PaneState {
+    let holds = |panes: &[PaneInfo]| panes.iter().any(|p| p.terminal_id == terminal_id);
+    match control.list_panes(workspace_id) {
+        Ok(panes) if holds(&panes) => return PaneState::Present,
+        Ok(_) => {}
+        Err(e) => {
+            log::debug!("herdr pane-exit probe: pane.list failed (no verdict): {e:#}");
+            return PaneState::Unknown;
+        }
+    }
+    let workspaces = match control.list_workspaces() {
+        Ok(workspaces) => workspaces,
+        Err(e) => {
+            log::debug!("herdr pane-exit probe: workspace.list failed (no verdict): {e:#}");
+            return PaneState::Unknown;
+        }
+    };
+    let mut unanswered = false;
+    for ws in workspaces
+        .iter()
+        .filter(|ws| ws.workspace_id != workspace_id)
+    {
+        match control.list_panes(&ws.workspace_id) {
+            Ok(panes) if holds(&panes) => {
+                log::debug!(
+                    "herdr pane-exit probe: attached terminal found in workspace '{}', not \
+                     the recorded '{workspace_id}'",
+                    ws.workspace_id
+                );
+                return PaneState::Present;
+            }
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!(
+                    "herdr pane-exit probe: pane.list of '{}' failed: {e:#}",
+                    ws.workspace_id
+                );
+                unanswered = true;
+            }
+        }
+    }
+    if unanswered {
+        PaneState::Unknown
+    } else {
+        PaneState::Absent
+    }
+}
+
+/// Wraps the wire receiver and, when the stream ends because the attached pane
+/// is gone while the daemon still answers, reports
+/// `Exit { reason: PANE_EXITED_REASON }` — for both a `ServerShutdown` and a
+/// bare EOF. Every other ending is passed through unchanged. The end of a
+/// connection a swap is replacing (EOF or `ServerShutdown`) never reaches this
+/// layer: the inner receiver adopts the swap. Nor is a stream the relay ended
+/// itself probed: with `teardown` raised the ending passes through as is.
+struct PaneExitReceiver<R, P> {
+    inner: R,
+    probe: P,
+    /// Raised by the relay before it ends the stream itself (the sender's
+    /// [`HerdrMuxSender::teardown`]).
+    teardown: Arc<AtomicBool>,
+    /// The stream ended and the verdict was delivered; further reads end it.
+    done: bool,
+}
+
+impl<R: MuxReceiver, P: PaneProbe> PaneExitReceiver<R, P> {
+    fn new(inner: R, probe: P, teardown: Arc<AtomicBool>) -> Self {
+        Self {
+            inner,
+            probe,
+            teardown,
+            done: false,
+        }
+    }
+
+    fn pane_exited() -> MuxServerMsg {
+        MuxServerMsg::Event(MuxEvent::Exit {
+            reason: PANE_EXITED_REASON.to_string(),
+        })
+    }
+
+    /// The probe's verdict for a stream end, or `None` when the relay ended the
+    /// stream itself (no probe: teardown costs no control round trip).
+    fn verdict(&self, wire: &str) -> Option<PaneState> {
+        if self.teardown.load(Ordering::SeqCst) {
+            log::debug!("herdr stream end: wire delivered {wire} during relay teardown; no probe");
+            return None;
+        }
+        let state = self.probe.attached_pane_state();
+        log::debug!("herdr stream end: wire delivered {wire}; attached pane {state:?}");
+        Some(state)
+    }
+}
+
+impl<R: MuxReceiver, P: PaneProbe> MuxReceiver for PaneExitReceiver<R, P> {
+    fn recv(&mut self) -> Option<MuxServerMsg> {
+        if self.done {
+            return None;
+        }
+        // Each ending logs the wire's own signal before it is mapped, so a run
+        // records what herdr actually sent (the live pane-exit test prints it).
+        match self.inner.recv() {
+            Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
+                self.done = true;
+                let wire = format!("ServerShutdown {{ reason: {reason:?} }}");
+                if self.verdict(&wire) == Some(PaneState::Absent) {
+                    Some(Self::pane_exited())
+                } else {
+                    Some(MuxServerMsg::Event(MuxEvent::Exit { reason }))
+                }
+            }
+            Some(msg) => Some(msg),
+            None => {
+                self.done = true;
+                (self.verdict("EOF") == Some(PaneState::Absent)).then(Self::pane_exited)
             }
         }
     }
@@ -1436,6 +1920,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-1".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -2397,7 +2883,9 @@ mod tests {
 
             let (mut c2, _) = listener.accept().unwrap();
             let (hello2, attach2) = serve_handshake(&mut c2);
-            (attach1, resize, detach, hello2, attach2)
+            // Keep the server ends open: dropping one while the client is still
+            // in `split_wire` makes its setsockopt fail (EINVAL on macOS).
+            (attach1, resize, detach, hello2, attach2, c1, c2)
         });
 
         // Establish conn1 as the sender's current connection.
@@ -2419,6 +2907,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2439,7 +2929,7 @@ mod tests {
         );
         assert_eq!(sender.current_terminal_id, "term-B");
 
-        let (attach1, resize, detach, hello2, attach2) = server.join().unwrap();
+        let (attach1, resize, detach, hello2, attach2, _c1, _c2) = server.join().unwrap();
         assert!(
             matches!(attach1, ClientMessage::AttachTerminal { ref terminal_id, takeover: true } if terminal_id == "term-A"),
             "conn1 must have attached term-A, got {attach1:?}"
@@ -2537,6 +3027,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2620,6 +3112,129 @@ mod tests {
         );
     }
 
+    /// herdr's reply to a reattach's `Detach`: `ServerShutdown { "detached" }`
+    /// on the old connection, then EOF.
+    fn detached_reply(peer: &mut UnixStream) {
+        peer.write_all(&frame_server_message(&ServerMessage::ServerShutdown {
+            reason: Some("detached".into()),
+        }))
+        .unwrap();
+        peer.flush().unwrap();
+    }
+
+    /// Live herdr 0.9.0 regression: herdr answers the `Detach` a reattach sends
+    /// with `ServerShutdown { "detached" }` on the OLD connection when the reply
+    /// beats our socket shutdown. Read mid-swap, that is the released
+    /// connection's end — the reader must adopt the new connection, not surface
+    /// an `Exit` that ends the relay (which dropped the reader, so the sender's
+    /// hand-over failed with "relay reader gone"). Fails against the pre-fix
+    /// receiver, which returned `Exit("detached")`.
+    #[test]
+    fn recv_adopts_the_swap_across_the_old_connections_detached_shutdown() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let swap_pending = Arc::new(AtomicBool::new(true));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::clone(&swap_pending),
+        };
+
+        detached_reply(&mut peer1);
+        drop(peer1);
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+        // The reconnect lands while the reader is already waiting on it.
+        let deliver = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(50));
+            swap_tx.send(Some(read2)).unwrap();
+            swap_pending.store(false, Ordering::SeqCst);
+            swap_tx
+        });
+
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "a mid-swap ServerShutdown must be adopted as the old connection's end, got {msg:?}"
+        );
+        let _swap_tx = deliver.join().unwrap();
+    }
+
+    /// The same reply read LATE — the reconnect already finished (flag clear,
+    /// new read half queued) while the reply sat in the old socket. Still the
+    /// old connection's end: adopt the queued connection.
+    #[test]
+    fn recv_adopts_a_completed_swap_when_the_detached_reply_is_read_late() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(false)),
+        };
+
+        detached_reply(&mut peer1);
+        swap_tx.send(Some(read2)).unwrap();
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Render(_))),
+            "a ServerShutdown with a completed swap queued must adopt it, got {msg:?}"
+        );
+    }
+
+    /// A `ServerShutdown` mid-swap whose reconnect then fails ends the stream,
+    /// exactly as an EOF during that failed swap does.
+    #[test]
+    fn shutdown_during_a_failed_swap_ends_the_stream() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(true)),
+        };
+
+        detached_reply(&mut peer1);
+        swap_tx.send(None).unwrap();
+
+        assert!(
+            receiver.recv().is_none(),
+            "a failed swap must end the stream"
+        );
+    }
+
+    /// With no reattach involved, a `ServerShutdown` is genuine: it surfaces as
+    /// `Exit` with its reason, immediately (no swap grace).
+    #[test]
+    fn shutdown_without_a_swap_still_surfaces_the_exit() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (_swap_tx, swap_rx) = mpsc::channel::<Option<UnixStream>>();
+        let mut receiver = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(false)),
+        };
+
+        detached_reply(&mut peer1);
+        let start = std::time::Instant::now();
+        let msg = receiver.recv();
+        assert!(
+            matches!(msg, Some(MuxServerMsg::Event(MuxEvent::Exit { ref reason })) if reason == "detached"),
+            "a ServerShutdown outside a swap must surface as Exit, got {msg:?}"
+        );
+        assert!(
+            start.elapsed() < SWAP_GRACE / 2,
+            "a genuine shutdown must not wait out the swap grace"
+        );
+    }
+
     /// Failed reconnect: the wire socket does not exist, so **both**
     /// [`RECONNECT_ATTEMPTS`] connects fail fast, `reattach` returns `Err`, sends the
     /// `None` sentinel, and the reader at EOF ends the stream.
@@ -2635,6 +3250,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending: Arc::clone(&swap_pending),
             swap_tx,
             rows: 24,
@@ -2712,6 +3329,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2782,6 +3401,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending,
             swap_tx,
             rows: 24,
@@ -2903,6 +3524,176 @@ mod tests {
         let _srv2 = deliver.join().unwrap();
     }
 
+    // ── Pane-exit detection ───────────────────────────────────────────────────
+
+    struct ScriptedReceiver(std::collections::VecDeque<Option<MuxServerMsg>>);
+
+    impl MuxReceiver for ScriptedReceiver {
+        fn recv(&mut self) -> Option<MuxServerMsg> {
+            self.0.pop_front().flatten()
+        }
+    }
+
+    struct FixedProbe {
+        state: PaneState,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PaneProbe for FixedProbe {
+        fn attached_pane_state(&self) -> PaneState {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            self.state
+        }
+    }
+
+    fn exit_msg(reason: &str) -> Option<MuxServerMsg> {
+        Some(MuxServerMsg::Event(MuxEvent::Exit {
+            reason: reason.into(),
+        }))
+    }
+
+    fn exit_reason(msg: Option<MuxServerMsg>) -> Option<String> {
+        match msg {
+            Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => Some(reason),
+            _ => None,
+        }
+    }
+
+    fn exit_receiver(
+        script: Vec<Option<MuxServerMsg>>,
+        state: PaneState,
+    ) -> (
+        PaneExitReceiver<ScriptedReceiver, FixedProbe>,
+        Arc<AtomicUsize>,
+    ) {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let rx = PaneExitReceiver::new(
+            ScriptedReceiver(script.into()),
+            FixedProbe {
+                state,
+                calls: Arc::clone(&calls),
+            },
+            Arc::default(),
+        );
+        (rx, calls)
+    }
+
+    #[test]
+    fn shutdown_with_pane_absent_reports_pane_exited() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("bye")], PaneState::Absent);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some(PANE_EXITED_REASON));
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn eof_with_pane_absent_reports_pane_exited() {
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Absent);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some(PANE_EXITED_REASON));
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn shutdown_with_pane_present_keeps_the_original_reason() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("going down")], PaneState::Present);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some("going down"));
+    }
+
+    #[test]
+    fn eof_with_pane_present_ends_silently() {
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Present);
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn unanswered_probe_keeps_todays_behaviour() {
+        let (mut rx, _) = exit_receiver(vec![exit_msg("bye")], PaneState::Unknown);
+        assert_eq!(exit_reason(rx.recv()).as_deref(), Some("bye"));
+        let (mut rx, _) = exit_receiver(vec![None], PaneState::Unknown);
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
+    fn healthy_stream_never_probes() {
+        let (mut rx, calls) = exit_receiver(
+            vec![
+                Some(MuxServerMsg::Render(b"x".to_vec())),
+                Some(MuxServerMsg::Other),
+            ],
+            PaneState::Absent,
+        );
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Render(_))));
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Other)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// An EOF caused by an in-flight swap is adopted by the inner receiver, so
+    /// the probe never runs and the stream carries on over the new connection.
+    #[test]
+    fn in_flight_swap_eof_is_adopted_not_probed() {
+        let (read1, peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let swap_pending = Arc::new(AtomicBool::new(true));
+        let (swap_tx, swap_rx) = mpsc::channel();
+        swap_tx.send(Some(read2)).unwrap();
+        drop(peer1); // EOF on the old connection
+        let inner = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending,
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rx = PaneExitReceiver::new(
+            inner,
+            FixedProbe {
+                state: PaneState::Absent,
+                calls: Arc::clone(&calls),
+            },
+            Arc::default(),
+        );
+        let payload = bincode::serde::encode_to_vec(
+            &ServerMessage::TerminalBell { count: 1 },
+            bincode::config::standard(),
+        )
+        .unwrap();
+        peer2
+            .write_all(&(payload.len() as u32).to_le_bytes())
+            .unwrap();
+        peer2.write_all(&payload).unwrap();
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Other)));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    /// The old connection's `ServerShutdown { "detached" }` during a swap never
+    /// reaches the pane-exit layer either: no probe, no `Exit`, the stream
+    /// carries on over the new connection.
+    #[test]
+    fn in_flight_swap_detached_shutdown_is_adopted_not_probed() {
+        let (read1, mut peer1) = UnixStream::pair().unwrap();
+        let (read2, mut peer2) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        swap_tx.send(Some(read2)).unwrap();
+        detached_reply(&mut peer1);
+        let inner = HerdrMuxReceiver {
+            read: read1,
+            swap_rx,
+            swap_pending: Arc::new(AtomicBool::new(true)),
+        };
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut rx = PaneExitReceiver::new(
+            inner,
+            FixedProbe {
+                state: PaneState::Present,
+                calls: Arc::clone(&calls),
+            },
+            Arc::default(),
+        );
+        peer2
+            .write_all(&frame_server_message(&term_frame(2)))
+            .unwrap();
+        assert!(matches!(rx.recv(), Some(MuxServerMsg::Render(_))));
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
     // ── Attach mode: read-only observes, read-write owns ──────────────────────
 
     /// A read-only attach must open the terminal in herdr's **observe** mode, so
@@ -2999,7 +3790,9 @@ mod tests {
 
             let (mut c2, _) = listener.accept().unwrap();
             let (_hello2, observe2) = serve_handshake(&mut c2);
-            (observe1, detach, observe2)
+            // Keep the server ends open: dropping one while the client is still
+            // in `split_wire` makes its setsockopt fail (EINVAL on macOS).
+            (observe1, detach, observe2, c2)
         });
 
         let conn1 = connect_and_attach(
@@ -3019,6 +3812,8 @@ mod tests {
             control: test_control(),
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -3034,7 +3829,7 @@ mod tests {
             "reader must receive the swapped-in read half"
         );
 
-        let (observe1, detach, observe2) = server.join().unwrap();
+        let (observe1, detach, observe2, _c2) = server.join().unwrap();
         assert!(
             matches!(observe1, ClientMessage::ObserveTerminal { ref target } if target == "term-A"),
             "conn1 must have observed term-A, got {observe1:?}"
@@ -3068,7 +3863,9 @@ mod tests {
 
             let (mut c2, _) = listener.accept().unwrap();
             let (_hello2, observe2) = serve_handshake(&mut c2);
-            (detach, observe2)
+            // Keep the server ends open: dropping one while the client is still
+            // in `split_wire` makes its setsockopt fail (EINVAL on macOS).
+            (detach, observe2, c2)
         });
 
         let conn1 = connect_and_attach(
@@ -3091,6 +3888,8 @@ mod tests {
             control,
             workspace_id: "ws-1".into(),
             current_terminal_id: "term-A".into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
             swap_pending: Arc::new(AtomicBool::new(false)),
             swap_tx,
             rows: 24,
@@ -3109,7 +3908,7 @@ mod tests {
             "reader must receive the swapped-in read half"
         );
 
-        let (detach, observe2) = server.join().unwrap();
+        let (detach, observe2, _c2) = server.join().unwrap();
         assert!(
             matches!(detach, ClientMessage::Detach),
             "the clone must release the old connection first, got {detach:?}"
@@ -3120,5 +3919,792 @@ mod tests {
         );
 
         let _ = std::fs::remove_file(&sock);
+    }
+
+    // ── Relay-routed creates (NewPane / NewTab / CreateSpace) ─────────────────
+    //
+    // Driven over a scripted fake herdr: a JSON-API socket that answers each
+    // connection-per-request call from a `method → result` table and records
+    // every request, plus a wire socket that serves the re-attach handshake.
+    // The assertions pin what the bug was about: the create names THIS
+    // connection's workspace (and, for a split, its attached pane — not herdr's
+    // focused one), carries `focus: false`, and the stream follows the result.
+
+    impl CreateOutcome {
+        /// The view of a create the connection followed; panics otherwise.
+        fn attached(self) -> CreatedView {
+            match self {
+                CreateOutcome::Attached(view) => view,
+                other => panic!("expected the connection to follow the create, got {other:?}"),
+            }
+        }
+    }
+
+    /// Scripted fake herdr JSON-API: answers `n` sequential requests from the
+    /// `method → "result":{…}` table (anything else gets `invalid_request`) and
+    /// returns every request it saw, in order.
+    fn fake_api(
+        sock: &std::path::Path,
+        n: usize,
+        responses: Vec<(&'static str, String)>,
+    ) -> std::thread::JoinHandle<Vec<serde_json::Value>> {
+        use std::io::{BufRead, BufReader};
+        let listener = UnixListener::bind(sock).expect("bind fake herdr API socket");
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let Ok((conn, _)) = listener.accept() else {
+                    break;
+                };
+                let mut line = String::new();
+                if BufReader::new(&conn).read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value =
+                    serde_json::from_str(line.trim_end()).expect("request must be JSON");
+                let method = req["method"].as_str().unwrap_or_default().to_string();
+                let id = req["id"].as_str().unwrap_or("muxrd-0").to_string();
+                let body = responses
+                    .iter()
+                    .find(|(m, _)| *m == method)
+                    .map(|(_, b)| b.clone())
+                    .unwrap_or_else(|| {
+                        r#""error":{"code":"invalid_request","message":"unscripted"}"#.to_string()
+                    });
+                let _ = (&conn).write_all(format!("{{\"id\":\"{id}\",{body}}}\n").as_bytes());
+                seen.push(req);
+            }
+            seen
+        })
+    }
+
+    /// herdr's `PaneInfo` JSON for one pane.
+    fn pane_json(pane_id: &str, terminal_id: &str, ws: &str, tab: &str, focused: bool) -> String {
+        serde_json::json!({
+            "pane_id": pane_id, "terminal_id": terminal_id, "workspace_id": ws,
+            "tab_id": tab, "focused": focused, "agent_status": "idle", "revision": 1
+        })
+        .to_string()
+    }
+
+    fn tab_json(tab_id: &str, ws: &str) -> String {
+        serde_json::json!({
+            "tab_id": tab_id, "workspace_id": ws, "number": 2, "label": "new",
+            "focused": false, "pane_count": 1, "agent_status": "idle"
+        })
+        .to_string()
+    }
+
+    fn pong() -> (&'static str, String) {
+        (
+            "ping",
+            format!(
+                r#""result":{{"type":"pong","version":"0.9.5","protocol":{HERDR_MAX_TESTED_PROTOCOL}}}"#
+            ),
+        )
+    }
+
+    /// A sender attached to `attached_terminal` in `workspace_id`, whose control
+    /// client talks to a scripted fake API answering `api_calls` requests and
+    /// whose re-attach goes to a fake wire server. Returns the sender, the
+    /// reader's swap channel, the API trace and the re-attach message.
+    #[allow(clippy::type_complexity)]
+    fn create_harness(
+        tag: &str,
+        workspace_id: &str,
+        attached_terminal: &str,
+        api_calls: usize,
+        responses: Vec<(&'static str, String)>,
+    ) -> (
+        HerdrMuxSender,
+        mpsc::Receiver<Option<UnixStream>>,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+        std::thread::JoinHandle<(ClientMessage, UnixStream)>,
+        UnixStream,
+        Vec<PathBuf>,
+    ) {
+        let api_sock = unique_socket_path(&format!("{tag}a"));
+        let wire_sock = unique_socket_path(&format!("{tag}w"));
+        let api = fake_api(&api_sock, api_calls, responses);
+        let listener = UnixListener::bind(&wire_sock).unwrap();
+        let wire = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let (_hello, attach) = serve_handshake(&mut conn);
+            // Keep the server ends open: dropping one while the client is still
+            // in `split_wire` makes its setsockopt fail (EINVAL on macOS).
+            (attach, conn)
+        });
+
+        let (old, old_peer) = UnixStream::pair().unwrap();
+        let (swap_tx, swap_rx) = mpsc::channel();
+        let sender = HerdrMuxSender {
+            write: Arc::new(Mutex::new(old)),
+            control: Arc::new(HerdrControl::new(
+                api_sock.clone(),
+                Arc::new(HerdrPaneRegistry::new()),
+                Arc::new(HerdrTabRegistry::new()),
+            )),
+            workspace_id: workspace_id.into(),
+            current_terminal_id: attached_terminal.into(),
+            attached: Arc::default(),
+            teardown: Arc::default(),
+            swap_pending: Arc::new(AtomicBool::new(false)),
+            swap_tx,
+            rows: 24,
+            cols: 80,
+            wire_socket: wire_sock.clone(),
+            protocol: HERDR_MAX_TESTED_PROTOCOL,
+            mode: AttachMode::Control,
+        };
+        (
+            sender,
+            swap_rx,
+            api,
+            wire,
+            old_peer,
+            vec![api_sock, wire_sock],
+        )
+    }
+
+    fn cleanup(socks: &[PathBuf]) {
+        for sock in socks {
+            let _ = std::fs::remove_file(sock);
+        }
+    }
+
+    /// NewPane splits the relay's OWN attached pane — not herdr's focused one —
+    /// in its own workspace with `focus: false`, then re-points at the new pane.
+    #[test]
+    fn new_pane_splits_the_attached_pane_unfocused_and_follows_it() {
+        let panes = format!(
+            "[{},{}]",
+            pane_json("w2:p1", "term-mine", "ws-b", "w2:t1", false),
+            // herdr's focus is on ANOTHER pane (a desktop client's): never the target.
+            pane_json("w2:p2", "term-desktop", "ws-b", "w2:t1", true),
+        );
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "np",
+            "ws-b",
+            "term-mine",
+            3,
+            vec![
+                (
+                    "pane.list",
+                    format!(r#""result":{{"type":"pane_list","panes":{panes}}}"#),
+                ),
+                (
+                    "pane.split",
+                    format!(
+                        r#""result":{{"type":"pane_info","pane":{}}}"#,
+                        pane_json("w2:p3", "term-new", "ws-b", "w2:t1", false)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .new_pane(true, Some("ignored".into()))
+            .expect("new_pane must succeed")
+            .attached();
+
+        let reqs = api.join().unwrap();
+        let methods: Vec<&str> = reqs.iter().map(|r| r["method"].as_str().unwrap()).collect();
+        assert_eq!(methods, vec!["pane.list", "pane.split", "ping"]);
+        assert_eq!(reqs[0]["params"]["workspace_id"], "ws-b");
+        let split = &reqs[1]["params"];
+        assert_eq!(split["workspace_id"], "ws-b", "the relay's own workspace");
+        assert_eq!(
+            split["target_pane_id"], "w2:p1",
+            "the relay's attached pane, never herdr's focused one"
+        );
+        assert_eq!(split["focus"], false, "herdr's focus must not move");
+        assert_eq!(split["direction"], "right");
+
+        let (attach, _conn) = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-new"),
+            "the stream must follow the new pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(sender.current_terminal_id, "term-new");
+        assert_eq!(sender.workspace_id, "ws-b");
+
+        let reg = sender.control.pane_registry();
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(
+            view.pane,
+            PaneRef::terminal(reg.id_for_herdr_pane("w2:p3").unwrap())
+        );
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t1")
+        );
+        cleanup(&socks);
+    }
+
+    /// The attached pane vanished: refuse rather than fall back to splitting
+    /// whatever herdr has focused. Nothing is split and the stream stays put.
+    #[test]
+    fn new_pane_refuses_when_the_attached_pane_is_gone() {
+        let panes = format!(
+            "[{}]",
+            pane_json("w2:p2", "term-desktop", "ws-b", "w2:t1", true)
+        );
+        let api_sock = unique_socket_path("npg");
+        let api = fake_api(
+            &api_sock,
+            1,
+            vec![(
+                "pane.list",
+                format!(r#""result":{{"type":"pane_list","panes":{panes}}}"#),
+            )],
+        );
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+        sender.workspace_id = "ws-b".into();
+        sender.current_terminal_id = "term-mine".into();
+
+        let err = sender.new_pane(false, None).expect_err("must refuse");
+        assert!(format!("{err:#}").contains("reattach required"), "{err:#}");
+        let methods: Vec<String> = api
+            .join()
+            .unwrap()
+            .iter()
+            .map(|r| r["method"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(methods, vec!["pane.list"], "no split may be sent");
+        assert_eq!(sender.current_terminal_id, "term-mine");
+        cleanup(&[api_sock]);
+    }
+
+    /// NewTab creates the tab in the relay's OWN workspace with `focus: false`
+    /// and re-points at the new tab's root pane.
+    #[test]
+    fn new_tab_creates_in_the_relays_workspace_unfocused_and_follows_it() {
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "nt",
+            "ws-b",
+            "term-mine",
+            2,
+            vec![
+                (
+                    "tab.create",
+                    format!(
+                        r#""result":{{"type":"tab_created","tab":{},"root_pane":{}}}"#,
+                        tab_json("w2:t9", "ws-b"),
+                        pane_json("w2:p9", "term-tab", "ws-b", "w2:t9", true)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .new_tab(Some("logs".into()))
+            .expect("new_tab must succeed")
+            .attached();
+
+        let reqs = api.join().unwrap();
+        assert_eq!(reqs[0]["method"], "tab.create");
+        let params = &reqs[0]["params"];
+        assert_eq!(params["workspace_id"], "ws-b", "the relay's own workspace");
+        assert_eq!(params["focus"], false, "herdr's focus must not move");
+        assert_eq!(params["label"], "logs");
+
+        let (attach, _conn) = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-tab"),
+            "the stream must follow the new tab's pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(sender.current_terminal_id, "term-tab");
+        assert_eq!(sender.workspace_id, "ws-b");
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t9")
+        );
+        cleanup(&socks);
+    }
+
+    /// CreateSpace creates the workspace with `focus: false` and switches THIS
+    /// relay to it: the stream follows its root pane and the relay's workspace
+    /// becomes the new one.
+    #[test]
+    fn create_space_creates_unfocused_and_switches_this_relay_to_it() {
+        let workspace = serde_json::json!({
+            "workspace_id": "ws-new", "number": 3, "label": "scratch", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "w3:t1", "agent_status": "idle"
+        });
+        let (mut sender, swap_rx, api, wire, _old_peer, socks) = create_harness(
+            "ns",
+            "ws-b",
+            "term-mine",
+            2,
+            vec![
+                (
+                    "workspace.create",
+                    format!(
+                        r#""result":{{"type":"workspace_created","workspace":{workspace},"tab":{},"root_pane":{}}}"#,
+                        tab_json("w3:t1", "ws-new"),
+                        pane_json("w3:p1", "term-space", "ws-new", "w3:t1", true)
+                    ),
+                ),
+                pong(),
+            ],
+        );
+
+        let view = sender
+            .create_space(Some("scratch".into()))
+            .expect("create_space must succeed")
+            .attached();
+
+        let reqs = api.join().unwrap();
+        assert_eq!(reqs[0]["method"], "workspace.create");
+        let params = &reqs[0]["params"];
+        assert_eq!(params["focus"], false, "herdr's focus must not move");
+        assert_eq!(params["label"], "scratch");
+
+        let (attach, _conn) = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-space"),
+            "the stream must follow the new space's pane, got {attach:?}"
+        );
+        assert!(matches!(swap_rx.try_recv(), Ok(Some(_))));
+        assert_eq!(
+            sender.workspace_id, "ws-new",
+            "this relay switched to the new space"
+        );
+        assert_eq!(view.space_id, "ws-new");
+        cleanup(&socks);
+    }
+
+    /// A herdr refusal is the create's failure: nothing to re-point at, so no
+    /// re-attach is attempted and the stream stays where it was.
+    #[test]
+    fn a_refused_create_does_not_touch_the_stream() {
+        let api_sock = unique_socket_path("rf");
+        let api = fake_api(
+            &api_sock,
+            1,
+            vec![(
+                "tab.create",
+                r#""error":{"code":"invalid_request","message":"no such workspace"}"#.to_string(),
+            )],
+        );
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+
+        let err = sender.new_tab(None).expect_err("a refusal is an error");
+        assert!(format!("{err:#}").contains("no such workspace"), "{err:#}");
+        assert!(!crate::multiplexer::CreateUnsupported::is(&err));
+        assert_eq!(api.join().unwrap().len(), 1);
+        assert_eq!(sender.current_terminal_id, "term-1");
+        assert_eq!(sender.workspace_id, "ws-1");
+        cleanup(&[api_sock]);
+    }
+
+    // ── A create that landed but could not be followed ────────────────────────
+    //
+    // The create call succeeds, then the re-attach to the new pane fails (no
+    // wire socket): the sender must report the CREATED ids as
+    // `CreatedNotAttached`, never a plain error a client would retry into a
+    // duplicate. Fails against the pre-fix sender, which returned `Err`.
+
+    /// A sender in `ws-b` attached to `term-mine`, whose control client talks to
+    /// a fake API answering `responses` and whose re-attach cannot connect.
+    fn sender_whose_reattach_fails(
+        tag: &str,
+        api_calls: usize,
+        responses: Vec<(&'static str, String)>,
+    ) -> (
+        HerdrMuxSender,
+        std::thread::JoinHandle<Vec<serde_json::Value>>,
+        UnixStream,
+        PathBuf,
+    ) {
+        let api_sock = unique_socket_path(tag);
+        let api = fake_api(&api_sock, api_calls, responses);
+        let (old, old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+        sender.workspace_id = "ws-b".into();
+        sender.current_terminal_id = "term-mine".into();
+        (sender, api, old_peer, api_sock)
+    }
+
+    fn not_attached(outcome: CreateOutcome) -> CreatedView {
+        match outcome {
+            CreateOutcome::CreatedNotAttached { view, cause } => {
+                assert!(!cause.is_empty(), "the re-point failure is reported");
+                view
+            }
+            other => panic!("expected CreatedNotAttached, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn new_pane_whose_reattach_fails_reports_the_created_pane() {
+        let panes = format!(
+            "[{}]",
+            pane_json("w2:p1", "term-mine", "ws-b", "w2:t1", false)
+        );
+        let (mut sender, api, _old_peer, sock) = sender_whose_reattach_fails(
+            "npf",
+            2,
+            vec![
+                (
+                    "pane.list",
+                    format!(r#""result":{{"type":"pane_list","panes":{panes}}}"#),
+                ),
+                (
+                    "pane.split",
+                    format!(
+                        r#""result":{{"type":"pane_info","pane":{}}}"#,
+                        pane_json("w2:p3", "term-new", "ws-b", "w2:t1", false)
+                    ),
+                ),
+            ],
+        );
+
+        let outcome = sender
+            .new_pane(false, None)
+            .expect("a landed create is not an error");
+
+        let view = not_attached(outcome);
+        let reg = sender.control.pane_registry();
+        assert_eq!(
+            view.pane,
+            PaneRef::terminal(reg.id_for_herdr_pane("w2:p3").unwrap())
+        );
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t1")
+        );
+        assert_eq!(
+            sender.current_terminal_id, "term-mine",
+            "the stream never moved"
+        );
+        api.join().unwrap();
+        cleanup(&[sock]);
+    }
+
+    #[test]
+    fn new_tab_whose_reattach_fails_reports_the_created_tab() {
+        let (mut sender, api, _old_peer, sock) = sender_whose_reattach_fails(
+            "ntf",
+            1,
+            vec![(
+                "tab.create",
+                format!(
+                    r#""result":{{"type":"tab_created","tab":{},"root_pane":{}}}"#,
+                    tab_json("w2:t9", "ws-b"),
+                    pane_json("w2:p9", "term-tab", "ws-b", "w2:t9", true)
+                ),
+            )],
+        );
+
+        let view = not_attached(
+            sender
+                .new_tab(None)
+                .expect("a landed create is not an error"),
+        );
+
+        assert_eq!(
+            view.tab_id,
+            sender.control.tab_registry().assign_or_get("w2:t9")
+        );
+        assert_eq!(view.space_id, "ws-b");
+        assert_eq!(sender.current_terminal_id, "term-mine");
+        api.join().unwrap();
+        cleanup(&[sock]);
+    }
+
+    #[test]
+    fn create_space_whose_reattach_fails_reports_the_created_space() {
+        let workspace = serde_json::json!({
+            "workspace_id": "ws-new", "number": 3, "label": "scratch", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "w3:t1", "agent_status": "idle"
+        });
+        let (mut sender, api, _old_peer, sock) = sender_whose_reattach_fails(
+            "nsf",
+            1,
+            vec![(
+                "workspace.create",
+                format!(
+                    r#""result":{{"type":"workspace_created","workspace":{workspace},"tab":{},"root_pane":{}}}"#,
+                    tab_json("w3:t1", "ws-new"),
+                    pane_json("w3:p1", "term-space", "ws-new", "w3:t1", true)
+                ),
+            )],
+        );
+
+        let view = not_attached(
+            sender
+                .create_space(None)
+                .expect("a landed create is not an error"),
+        );
+
+        assert_eq!(view.space_id, "ws-new");
+        assert_eq!(
+            sender.workspace_id, "ws-b",
+            "a failed switch keeps the old workspace"
+        );
+        assert_eq!(sender.current_terminal_id, "term-mine");
+        api.join().unwrap();
+        cleanup(&[sock]);
+    }
+
+    /// A create call that breaks off at the transport (herdr unreachable mid-call)
+    /// cannot say whether the object exists: `CreateOutcomeUnknown`, not a plain
+    /// "failed".
+    #[test]
+    fn a_create_call_that_breaks_off_is_outcome_unknown() {
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old); // control socket does not exist
+
+        let err = sender.new_tab(None).expect_err("nothing answered");
+
+        assert!(CreateOutcomeUnknown::is(&err), "{err:#}");
+        assert_eq!(sender.current_terminal_id, "term-1");
+    }
+
+    /// The reply budget is derived from these timeouts, not chosen: pin the
+    /// arithmetic so a change to a timeout or the retry count is a visible
+    /// budget change.
+    #[test]
+    fn routed_repoint_worst_case_is_derived_from_the_timeouts() {
+        assert_eq!(CONTROL_CALL_WORST, Duration::from_secs(7));
+        assert_eq!(REATTACH_WORST, Duration::from_secs(37));
+        assert_eq!(ROUTED_REPOINT_WORST_CASE, Duration::from_secs(51));
+    }
+
+    // ── Pane-exit probe across workspaces ─────────────────────────────────────
+
+    /// Fake herdr JSON-API whose answer depends on the whole request (method
+    /// AND params): answers `n` sequential requests with `answer(req)` (the
+    /// `"result":…` / `"error":…` body) and returns every request seen.
+    fn fake_api_by<F>(
+        sock: &std::path::Path,
+        n: usize,
+        answer: F,
+    ) -> std::thread::JoinHandle<Vec<serde_json::Value>>
+    where
+        F: Fn(&serde_json::Value) -> String + Send + 'static,
+    {
+        use std::io::{BufRead, BufReader};
+        let listener = UnixListener::bind(sock).expect("bind fake herdr API socket");
+        std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for _ in 0..n {
+                let Ok((conn, _)) = listener.accept() else {
+                    break;
+                };
+                let mut line = String::new();
+                if BufReader::new(&conn).read_line(&mut line).unwrap_or(0) == 0 {
+                    break;
+                }
+                let req: serde_json::Value =
+                    serde_json::from_str(line.trim_end()).expect("request must be JSON");
+                let id = req["id"].as_str().unwrap_or("muxrd-0").to_string();
+                let body = answer(&req);
+                let _ = (&conn).write_all(format!("{{\"id\":\"{id}\",{body}}}\n").as_bytes());
+                seen.push(req);
+            }
+            seen
+        })
+    }
+
+    /// After a `focus_pane` into ANOTHER workspace (a global registry id), a
+    /// normal stream end with that pane still alive must not read as
+    /// `pane-exited`: the probe finds the terminal where it really lives. Fails
+    /// against the pre-fix probe, which listed only the sender's old workspace.
+    #[test]
+    fn stream_end_after_a_cross_workspace_focus_with_the_pane_present_is_not_pane_exited() {
+        let api_sock = unique_socket_path("xws");
+        let wire_sock = unique_socket_path("xww");
+        let workspace = |id: &str| {
+            serde_json::json!({
+                "workspace_id": id, "number": 1, "label": id, "focused": false,
+                "pane_count": 1, "tab_count": 1, "active_tab_id": "t", "agent_status": "idle"
+            })
+        };
+        let (ws_a, ws_b) = (workspace("ws-a"), workspace("ws-b"));
+        let api = fake_api_by(&api_sock, 4, move |req| {
+            let pane_list =
+                |pane: String| format!(r#""result":{{"type":"pane_list","panes":[{pane}]}}"#);
+            match (
+                req["method"].as_str().unwrap_or_default(),
+                req["params"]["workspace_id"].as_str(),
+            ) {
+                ("ping", _) => pong().1,
+                ("pane.list", Some("ws-a")) => {
+                    pane_list(pane_json("w1:p1", "term-a", "ws-a", "w1:t1", true))
+                }
+                ("pane.list", Some("ws-b")) => {
+                    pane_list(pane_json("w2:p5", "term-b", "ws-b", "w2:t1", true))
+                }
+                ("workspace.list", _) => {
+                    format!(r#""result":{{"type":"workspace_list","workspaces":[{ws_a},{ws_b}]}}"#)
+                }
+                _ => r#""error":{"code":"invalid_request","message":"unscripted"}"#.to_string(),
+            }
+        });
+        let listener = UnixListener::bind(&wire_sock).unwrap();
+        let wire = std::thread::spawn(move || {
+            let (mut conn, _) = listener.accept().unwrap();
+            let (_hello, attach) = serve_handshake(&mut conn);
+            (attach, conn)
+        });
+
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        sender.control = Arc::new(HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        ));
+        let (swap_tx, _swap_rx) = mpsc::channel();
+        sender.swap_tx = swap_tx;
+        sender.wire_socket = wire_sock.clone();
+        sender.workspace_id = "ws-a".into();
+        sender.current_terminal_id = "term-a".into();
+        sender.publish_attached();
+        // The pane in ws-b, known by its global registry id (a layout read of
+        // ws-b registered it).
+        let pane_b = sender
+            .control
+            .pane_registry()
+            .assign_or_get("w2:p5", "term-b");
+
+        sender
+            .focus_pane(PaneRef::terminal(pane_b))
+            .expect("cross-workspace focus must re-point");
+        let (attach, _conn) = wire.join().unwrap();
+        assert!(
+            matches!(attach, ClientMessage::AttachTerminal { ref terminal_id, .. } if terminal_id == "term-b")
+        );
+
+        // The stream now ends normally (EOF) with the pane still alive in ws-b.
+        let probe = ControlPaneProbe {
+            control: Arc::clone(&sender.control),
+            attached: Arc::clone(&sender.attached),
+        };
+        let mut rx = PaneExitReceiver::new(
+            ScriptedReceiver(vec![None].into()),
+            probe,
+            Arc::clone(&sender.teardown),
+        );
+        let msg = rx.recv();
+
+        assert!(
+            exit_reason(msg.clone()).as_deref() != Some(PANE_EXITED_REASON),
+            "a live pane in another workspace must not read as pane-exited, got {msg:?}"
+        );
+        assert!(
+            msg.is_none(),
+            "a bare EOF with the pane present ends silently"
+        );
+        let methods: Vec<String> = api
+            .join()
+            .unwrap()
+            .iter()
+            .map(|r| r["method"].as_str().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            methods,
+            vec!["ping", "pane.list", "workspace.list", "pane.list"],
+            "the probe resolves the terminal across workspaces"
+        );
+        cleanup(&[api_sock, wire_sock]);
+    }
+
+    /// The probe still reports a real pane exit: every workspace answered and
+    /// the terminal is in none of them.
+    #[test]
+    fn terminal_absent_from_every_workspace_is_absent() {
+        let api_sock = unique_socket_path("abs");
+        let ws = serde_json::json!({
+            "workspace_id": "ws-b", "number": 2, "label": "b", "focused": false,
+            "pane_count": 1, "tab_count": 1, "active_tab_id": "t", "agent_status": "idle"
+        });
+        let api = fake_api_by(&api_sock, 3, move |req| {
+            match req["method"].as_str().unwrap_or_default() {
+                "pane.list" => format!(
+                    r#""result":{{"type":"pane_list","panes":[{}]}}"#,
+                    pane_json("w9:p1", "term-other", "ws-x", "w9:t1", true)
+                ),
+                "workspace.list" => {
+                    format!(r#""result":{{"type":"workspace_list","workspaces":[{ws}]}}"#)
+                }
+                _ => r#""error":{"code":"invalid_request","message":"unscripted"}"#.to_string(),
+            }
+        });
+        let control = HerdrControl::new(
+            api_sock.clone(),
+            Arc::new(HerdrPaneRegistry::new()),
+            Arc::new(HerdrTabRegistry::new()),
+        );
+
+        assert_eq!(
+            terminal_state(&control, "ws-a", "term-gone"),
+            PaneState::Absent
+        );
+        assert_eq!(api.join().unwrap().len(), 3);
+        cleanup(&[api_sock]);
+    }
+
+    // ── Relay-initiated end: no probe ─────────────────────────────────────────
+
+    /// When the relay ends the stream itself (its teardown detaches the client),
+    /// the stream end that follows must cost no control round trip: no probe,
+    /// and the ending passes through unchanged. Fails against the pre-fix
+    /// receiver, which probed every stream end.
+    #[test]
+    fn a_relay_initiated_end_performs_no_probe() {
+        let (old, _old_peer) = UnixStream::pair().unwrap();
+        let mut sender = dummy_sender(old);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut eof = PaneExitReceiver::new(
+            ScriptedReceiver(vec![None].into()),
+            FixedProbe {
+                state: PaneState::Absent,
+                calls: Arc::clone(&calls),
+            },
+            Arc::clone(&sender.teardown),
+        );
+        let mut shutdown = PaneExitReceiver::new(
+            ScriptedReceiver(vec![exit_msg("detached")].into()),
+            FixedProbe {
+                state: PaneState::Absent,
+                calls: Arc::clone(&calls),
+            },
+            sender
+                .relay_teardown_flag()
+                .expect("herdr exposes its teardown flag"),
+        );
+
+        // The teardown nudge — the relay's own detach.
+        let _ = sender.send_client_exited();
+
+        assert!(eof.recv().is_none(), "an EOF passes through");
+        assert_eq!(exit_reason(shutdown.recv()).as_deref(), Some("detached"));
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no probe at teardown");
     }
 }

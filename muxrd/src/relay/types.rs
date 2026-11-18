@@ -5,7 +5,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tonic::Status;
 
-use crate::multiplexer::{LayoutSnapshot, PaneRef};
+use crate::multiplexer::{CreateOutcome, LayoutSnapshot, PaneRef};
 use crate::proto::ServerFrame;
 
 // ─── RelayControl ─────────────────────────────────────────────────────────────
@@ -40,6 +40,22 @@ pub struct FloatingHint {
 /// the toggle is skipped with nothing sent, since the RPC has already answered
 /// `ok:false`.
 pub type ToggleFullscreenReply = tokio::sync::oneshot::Sender<Result<(), String>>;
+
+/// Reply channel of the relay-routed create verbs ([`RelayControl::NewPane`],
+/// [`RelayControl::NewTab`], [`RelayControl::CreateSpace`]).
+///
+/// `Ok` means the object was created: [`CreateOutcome::Attached`] when this
+/// connection now renders it, [`CreateOutcome::CreatedNotAttached`] (with the
+/// created ids) when the re-point failed. A
+/// [`CreateOutcomeUnknown`](crate::multiplexer::CreateOutcomeUnknown) error means
+/// it cannot be said whether it was created (the create call broke off, or the
+/// op died mid-flight). A
+/// [`CreateUnsupported`](crate::multiplexer::CreateUnsupported) error means the
+/// sender has no per-connection create — a backstop only, since the RPC asks the
+/// backend's capability before routing. Any other error: nothing was created. A
+/// dropped sender (the relay went away before starting the op, or the read-only
+/// gate) also means nothing was created.
+pub type CreateReply = tokio::sync::oneshot::Sender<anyhow::Result<CreateOutcome>>;
 
 /// Control command routed to a live relay's AttachClient connection
 /// (W2.0a/b spike). Sent by the unary `GoToTab`/`FocusPane` RPCs through the
@@ -116,6 +132,38 @@ pub enum RelayControl {
     QueryLayout {
         reply: tokio::sync::oneshot::Sender<anyhow::Result<LayoutSnapshot>>,
     },
+    /// Open a new pane as THIS connection: next to its attached pane, in its
+    /// space, without moving herdr's daemon-global focus — then re-point this
+    /// connection's stream at the new pane.
+    ///
+    /// Replied like [`SwitchSpace`](Self::SwitchSpace): the inbound arm calls
+    /// [`MuxSender::new_pane`](crate::multiplexer::MuxSender::new_pane) on the
+    /// blocking pool, records the new pane (and its tab and space) in this
+    /// relay's view state when the connection followed it
+    /// ([`CreateOutcome::Attached`]), and fulfills `reply` (see [`CreateReply`]).
+    /// A mutating control: a read-only relay drops it.
+    NewPane {
+        floating: bool,
+        name: Option<String>,
+        reply: CreateReply,
+    },
+    /// Open a new tab in THIS connection's space without moving herdr's focus,
+    /// then re-point this connection's stream at the new tab's pane. Replied and
+    /// gated like [`NewPane`](Self::NewPane), through
+    /// [`MuxSender::new_tab`](crate::multiplexer::MuxSender::new_tab).
+    NewTab {
+        name: Option<String>,
+        reply: CreateReply,
+    },
+    /// Create a new space without moving herdr's daemon-global focus, then switch
+    /// THIS connection's view to it in place, as
+    /// [`SwitchSpace`](Self::SwitchSpace) does. Replied and gated like
+    /// [`NewPane`](Self::NewPane), through
+    /// [`MuxSender::create_space`](crate::multiplexer::MuxSender::create_space).
+    CreateSpace {
+        label: Option<String>,
+        reply: CreateReply,
+    },
 }
 
 // ─── RelayViewState ───────────────────────────────────────────────────────────
@@ -138,8 +186,11 @@ pub enum RelayControl {
 /// focus move may switch tabs and the arm does no layout read); an enter / fill
 /// toggle the target and the target's tab (`None` for a client-hinted one); a
 /// floating hide clears the focus and keeps the tab it was verified on;
-/// SwitchSpace clears both. So an `active_tab` never outlives the move that set
-/// it, and both fields agree whenever both are set.
+/// SwitchSpace clears both; a relay-routed NewPane / NewTab / CreateSpace that
+/// this connection followed records the new pane, its tab and its space, all
+/// three taken from the create's own answer (one it could not follow records
+/// nothing: its stream is ending). So an `active_tab` never outlives the move that set it, and both
+/// fields agree whenever both are set.
 #[derive(Debug, Clone, Default)]
 pub struct RelayViewState {
     /// The tab_id of the tab this relay client's own last move landed on.

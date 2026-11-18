@@ -27,6 +27,9 @@
 //! | `smoke_observer_resize_never_resizes_the_pane` | an observer's `Resize` is accepted and leaves the pane at the owner's size |
 //! | `smoke_observer_wheel_scroll_does_not_reach_the_pane` | herdr drops an observer's wheel — read-only scroll is a no-op on this backend |
 //! | `smoke_list_agents_reports_a_reported_agent_pane` | `list_agents` + the `AgentMark` on `query_layout_for_space` agree on a pane herdr was told hosts an agent (herdr 0.9.0 and 0.9.5) |
+//! | `smoke_relay_new_pane_lands_in_the_relays_space_and_keeps_daemon_focus` | `MuxSender::new_pane` on a relay attached in a NON-focused space: the pane lands there, the stream follows, the daemon's focus stays |
+//! | `smoke_relay_new_tab_lands_in_the_relays_space_and_keeps_daemon_focus` | `MuxSender::new_tab`, same shape |
+//! | `smoke_relay_create_space_switches_the_relay_and_keeps_daemon_focus` | `MuxSender::create_space`: a new space, the relay switched to it, the daemon's focus unchanged |
 //!
 //! The four observe-mode tests attach to the SAME workspace, so run them serially
 //! (`-- --ignored --test-threads=1`): concurrent attaches take each other over by
@@ -53,11 +56,28 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use muxrd::multiplexer::{
-    AgentSummary, HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind, MuxReceiver, MuxServerMsg,
-    PaneRef,
+    AgentSummary, CreateOutcome, CreatedView, HerdrBackend, MuxBackend, MuxEvent, MuxMouseKind,
+    MuxReceiver, MuxSender, MuxServerMsg, PaneRef, ResumeTarget,
 };
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
+
+/// A relay-routed create the connection must have followed: the smoke tests
+/// treat a `CreatedNotAttached` (created, but the re-point failed) as a failure.
+trait Followed {
+    fn followed(self) -> CreatedView;
+}
+
+impl Followed for CreateOutcome {
+    fn followed(self) -> CreatedView {
+        match self {
+            CreateOutcome::Attached(view) => view,
+            CreateOutcome::CreatedNotAttached { view, cause } => {
+                panic!("created {view:?} but the relay could not follow it: {cause}")
+            }
+        }
+    }
+}
 
 /// Construct a `HerdrBackend` from the process environment.
 ///
@@ -1345,4 +1365,366 @@ fn smoke_list_agents_reports_a_reported_agent_pane() {
     // Cleanup is explicit so the removal is asserted, not only best-effort.
     herdr_cli(&["pane", "close", &new_pane]);
     println!("[herdr smoke] PASS — list_agents and the layout mark agree");
+}
+
+// ─── relay-routed creates (NewPane / NewTab / CreateSpace) ────────────────────
+//
+// The bug these pin: with the daemon's focus on space A (a desktop client), a
+// phone attached in space B asked for a pane and got one next to the desktop's
+// pane in A, focused there, while the phone's own view did not change. Through
+// the relay's sender the create lands in the RELAY's space, its stream follows
+// the new pane, and the daemon's focused workspace is still A afterwards.
+//
+// Harness: a herdr with at least two workspaces, one of them focused —
+// `herdr workspace create` once if the daemon has only one. Each test creates
+// one pane, tab or space and closes it again; run serially
+// (`--test-threads=1`) like the observe-mode tests, since they share the
+// daemon's focus.
+
+/// `(focused space A, another space B)` — the precondition every create test
+/// needs: the daemon's focus on one space and the relay attached in another.
+fn focused_and_other_space(b: &HerdrBackend) -> (String, String) {
+    let spaces = b.list_spaces(HERDR_SESSION).expect("list_spaces() failed");
+    assert!(
+        spaces.len() >= 2,
+        "this test needs ≥2 herdr workspaces (found {}) — `herdr workspace create` first",
+        spaces.len()
+    );
+    let focused = spaces
+        .iter()
+        .find(|s| s.active)
+        .map(|s| s.id.clone())
+        .expect("herdr must report a focused workspace");
+    let other = spaces
+        .iter()
+        .find(|s| !s.active)
+        .map(|s| s.id.clone())
+        .expect("this test needs a NON-focused workspace to attach in");
+    (focused, other)
+}
+
+/// The daemon's focused workspace, as herdr reports it.
+fn daemon_focused_space(b: &HerdrBackend) -> Option<String> {
+    b.list_spaces(HERDR_SESSION)
+        .expect("list_spaces() failed")
+        .into_iter()
+        .find(|s| s.active)
+        .map(|s| s.id)
+}
+
+/// Attach read-write in `space` (by resume hint — the daemon's focus does not
+/// move) and start draining the stream. Returns the sender and the probe once
+/// the first frame has arrived.
+fn attach_in_space(b: &HerdrBackend, space: &str) -> (Box<dyn MuxSender>, StreamProbe) {
+    let resume = ResumeTarget {
+        space_id: Some(space.to_string()),
+        tab_id: None,
+        pane_id: None,
+    };
+    let handle = b
+        .open_attach_with_resume(HERDR_SESSION, 24, 80, false, &resume)
+        .expect("open_attach_with_resume() failed");
+    assert_eq!(
+        handle.resumed_view.as_ref().map(|v| v.space_id.as_str()),
+        Some(space),
+        "the attach must land in the hinted space"
+    );
+    let (sender, receiver) = handle.split();
+    let probe = StreamProbe::start(receiver, "create");
+    assert!(
+        probe.frames_grow_past(0),
+        "no initial frame from the attach"
+    );
+    (sender, probe)
+}
+
+/// NewPane through a relay attached in B lands in B (not next to the focused
+/// pane in A), the relay's stream follows the new pane, and the daemon's focus
+/// stays on A.
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a pane"]
+fn smoke_relay_new_pane_lands_in_the_relays_space_and_keeps_daemon_focus() {
+    let b = backend();
+    let (focused, other) = focused_and_other_space(&b);
+    let (mut sender, probe) = attach_in_space(&b, &other);
+    let mark = probe.frames();
+
+    let view = sender
+        .new_pane(false, None)
+        .expect("relay new_pane() failed")
+        .followed();
+    println!("[herdr smoke] relay NewPane → {view:?} (daemon focus {focused:?})");
+
+    assert_eq!(
+        view.space_id, other,
+        "the pane must land in the relay's space"
+    );
+    let layout = b
+        .query_layout_for_space(HERDR_SESSION, Some(&other))
+        .expect("query_layout_for_space() failed");
+    assert!(
+        layout
+            .tabs
+            .iter()
+            .any(|t| t.tab_id == view.tab_id && t.panes.iter().any(|p| p.id == view.pane.id)),
+        "the new pane must be in the relay's space, in the reported tab: {layout:?}"
+    );
+    assert!(
+        probe.frames_grow_past(mark),
+        "the relay's stream must follow the new pane"
+    );
+    assert!(!probe.ended(), "the re-point must not end the stream");
+    assert_eq!(
+        daemon_focused_space(&b).as_deref(),
+        Some(focused.as_str()),
+        "a relay-routed NewPane must NOT move the daemon's focused workspace"
+    );
+
+    sender.send_client_exited().ok();
+    let ack = b
+        .close_pane(HERDR_SESSION, view.pane)
+        .expect("close_pane() failed");
+    assert!(ack.ok, "cleanup close_pane failed: {ack:?}");
+}
+
+/// NewTab through a relay attached in B creates the tab in B, the stream
+/// follows its root pane, and the daemon's focus stays on A.
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a tab"]
+fn smoke_relay_new_tab_lands_in_the_relays_space_and_keeps_daemon_focus() {
+    let b = backend();
+    let (focused, other) = focused_and_other_space(&b);
+    let (mut sender, probe) = attach_in_space(&b, &other);
+    let mark = probe.frames();
+
+    let view = sender
+        .new_tab(Some(marker("tab")))
+        .expect("relay new_tab() failed")
+        .followed();
+    println!("[herdr smoke] relay NewTab → {view:?} (daemon focus {focused:?})");
+
+    assert_eq!(
+        view.space_id, other,
+        "the tab must land in the relay's space"
+    );
+    let layout = b
+        .query_layout_for_space(HERDR_SESSION, Some(&other))
+        .expect("query_layout_for_space() failed");
+    assert!(
+        layout
+            .tabs
+            .iter()
+            .any(|t| t.tab_id == view.tab_id && t.panes.iter().any(|p| p.id == view.pane.id)),
+        "the new tab and its pane must be in the relay's space: {layout:?}"
+    );
+    assert!(
+        probe.frames_grow_past(mark),
+        "the relay's stream must follow the new tab's pane"
+    );
+    assert!(!probe.ended(), "the re-point must not end the stream");
+    assert_eq!(
+        daemon_focused_space(&b).as_deref(),
+        Some(focused.as_str()),
+        "a relay-routed NewTab must NOT move the daemon's focused workspace"
+    );
+
+    sender.send_client_exited().ok();
+    let ack = b
+        .close_tab(HERDR_SESSION, view.tab_id)
+        .expect("close_tab() failed");
+    assert!(ack.ok, "cleanup close_tab failed: {ack:?}");
+}
+
+/// CreateSpace through a relay attached in B creates a new space and switches
+/// THAT relay to it — its stream follows — while the daemon's focus stays on A.
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a workspace"]
+fn smoke_relay_create_space_switches_the_relay_and_keeps_daemon_focus() {
+    let b = backend();
+    let (focused, other) = focused_and_other_space(&b);
+    let before: Vec<String> = b
+        .list_spaces(HERDR_SESSION)
+        .expect("list_spaces() failed")
+        .into_iter()
+        .map(|s| s.id)
+        .collect();
+    let (mut sender, probe) = attach_in_space(&b, &other);
+    let mark = probe.frames();
+
+    let view = sender
+        .create_space(Some(test_session_name()))
+        .expect("relay create_space() failed")
+        .followed();
+    println!("[herdr smoke] relay CreateSpace → {view:?} (daemon focus {focused:?})");
+
+    assert!(
+        !before.contains(&view.space_id),
+        "the relay must report the NEW space, got {:?} (existing: {before:?})",
+        view.space_id
+    );
+    let layout = b
+        .query_layout_for_space(HERDR_SESSION, Some(&view.space_id))
+        .expect("query_layout_for_space() failed for the new space");
+    assert!(
+        layout
+            .tabs
+            .iter()
+            .any(|t| t.tab_id == view.tab_id && t.panes.iter().any(|p| p.id == view.pane.id)),
+        "the reported pane must be the new space's root pane: {layout:?}"
+    );
+    assert!(
+        probe.frames_grow_past(mark),
+        "the relay's stream must follow the new space"
+    );
+    assert!(!probe.ended(), "the switch must not end the stream");
+    assert_eq!(
+        daemon_focused_space(&b).as_deref(),
+        Some(focused.as_str()),
+        "a relay-routed CreateSpace must NOT move the daemon's focused workspace"
+    );
+
+    sender.send_client_exited().ok();
+    let ack = b
+        .close_space(&view.space_id, false)
+        .expect("close_space() failed");
+    assert!(ack.ok, "cleanup close_space failed: {ack:?}");
+}
+
+// ─── pane exit ────────────────────────────────────────────────────────────────
+
+/// Records the relay's `herdr stream end: wire delivered …` debug lines, so the
+/// pane-exit test can print the signal herdr's wire actually sent — the relay
+/// maps a `ServerShutdown` and a bare EOF alike to `exit` / `pane-exited`, so
+/// the stream itself no longer shows which one it was.
+struct WireSignalLog(std::sync::Mutex<Vec<String>>);
+
+impl WireSignalLog {
+    const TARGET: &'static str = "muxrd::multiplexer::herdr::relay";
+    const PREFIX: &'static str = "herdr stream end: ";
+
+    /// Install the recorder as the process logger (idempotent) and return it.
+    fn install() -> &'static Self {
+        static LOG: WireSignalLog = WireSignalLog(std::sync::Mutex::new(Vec::new()));
+        if log::set_logger(&LOG).is_ok() {
+            log::set_max_level(log::LevelFilter::Debug);
+        }
+        &LOG
+    }
+
+    fn lines(&self) -> Vec<String> {
+        self.0.lock().unwrap().clone()
+    }
+}
+
+impl log::Log for WireSignalLog {
+    fn enabled(&self, metadata: &log::Metadata) -> bool {
+        metadata.level() <= log::Level::Debug && metadata.target() == Self::TARGET
+    }
+
+    fn log(&self, record: &log::Record) {
+        if !self.enabled(record.metadata()) {
+            return;
+        }
+        let line = record.args().to_string();
+        if let Some(signal) = line.strip_prefix(Self::PREFIX) {
+            self.0.lock().unwrap().push(signal.to_string());
+        }
+    }
+
+    fn flush(&self) {}
+}
+
+/// Exit the shell of the attached pane while the workspace and a second pane
+/// survive: the relay must end with `exit` / `pane-exited` (never a bare EOF),
+/// and a fresh attach with resume hints at the surviving pane must work.
+///
+/// herdr's real signal on a pane exit (`ServerShutdown { reason }` or a bare
+/// EOF) is not recorded anywhere else, so the test prints what the wire
+/// delivered — on success too — from the relay's stream-end log line
+/// ([`WireSignalLog`]); pass `--show-output` to see it on a passing run. Run
+/// on its own (`--test-threads=1`).
+#[test]
+#[ignore = "requires a live herdr instance with at least TWO workspaces (set HERDR_SOCKET_PATH); creates + closes a space"]
+fn smoke_relay_pane_exit_reports_pane_exited_and_survivor_reattaches() {
+    let wire_log = WireSignalLog::install();
+    let b = backend();
+    let (_focused, other) = focused_and_other_space(&b);
+    let (mut sender, probe) = attach_in_space(&b, &other);
+
+    // A fresh space with one root pane (A), then a second pane (B) the relay
+    // follows. A survives B's exit.
+    let space = sender
+        .create_space(Some(test_session_name()))
+        .expect("relay create_space() failed")
+        .followed();
+    let survivor = space.pane;
+    let mark = probe.frames();
+    assert!(probe.frames_grow_past(mark), "stream must follow the space");
+    let doomed = sender
+        .new_pane(false, None)
+        .expect("relay new_pane() failed")
+        .followed();
+    assert_ne!(doomed.pane.id, survivor.id, "a second pane must exist");
+    let mark = probe.frames();
+    assert!(
+        probe.frames_grow_past(mark),
+        "stream must follow the second pane"
+    );
+
+    // Make the attached pane's shell exit.
+    let log_mark = wire_log.lines().len();
+    sender
+        .send_input_chars("exit\r")
+        .expect("send_input_chars(exit) failed");
+    let ended = probe.ends();
+    let reason = probe.exit_reason.lock().unwrap().clone();
+    // The stream-end line is logged before the probe sees the ending, so it is
+    // recorded by now. Prefer the doomed pane's own (its pane is Absent).
+    let signals = wire_log.lines().split_off(log_mark);
+    let wire_signal = signals
+        .iter()
+        .find(|s| s.ends_with("attached pane Absent"))
+        .or(signals.first())
+        .cloned()
+        .unwrap_or_else(|| "no stream-end line recorded".to_string());
+    println!("[herdr smoke] pane exit wire signal: {wire_signal}");
+    println!("[herdr smoke] pane exit: stream ended={ended}, exit reason={reason:?}");
+
+    let cleanup = |sender: &mut Box<dyn MuxSender>| {
+        sender.send_client_exited().ok();
+        let _ = b.close_space(&space.space_id, false);
+    };
+    if !ended || reason.as_deref() != Some(muxrd::multiplexer::PANE_EXITED_REASON) {
+        cleanup(&mut sender);
+        panic!(
+            "expected the relay to end with exit/{:?}; stream ended={ended}, exit reason={reason:?}, \
+             wire signal: {wire_signal}",
+            muxrd::multiplexer::PANE_EXITED_REASON
+        );
+    }
+
+    // A fresh attach with resume hints at the surviving pane succeeds, and a
+    // FocusPane on that new connection is acknowledged.
+    let resume = ResumeTarget {
+        space_id: Some(space.space_id.clone()),
+        tab_id: Some(space.tab_id),
+        pane_id: Some(survivor.id),
+    };
+    let handle = b
+        .open_attach_with_resume(HERDR_SESSION, 24, 80, false, &resume)
+        .expect("fresh attach with resume hints at the surviving pane failed");
+    let view = handle.resumed_view.clone();
+    let (mut sender2, receiver2) = handle.split();
+    let probe2 = StreamProbe::start(receiver2, "survivor");
+    let got_frame = probe2.frames_grow_past(0);
+    let focus = sender2.focus_pane(survivor);
+    sender2.send_client_exited().ok();
+    cleanup(&mut sender);
+    assert_eq!(
+        view.as_ref().map(|v| (v.space_id.as_str(), v.pane.id)),
+        Some((space.space_id.as_str(), survivor.id)),
+        "the fresh attach must resolve to the surviving pane"
+    );
+    assert!(got_frame, "the fresh attach must stream the surviving pane");
+    focus.expect("FocusPane on the fresh connection must be acknowledged ok");
 }

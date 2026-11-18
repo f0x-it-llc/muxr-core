@@ -125,6 +125,11 @@ pub struct HerdrControl {
     agents_unavailable: AtomicBool,
 }
 
+/// The outcome of a create whose ids the caller needs: `Ok(entity)` when herdr
+/// created it, `Err(ack)` when herdr refused (a failed [`ActionAck`] worded as
+/// every other action refusal is). Transport failures are the outer `Result`.
+pub type Created<T> = std::result::Result<T, ActionAck>;
+
 /// herdr answered a JSON-API request with an error envelope
 /// (`{"error":{"code","message"}}`) — as opposed to a transport or decode
 /// failure. Typed so a caller can tell "herdr refused this method" (e.g. a
@@ -300,6 +305,22 @@ impl HerdrControl {
         }
     }
 
+    /// Round-trip a create method whose **success payload matters** — the
+    /// relay-routed creates need the ids herdr answers with, where
+    /// [`Self::call_action`] discards them.
+    ///
+    /// A herdr API-level error becomes `Ok(Err(ack))` with exactly the wording
+    /// [`Self::call_action`] gives it; only transport / decode failures propagate
+    /// as `Err`.
+    fn call_created(&self, method: &str, params: serde_json::Value) -> Result<Created<ApiResult>> {
+        match self.call_raw(method, params)? {
+            ApiResponseBody::Ok { result } => Ok(Ok(serde_json::from_value(result)
+                .with_context(|| format!("decode herdr {method} result"))?)),
+            ApiResponseBody::Err { error } => Ok(Err(worktree_group_refusal(method, &error)
+                .unwrap_or_else(|| ack_err(format!("{}: {}", error.code, error.message))))),
+        }
+    }
+
     fn to_params<P: Serialize>(method: &str, params: P) -> Result<serde_json::Value> {
         serde_json::to_value(params).with_context(|| format!("serialize herdr {method} params"))
     }
@@ -337,15 +358,39 @@ impl HerdrControl {
 
     /// `workspace.create` — create and focus a new workspace.
     pub fn create_workspace(&self, label: Option<String>) -> Result<ActionAck> {
-        let params = Self::to_params(
+        let params = Self::workspace_create_params(label, true)?;
+        self.call_action("workspace.create", params)
+    }
+
+    /// `workspace.create` with an explicit `focus` flag, answering the new
+    /// workspace's **root pane** (whose `workspace_id` / `tab_id` name the new
+    /// workspace and its first tab) — or the refusal ack.
+    ///
+    /// The relay-routed `CreateSpace` passes `focus: false`, so herdr's
+    /// daemon-global focus (every desktop client's view) stays where it was;
+    /// [`Self::create_workspace`] keeps the legacy focused create.
+    pub fn create_workspace_created(
+        &self,
+        label: Option<String>,
+        focus: bool,
+    ) -> Result<Created<PaneInfo>> {
+        let params = Self::workspace_create_params(label, focus)?;
+        Ok(match self.call_created("workspace.create", params)? {
+            Ok(ApiResult::WorkspaceCreated { root_pane, .. }) => Ok(*root_pane),
+            Ok(other) => return Err(unexpected("workspace.create", &other)),
+            Err(ack) => Err(ack),
+        })
+    }
+
+    fn workspace_create_params(label: Option<String>, focus: bool) -> Result<serde_json::Value> {
+        Self::to_params(
             "workspace.create",
             WorkspaceCreateParams {
-                focus: true,
+                focus,
                 label,
                 ..Default::default()
             },
-        )?;
-        self.call_action("workspace.create", params)
+        )
     }
 
     /// `workspace.rename`.
@@ -393,16 +438,45 @@ impl HerdrControl {
         workspace_id: Option<&str>,
         label: Option<String>,
     ) -> Result<ActionAck> {
-        let params = Self::to_params(
+        let params = Self::tab_create_params(workspace_id, label, true)?;
+        self.call_action("tab.create", params)
+    }
+
+    /// `tab.create` in the named workspace with an explicit `focus` flag,
+    /// answering the new tab's **root pane** (its `tab_id` names the new tab) —
+    /// or the refusal ack.
+    ///
+    /// The workspace is required: the relay-routed `NewTab` must land in the
+    /// CALLER's space, never in whatever herdr has focused. It passes
+    /// `focus: false`; [`Self::create_tab`] keeps the legacy focused create.
+    pub fn create_tab_created(
+        &self,
+        workspace_id: &str,
+        label: Option<String>,
+        focus: bool,
+    ) -> Result<Created<PaneInfo>> {
+        let params = Self::tab_create_params(Some(workspace_id), label, focus)?;
+        Ok(match self.call_created("tab.create", params)? {
+            Ok(ApiResult::TabCreated { root_pane, .. }) => Ok(*root_pane),
+            Ok(other) => return Err(unexpected("tab.create", &other)),
+            Err(ack) => Err(ack),
+        })
+    }
+
+    fn tab_create_params(
+        workspace_id: Option<&str>,
+        label: Option<String>,
+        focus: bool,
+    ) -> Result<serde_json::Value> {
+        Self::to_params(
             "tab.create",
             TabCreateParams {
                 workspace_id: workspace_id.map(str::to_string),
-                focus: true,
+                focus,
                 label,
                 ..Default::default()
             },
-        )?;
-        self.call_action("tab.create", params)
+        )
     }
 
     /// `tab.focus` — resolves the neutral `u64` tab id via the tab registry.
@@ -452,7 +526,43 @@ impl HerdrControl {
             Ok(p) => p,
             Err(ack) => return Ok(ack),
         };
-        let params = Self::to_params(
+        let params = Self::pane_split_params(workspace_id, target_pane_id, direction, focus)?;
+        self.call_action("pane.split", params)
+    }
+
+    /// `pane.split` of an EXPLICIT pane (a herdr `pane_id`) in the named
+    /// workspace, answering the **new pane** — or the refusal ack.
+    ///
+    /// Both the workspace and the target are required: the relay-routed
+    /// `NewPane` splits the caller's own attached pane, never whatever herdr has
+    /// focused. It passes `focus: false`, so no other client's focus moves.
+    pub fn split_pane_created(
+        &self,
+        workspace_id: &str,
+        target_pane_id: &str,
+        direction: SplitDirection,
+        focus: bool,
+    ) -> Result<Created<PaneInfo>> {
+        let params = Self::pane_split_params(
+            Some(workspace_id),
+            Some(target_pane_id.to_string()),
+            direction,
+            focus,
+        )?;
+        Ok(match self.call_created("pane.split", params)? {
+            Ok(ApiResult::PaneInfo { pane }) => Ok(*pane),
+            Ok(other) => return Err(unexpected("pane.split", &other)),
+            Err(ack) => Err(ack),
+        })
+    }
+
+    fn pane_split_params(
+        workspace_id: Option<&str>,
+        target_pane_id: Option<String>,
+        direction: SplitDirection,
+        focus: bool,
+    ) -> Result<serde_json::Value> {
+        Self::to_params(
             "pane.split",
             PaneSplitParams {
                 workspace_id: workspace_id.map(str::to_string),
@@ -463,8 +573,7 @@ impl HerdrControl {
                 focus,
                 env: HashMap::new(),
             },
-        )?;
-        self.call_action("pane.split", params)
+        )
     }
 
     /// `pane.close`.
