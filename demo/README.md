@@ -189,13 +189,20 @@ QR of it) wherever people will scan it.
 > `backend: zellij not in served set` and a demo that serves herdr only. v0.4.1
 > predates the zellij 0.45.1 rebaseline, so it links `zellij-utils` 0.44.3 and
 > cannot drive this image's zellij. Below 0.4.3, a read-only viewer is pinned to
-> a single fixed-size tab, so a public demo visitor has nothing to explore. If
-> you bump the zellij pin, pair it with a muxr-core release built against the
-> same zellij.
+> a single fixed-size tab, so a public demo visitor has nothing to explore.
+
+> **`ZELLIJ_VERSION` follows `MUXR_VERSION`.** muxrd releases up to and
+> including 0.5.3 require zellij exactly 0.45.1; releases after 0.5.3 support
+> zellij 0.45.x (from 0.45.1) and 0.46.x. The image installs a *released*
+> muxrd, so the zellij version may move to 0.46.0 only together with a
+> `MUXR_VERSION` that supports it; with an older muxrd the demo would serve
+> herdr only. `ZELLIJ_VERSION` is an image build argument (default `0.45.1`)
+> that the compose files do not pass; to build with another version:
+> `docker build --build-arg ZELLIJ_VERSION=0.46.0 --build-arg MUXR_VERSION=<a release after 0.5.3> …`
 
 ### What's inside
 
-zellij **0.45.1** and herdr **0.9.0** (both backends served), Neovim **0.12.5**
+zellij **0.45.1** (the default `ZELLIJ_VERSION`) and herdr **0.9.0** (both backends served), Neovim **0.12.5**
 with NvChad and pre-built treesitter parsers, `opencode` **1.18.29**, plus btop,
 htop, ripgrep, fd, fzf, bat, tree, jq, ncdu, git, and a few toys.
 

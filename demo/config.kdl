@@ -4,12 +4,13 @@
 // we omit (keybinds, plugin aliases, themes, web client, …). The one thing we pin
 // is an empty `load_plugins` block.
 //
-// zellij 0.45.1's bundled default config ships `load_plugins { "zellij:link" }` —
+// zellij's bundled default config (0.45.1 and 0.46.0 alike) loads background
+// plugins through `load_plugins` — in 0.45.1 `load_plugins { "zellij:link" }` —
 // a background plugin (makes terminal file-paths clickable) that loads on every
 // new session and surfaced as a stray pane in app-created sessions. An explicit
 // empty block keeps it — and any other background plugin — from loading.
 //
-// Installed by the demo entrypoint on every boot. The demo runs zellij 0.45.1 as
+// Installed by the demo entrypoint on every boot. The demo runs zellij as
 // uid 10001 with XDG_CONFIG_HOME=/run/demo/.config — a tmpfs, not a persisted
 // named volume — so the config is reinstalled fresh on every container
 // start/restart rather than surviving across them.
