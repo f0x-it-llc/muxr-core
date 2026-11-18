@@ -10,8 +10,9 @@
 //!        CreateSession("d2new") → ListSessions includes "d2new".
 //!        RenameSession(session, "d2demo-renamed") → reflected in ListSessions.
 //!        KillSession("d2new") → ListSessions no longer includes "d2new".
-//!  (4) Read-only gate: RO token → NewTab/CloseTab/RenameTab/GoToTab/RenameSession/
-//!      KillSession/CreateSession all return permission_denied; ScrollPane + reads ok.
+//!  (4) Read-only gate: RO token → NewTab/CloseTab/RenameTab/RenameSession/
+//!      KillSession/CreateSession all return permission_denied; ScrollPane + reads
+//!      ok; GoToTab (navigation) is not answered with permission_denied.
 //!
 //! Usage:
 //!     cargo run --example session_client -- \
@@ -456,15 +457,41 @@ async fn main() -> Result<()> {
             .await;
         check_permission_denied("NewTab", ro_new_tab, &mut pass);
 
-        // GoToTab with RO token must be permission_denied.
-        let ro_goto = ro
+        // GoToTab with RO token is navigation, which a read-only token may do:
+        // it must not be refused with permission_denied. This client has no
+        // attached terminal, and navigation acts on the caller's own attach,
+        // so the server answers with an ack that either succeeds or says a
+        // reattach is required; any other failed ack is a failure.
+        match ro
             .go_to_tab(TabTarget {
                 session: "d2demo-renamed".to_owned(),
                 tab_id: 0,
                 ..Default::default()
             })
-            .await;
-        check_permission_denied("GoToTab", ro_goto, &mut pass);
+            .await
+        {
+            Ok(reply) => {
+                let ack = reply.into_inner();
+                if ack.ok {
+                    println!("  PASS: read-only GoToTab succeeded");
+                } else if ack.error.contains("reattach required") {
+                    println!(
+                        "  PASS: read-only GoToTab not refused (no attach to act on: '{}')",
+                        ack.error
+                    );
+                } else {
+                    println!(
+                        "  FAIL: read-only GoToTab ack: ok=false error='{}'",
+                        ack.error
+                    );
+                    pass = false;
+                }
+            }
+            Err(e) => {
+                println!("  FAIL: read-only GoToTab errored: {e}");
+                pass = false;
+            }
+        }
 
         // RenameSession with RO token must be permission_denied.
         let ro_rs = ro
