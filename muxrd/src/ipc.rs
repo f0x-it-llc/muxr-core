@@ -63,25 +63,30 @@ pub fn session_socket_path(session_name: &str) -> PathBuf {
 /// Choose between the path zellij's resolver gave for `session_name` and the
 /// name-named path `<sock_dir>/<session_name>`.
 ///
-/// - A resolved path that is not directly inside `sock_dir`, or whose file
-///   name is not a valid session name, is discarded: its last component comes
-///   from the session index, not from the validated name.
+/// - A resolved path that is not a file directly inside `sock_dir` is
+///   discarded: its last component comes from the session index, not from the
+///   validated name.
+/// - A resolved path that exists stands, whatever its file name: zellij can
+///   keep a name from before ids as a session's id, and such a name need not
+///   satisfy [`validate_session_name`]. When both paths exist the resolved one
+///   wins.
 /// - A resolved path that does not exist gives way to the name-named path
-///   when that one exists.
-/// - Otherwise the resolved path stands. When both exist the id-named socket
-///   wins; when neither does, a session still starting is awaited where the
-///   index says it will appear.
+///   when that one exists, and also when its file name is not a valid session
+///   name. Otherwise it stands, so a session still starting is awaited where
+///   the index says it will appear.
 fn choose_socket_path(sock_dir: &Path, session_name: &str, resolved: PathBuf) -> PathBuf {
     let by_name = sock_dir.join(session_name);
-    let well_formed = resolved.parent() == Some(sock_dir)
-        && resolved
-            .file_name()
-            .and_then(|file_name| file_name.to_str())
-            .is_some_and(|file_name| validate_session_name(file_name).is_ok());
-    if !well_formed {
-        return by_name;
+    let file_name = match resolved
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    {
+        Some(file_name) if resolved.parent() == Some(sock_dir) => file_name,
+        _ => return by_name,
+    };
+    if resolved.exists() {
+        return resolved;
     }
-    if resolved != by_name && !resolved.exists() && by_name.exists() {
+    if by_name.exists() || validate_session_name(file_name).is_err() {
         return by_name;
     }
     resolved
@@ -600,12 +605,22 @@ mod tests {
         assert_eq!(dir.choose("demo", dir.0.clone()), by_name);
     }
 
+    /// zellij can keep a name from before ids as a session's id; such a name
+    /// may contain characters muxrd does not accept in a client-supplied name.
     #[test]
-    fn a_resolution_with_an_invalid_file_name_is_discarded() {
+    fn a_live_socket_with_an_unusual_file_name_is_used() {
+        let dir = SockDir::new("legacy-id");
+        for file_name in ["my.proj", "has space"] {
+            let live = dir.socket(file_name);
+            assert_eq!(dir.choose("proj", live.clone()), live, "{file_name:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_resolution_with_an_invalid_file_name_is_discarded() {
         let dir = SockDir::new("bad-name");
         let by_name = dir.0.join("demo");
         for file_name in ["has space", "dot.ted", ".hidden", "semi;colon"] {
-            dir.socket(file_name);
             assert_eq!(
                 dir.choose("demo", dir.0.join(file_name)),
                 by_name,
