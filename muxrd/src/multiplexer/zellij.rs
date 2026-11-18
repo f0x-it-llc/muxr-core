@@ -486,8 +486,16 @@ impl MuxBackend for ZellijBackend {
     // ── Backend identity ────────────────────────────────────────────────────
 
     fn backend_version(&self) -> String {
-        zellij_utils::consts::VERSION.to_string()
+        reported_zellij_version(super::detect::detected_zellij_version())
     }
+}
+
+/// The zellij version reported to clients: the installed binary's version
+/// when the startup probe recorded one, the linked crate's otherwise.
+fn reported_zellij_version(detected: Option<&str>) -> String {
+    detected
+        .unwrap_or(zellij_utils::consts::VERSION)
+        .to_string()
 }
 
 // ─── ZellijMuxSender ────────────────────────────────────────────────────────────
@@ -812,6 +820,12 @@ mod tests {
         assert_eq!(snapshot.tabs[0].panes.len(), 1);
         assert_eq!(snapshot.tabs[0].panes[0].id, 0);
         assert_eq!(snapshot.tabs[1].panes[0].id, 2);
+    }
+
+    #[test]
+    fn the_reported_version_is_the_detected_one_else_the_linked_one() {
+        assert_eq!(reported_zellij_version(Some("0.45.1")), "0.45.1");
+        assert_eq!(reported_zellij_version(None), zellij_utils::consts::VERSION);
     }
 
     #[test]

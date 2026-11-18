@@ -32,7 +32,8 @@ impl MuxrService {
         // Phase 3: report a per-backend version for EVERY backend this server
         // drives, plus the set of available backends. No session is needed — the
         // versions come straight off each backend (`backend_version()`):
-        //   - zellij → `zellij_utils::consts::VERSION` (the linked version),
+        //   - zellij → the installed zellij binary's version, falling back to
+        //     the linked crate version when no probe read one,
         //   - herdr  → `herdr-wire-v<N>` (the wire-protocol compat marker, which
         //     is the meaningful version between muxrd and a running herdr).
         // `zellij_version` is kept as a back-compat scalar = the zellij backend's
