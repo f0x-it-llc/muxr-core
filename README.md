@@ -88,10 +88,10 @@ cargo run -p muxrctl
 ```
 
 `start` opens a control socket for `status`/`stop`; add `--daemonize` to detach.
-`MUXRD_SKIP_VERSION_CHECK=1` bypasses the Zellij version-match check.
+`MUXRD_SKIP_VERSION_CHECK=1` bypasses the zellij supported-version check.
 
-For the **zellij** backend, requires the matching `zellij` binary on `PATH` (the
-server pins a Zellij version and refuses to start against a different one). For the
+For the **zellij** backend, requires a supported `zellij` binary on `PATH` (0.45.1
+or newer 0.45.x, or 0.46.x; the server refuses other versions). For the
 **herdr** backend, requires a running `herdr` instance — a separate, unmodified,
 user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at
 runtime rather than pinning one, so it works across herdr releases. muxrd
