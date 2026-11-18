@@ -253,6 +253,7 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
                 height: Some(PercentOrFixed::Percent(100)),
                 pinned: None,
                 borderless: Some(true),
+                ..Default::default()
             };
             // No focus move when the target already holds the relay's focus.
             let mut actions = Vec::with_capacity(2);
@@ -749,17 +750,16 @@ mod tests {
     }
 
     /// The device-gate payload: a `ListPanes` array (first entry a plugin pane
-    /// with no command/cwd) in the tabs slot fails at exactly line 31 column 3
-    /// on the strict decode — proof of what the relay had paired.
+    /// with no command/cwd) in the tabs slot fails the strict decode — proof of
+    /// what the relay had paired. Only the failure is asserted, not the serde
+    /// message: its text depends on the upstream type's field order.
     #[test]
     fn panes_payload_in_tabs_slot_matches_the_device_gate_error() {
         let mut plugin = pane_entry(0, 0, false, false);
         plugin.pane_info.is_plugin = true;
         let panes = panes_json(&[plugin, pane_entry(1, 0, false, true)]);
-        let err = serde_json::from_str::<zellij_utils::data::ListTabsResponse>(&panes)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "missing field `position` at line 31 column 3");
+        let result = serde_json::from_str::<zellij_utils::data::ListTabsResponse>(&panes);
+        assert!(result.is_err(), "a panes array must not decode as tabs");
     }
 
     /// A swapped pair — the replaced query's panes Log landed in the next

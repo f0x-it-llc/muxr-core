@@ -559,13 +559,15 @@ pub fn create_session(name: &str, layout: Option<String>) -> Result<ActionAck> {
     );
 
     // ── Poll for the session to become live ──────────────────────────────────
-    // zellij registers an IPC socket under ZELLIJ_SOCK_DIR/<name> once the
-    // session is up.  We poll on that path (cheap, no IPC) until it appears or
-    // the timeout elapses — returning as soon as the session is live instead of
-    // a fixed 1.2 s sleep.
-    let socket_path = session_socket_path(name);
+    // zellij registers an IPC socket under ZELLIJ_SOCK_DIR once the session is
+    // up: named after the session (0.45) or after a generated id recorded in
+    // the session index (0.46).  The id does not exist before the session
+    // starts, so the path is resolved on every iteration.  We poll on that
+    // path (cheap, no IPC) until it appears or the timeout elapses — returning
+    // as soon as the session is live instead of a fixed 1.2 s sleep.
     let deadline = std::time::Instant::now() + CREATE_SESSION_TIMEOUT;
     loop {
+        let socket_path = session_socket_path(name);
         if socket_path.exists() {
             log::info!(
                 "create_session: '{name}' live after {:?}",

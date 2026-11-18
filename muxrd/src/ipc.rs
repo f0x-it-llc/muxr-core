@@ -40,13 +40,21 @@ pub fn pick_first_session() -> Result<String> {
     Ok(sessions.into_iter().next().unwrap().0)
 }
 
-/// Resolve the socket path for a named session.
+/// Resolve the socket path for a named session the way zellij does.
+///
+/// zellij 0.46 names a session's socket after a generated id and keeps the
+/// name-to-id mapping in a session index; zellij 0.45 names it after the
+/// session. zellij's own resolver returns the id-named path when the index
+/// knows the name and falls back to `ZELLIJ_SOCK_DIR/<name>` otherwise, so
+/// sessions of either server version are reachable. The id does not exist
+/// until the session has started, so callers waiting for a new session must
+/// resolve again on every attempt.
 pub fn session_socket_path(session_name: &str) -> PathBuf {
-    zellij_utils::consts::ZELLIJ_SOCK_DIR.join(session_name)
+    zellij_utils::consts::session_socket_path(session_name)
 }
 
 /// Validate a session name before it is ever used to build a socket path
-/// (`ZELLIJ_SOCK_DIR.join(name)`) or passed as an argument to the spawned
+/// (resolved to an id-named or name-named path under `ZELLIJ_SOCK_DIR`) or passed as an argument to the spawned
 /// `zellij` binary.
 ///
 /// **Security (review Major G — path traversal):** an un-validated name like
