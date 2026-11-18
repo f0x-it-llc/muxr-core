@@ -216,7 +216,8 @@ pub struct StartArgs {
     /// Terminal-multiplexer backend to drive.
     ///
     /// - `zellij` (default): drives the local zellij instance via Unix-domain IPC.
-    ///   Requires a running zellij binary that matches the linked zellij crate version.
+    ///   Requires an installed zellij binary of a supported version; a refused start
+    ///   names the supported versions.
     /// - `herdr`: drives a running herdr instance via its public JSON-API + wire
     ///   sockets.  Set `HERDR_SOCKET_PATH` to point at the herdr API socket when the
     ///   instance is not at its XDG-default location (`$HOME/.config/herdr/herdr.sock`).
