@@ -458,10 +458,11 @@ async fn main() -> Result<()> {
         check_permission_denied("NewTab", ro_new_tab, &mut pass);
 
         // GoToTab with RO token is navigation, which a read-only token may do:
-        // it must not be refused with permission_denied. This client has no
-        // attached terminal, and navigation acts on the caller's own attach,
-        // so the server answers with an ack that either succeeds or says a
-        // reattach is required; any other failed ack is a failure.
+        // it must not be refused with permission_denied. Navigation acts on
+        // the caller's own attach, and this client names none, so the only
+        // right answer is an ack saying a reattach is required. A successful
+        // ack would mean the request reached a session-wide path, which a
+        // read-only caller must never reach.
         match ro
             .go_to_tab(TabTarget {
                 session: "d2demo-renamed".to_owned(),
@@ -472,13 +473,14 @@ async fn main() -> Result<()> {
         {
             Ok(reply) => {
                 let ack = reply.into_inner();
-                if ack.ok {
-                    println!("  PASS: read-only GoToTab succeeded");
-                } else if ack.error.contains("reattach required") {
+                if !ack.ok && ack.error.contains("reattach required") {
                     println!(
-                        "  PASS: read-only GoToTab not refused (no attach to act on: '{}')",
+                        "  PASS: read-only GoToTab not refused, no attach to act on ('{}')",
                         ack.error
                     );
+                } else if ack.ok {
+                    println!("  FAIL: read-only GoToTab succeeded without an attach of its own");
+                    pass = false;
                 } else {
                     println!(
                         "  FAIL: read-only GoToTab ack: ok=false error='{}'",

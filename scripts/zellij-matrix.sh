@@ -23,7 +23,10 @@
 #   ZELLIJ_BIN_<version with dots as underscores>
 #                      path of a zellij binary to use instead of downloading,
 #                      e.g. ZELLIJ_BIN_0_46_0=/opt/zellij-0.46.0/zellij
-#   CARGO_TARGET_DIR   honoured when locating the built binaries
+#
+# The binaries under test are the ones cargo just built: their paths are
+# taken from the build's own output, so CARGO_TARGET_DIR, a configured target
+# directory and a configured build target are all honoured.
 #
 # Everything zellij and muxrd create lives in one short temporary directory:
 # HOME, the zellij socket directory, muxrd's data directory, the temporary
@@ -92,11 +95,24 @@ require_version() {
         *) die "not a zellij version: '$1'" ;;
     esac
 }
+# version_lt A B: true when version A is lower than version B.
+version_lt() {
+    old_ifs=$IFS
+    IFS=.
+    set -- $1 $2
+    IFS=$old_ifs
+    [ "$1" -lt "$4" ] && return 0
+    [ "$1" -gt "$4" ] && return 1
+    [ "$2" -lt "$5" ] && return 0
+    [ "$2" -gt "$5" ] && return 1
+    [ "$3" -lt "$6" ]
+}
 if [ "$MODE" = single ]; then
     require_version "$VERSION"
 else
     require_version "$OLD"
     require_version "$NEW"
+    version_lt "$OLD" "$NEW" || die "--mixed needs <old> lower than <new> (got $OLD and $NEW)"
 fi
 
 ROOT=$(cd "$(dirname "$0")/.." && pwd) || die "cannot locate the repository root"
@@ -110,6 +126,7 @@ mkdir -p "$LOGS" "$WORK/home" "$WORK/sock" "$WORK/tmp"
 
 NATIVE_PID=""
 MUXRD_STARTED=0
+MUXRD_UP=0
 FAILED=0
 ZELLIJ_BINS=""
 
@@ -125,7 +142,7 @@ cleanup() {
     status=$?
     trap - EXIT INT TERM
     stop_native_client
-    if [ "$MUXRD_STARTED" = 1 ] && ! "$BIN_DIR/muxrd" stop >/dev/null 2>&1; then
+    if [ "$MUXRD_STARTED" = 1 ] && ! "$MUXRD_BIN" stop >/dev/null 2>&1; then
         # muxrd's binary and command line are outside the work directory, so
         # a daemon that did not stop is found through this run's pid file.
         muxrd_pidfile=$(find "$WORK/home" -name muxrd.pid 2>/dev/null | head -n 1)
@@ -200,9 +217,11 @@ zellij_binary() {
     else
         triple=$(release_triple) || { echo "zellij-matrix: unsupported platform $(uname -s)/$(uname -m)" >&2; return 1; }
         base="https://github.com/zellij-org/zellij/releases/download/v$version/zellij-$triple"
-        curl -fsSL --retry 3 -o "$dest/zellij.tar.gz" "$base.tar.gz" \
+        curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 \
+            --proto '=https' --proto-redir '=https' -o "$dest/zellij.tar.gz" "$base.tar.gz" \
             || { echo "zellij-matrix: download failed: $base.tar.gz" >&2; return 1; }
-        curl -fsSL --retry 3 -o "$dest/zellij.sha256sum" "$base.sha256sum" \
+        curl -fsSL --retry 3 --connect-timeout 20 --max-time 300 \
+            --proto '=https' --proto-redir '=https' -o "$dest/zellij.sha256sum" "$base.sha256sum" \
             || { echo "zellij-matrix: download failed: $base.sha256sum" >&2; return 1; }
         tar -xzf "$dest/zellij.tar.gz" -C "$dest" || return 1
         # The checksum file lists the hash of the binary inside the archive;
@@ -235,6 +254,18 @@ run_check() {
     else
         echo "FAIL $name"
         sed "s/$ESC\[[0-9;?]*[A-Za-z]//g" "$log" | tail -n 25 | sed 's/^/    /'
+        FAILED=1
+    fi
+}
+
+# client_check <name> <command...>: a check that needs the muxrd this run
+# started. Without one it is reported as failed instead of being run against
+# whatever else listens on the port.
+client_check() {
+    if [ "$MUXRD_UP" = 1 ]; then
+        run_check "$@"
+    else
+        echo "FAIL $1 (not run: muxrd is not running)"
         FAILED=1
     fi
 }
@@ -301,28 +332,124 @@ kill_session() {
     return 1
 }
 
+# `muxrd status` exits 0 whether or not a daemon is running; its first line
+# says which.
 muxrd_running() {
-    "$BIN_DIR/muxrd" status >"$LOGS/muxrd-status.log" 2>&1
+    "$MUXRD_BIN" status >"$LOGS/muxrd-status.log" 2>&1
+    grep -q '^muxrd: running$' "$LOGS/muxrd-status.log"
 }
 
-# muxrd names each backend it serves when it starts; the line goes to its
-# start-up output before it detaches, or to its log.
-zellij_backend_accepted() {
+# The control socket answers `status` before the gRPC port is bound, so a
+# client could still be refused; this is true once the port accepts.
+port_accepts() {
+    (exec 3<>"/dev/tcp/127.0.0.1/$PORT") 2>/dev/null
+}
+
+muxrd_init() {
+    "$MUXRD_BIN" init
+}
+
+# The tokens stay in their own files inside the work directory; a failed
+# check prints only this function's own output.
+muxrd_tokens() {
+    "$MUXRD_BIN" create-token -n rw >"$LOGS/token-rw.log" 2>&1 || return 1
+    "$MUXRD_BIN" create-token -n ro --read-only >"$LOGS/token-ro.log" 2>&1 || return 1
+    RW=$(sed -n 's/^ *TOKEN: //p' "$LOGS/token-rw.log")
+    RO=$(sed -n 's/^ *TOKEN: //p' "$LOGS/token-ro.log")
+    CRT=$(find "$HOME" -name server.crt | head -n 1)
+    [ -n "$RW" ] && [ -n "$RO" ] && [ -n "$CRT" ]
+}
+
+# Start muxrd and wait until it reports running. muxrd names each backend it
+# serves when it starts; the line goes to its start-up output before it
+# detaches, or to its log, and is printed before the port is bound, so it
+# proves nothing without the other two conditions.
+muxrd_start() {
+    # Set first: from here on a daemon may exist, and teardown must stop it.
+    MUXRD_STARTED=1
+    if ! "$MUXRD_BIN" start --daemonize >"$LOGS/muxrd-start.log" 2>&1; then
+        cat "$LOGS/muxrd-start.log"
+        return 1
+    fi
+    tries=0
+    while [ "$tries" -lt 20 ] && ! { muxrd_running && port_accepts; }; do
+        tries=$((tries + 1))
+        sleep 0.5
+    done
+    cat "$LOGS/muxrd-start.log" "$LOGS/muxrd-status.log"
+    muxrd_running || return 1
+    port_accepts || return 1
     muxrd_log=$(find "$HOME" -name muxrd.log | head -n 1)
-    grep -q 'backend: zellij' "$LOGS/muxrd-start.log" ${muxrd_log:+"$muxrd_log"} && muxrd_running
+    grep -q 'backend: zellij (' "$LOGS/muxrd-start.log" ${muxrd_log:+"$muxrd_log"} || return 1
+    MUXRD_UP=1
+}
+
+# The socket-directory entries of this run's sessions, one per line.
+session_sockets() {
+    ls "$ZELLIJ_SOCKET_DIR/contract_version_1" 2>/dev/null
+}
+
+# Start `stale` with the newer binary and remember the socket it added.
+start_stale_new() {
+    before=$(session_sockets)
+    start_session "$MAIN_ZELLIJ" stale || return 1
+    STALE_SOCKET=""
+    added=0
+    for entry in $(session_sockets); do
+        if ! printf '%s\n' "$before" | grep -Fqx "$entry"; then
+            STALE_SOCKET=$entry
+            added=$((added + 1))
+        fi
+    done
+    echo "sockets added by the newer stale session: $added (${STALE_SOCKET:-none})"
+    [ "$added" = 1 ] && [ "$STALE_SOCKET" != stale ]
+}
+
+# Kill it and require its socket to be gone: only then does a later `stale`
+# have to be reached through the name-named socket.
+kill_stale_new() {
+    kill_session "$MAIN_ZELLIJ" stale || return 1
+    tries=0
+    while [ "$tries" -lt 20 ] && [ -e "$ZELLIJ_SOCKET_DIR/contract_version_1/$STALE_SOCKET" ]; do
+        tries=$((tries + 1))
+        sleep 0.5
+    done
+    [ ! -e "$ZELLIJ_SOCKET_DIR/contract_version_1/$STALE_SOCKET" ]
+}
+
+# Start `stale` again with the older binary and require its name-named socket.
+start_stale_old() {
+    start_session "$OLD_ZELLIJ" stale || return 1
+    [ -e "$ZELLIJ_SOCKET_DIR/contract_version_1/stale" ]
 }
 
 # ── Build (with the caller's own environment) ────────────────────────────────
 
 echo "building muxrd and its examples"
 (cd "$ROOT" && cargo build --locked -p muxrd --bins --examples) || die "cargo build failed"
-# cargo ran in the repository root, so a relative CARGO_TARGET_DIR is relative
-# to it.
-TARGET_DIR=$(cd "$ROOT" && mkdir -p "${CARGO_TARGET_DIR:-target}" && cd "${CARGO_TARGET_DIR:-target}" && pwd) \
-    || die "cannot locate the cargo target directory"
-BIN_DIR="$TARGET_DIR/debug"
-EXAMPLES="$BIN_DIR/examples"
-[ -x "$BIN_DIR/muxrd" ] || die "muxrd not found under $BIN_DIR"
+# Where cargo put them is cargo's to say: the directory depends on
+# CARGO_TARGET_DIR, a configured target directory and a configured build
+# target. The same build again, now up to date, lists every executable.
+(cd "$ROOT" && cargo build --locked -p muxrd --bins --examples --message-format=json) \
+    >"$LOGS/build.json" 2>/dev/null || die "cargo build failed"
+
+# built_path NAME: the executable of that name from the build's output.
+built_path() {
+    grep -o '"executable":"[^"]*"' "$LOGS/build.json" \
+        | sed -e 's/^"executable":"//' -e 's/"$//' | grep "/$1\$" | tail -n 1
+}
+
+MUXRD_BIN=$(built_path muxrd)
+ACTION_BIN=$(built_path action_client)
+SESSION_BIN=$(built_path session_client)
+ATTACH_BIN=$(built_path attach_client)
+for built in "$MUXRD_BIN" "$ACTION_BIN" "$SESSION_BIN" "$ATTACH_BIN"; do
+    case "$built" in
+        '') die "the build's output names no executable for one of muxrd, action_client, session_client, attach_client" ;;
+        *\\*) die "cannot use a build path that needs JSON escaping: $built" ;;
+    esac
+    [ -x "$built" ] || die "cargo reported $built, which is not an executable file"
+done
 
 # ── Isolation (before any zellij binary runs) ────────────────────────────────────────────────────────────────
 
@@ -365,45 +492,31 @@ fi
 
 # ── muxrd ────────────────────────────────────────────────────────────────────
 
-"$BIN_DIR/muxrd" init >"$LOGS/muxrd-init.log" 2>&1 || { echo "FAIL muxrd init"; FAILED=1; }
-"$BIN_DIR/muxrd" create-token -n rw >"$LOGS/token-rw.log" 2>&1
-"$BIN_DIR/muxrd" create-token -n ro --read-only >"$LOGS/token-ro.log" 2>&1
-RW=$(sed -n 's/^ *TOKEN: //p' "$LOGS/token-rw.log")
-RO=$(sed -n 's/^ *TOKEN: //p' "$LOGS/token-ro.log")
-CRT=$(find "$HOME" -name server.crt | head -n 1)
-if [ -z "$RW" ] || [ -z "$RO" ] || [ -z "$CRT" ]; then
-    echo "FAIL muxrd tokens and certificate"
-    FAILED=1
-fi
-
-if "$BIN_DIR/muxrd" start --daemonize >"$LOGS/muxrd-start.log" 2>&1; then
-    MUXRD_STARTED=1
-fi
-tries=0
-while [ "$tries" -lt 20 ] && ! muxrd_running; do
-    tries=$((tries + 1))
-    sleep 0.5
-done
-run_check "muxrd starts with the zellij backend" zellij_backend_accepted
+RW=""
+RO=""
+CRT=""
+run_check "muxrd init" muxrd_init
+run_check "muxrd tokens and certificate" muxrd_tokens
+run_check "muxrd starts with the zellij backend" muxrd_start
 
 ADDR="https://127.0.0.1:$PORT"
 
 action_check() {
-    "$EXAMPLES/action_client" --cert "$CRT" --auth-token "$RW" --ro-auth-token "$RO" \
+    "$ACTION_BIN" --cert "$CRT" --auth-token "$RW" --ro-auth-token "$RO" \
         --addr "$ADDR" --session "$1"
 }
 
 session_check() {
-    "$EXAMPLES/session_client" --cert "$CRT" --auth-token "$RW" --ro-auth-token "$RO" \
+    "$SESSION_BIN" --cert "$CRT" --auth-token "$RW" --ro-auth-token "$RO" \
         --addr "$ADDR" --session "$1"
 }
 
 attach_check() {
     if [ $# -gt 0 ]; then
-        "$EXAMPLES/attach_client" --cert "$CRT" --auth-token "$RW" --addr "$ADDR" \
+        "$ATTACH_BIN" --cert "$CRT" --auth-token "$RW" --addr "$ADDR" \
             --rows 30 --cols 100 --session "$1"
     else
-        "$EXAMPLES/attach_client" --cert "$CRT" --auth-token "$RW" --addr "$ADDR" \
+        "$ATTACH_BIN" --cert "$CRT" --auth-token "$RW" --addr "$ADDR" \
             --rows 30 --cols 100
     fi
 }
@@ -411,24 +524,28 @@ attach_check() {
 # ── Checks ───────────────────────────────────────────────────────────────────
 
 if [ "$MODE" = single ]; then
-    run_check "action_client (pane operations, read-only gate)" action_check demo
+    client_check "action_client (pane operations, read-only gate)" action_check demo
     run_check "native client attached to demo" attach_native_client demo
-    run_check "session_client (tabs, scroll, session lifecycle)" session_check demo
+    client_check "session_client (tabs, scroll, session lifecycle)" session_check demo
     stop_native_client
-    run_check "attach_client (render frames)" attach_check
+    client_check "attach_client (render frames)" attach_check
 else
-    run_check "action_client on old ($OLD)" action_check old
-    run_check "attach_client on old ($OLD)" attach_check zellij:old
-    run_check "action_client on new ($NEW)" action_check new
-    run_check "attach_client on new ($NEW)" attach_check zellij:new
+    client_check "action_client on old ($OLD)" action_check old
+    client_check "attach_client on old ($OLD)" attach_check zellij:old
+    client_check "action_client on new ($NEW)" action_check new
+    client_check "attach_client on new ($NEW)" attach_check zellij:new
 
     # A session of the newer version is killed, which leaves its entry in
-    # that version's session index; the older version then serves the same
-    # name under a name-named socket.
-    run_check "session stale starts ($NEW)" start_session "$MAIN_ZELLIJ" stale
-    run_check "session stale killed ($NEW)" kill_session "$MAIN_ZELLIJ" stale
-    run_check "session stale starts again ($OLD)" start_session "$OLD_ZELLIJ" stale
-    run_check "action_client on stale ($OLD after $NEW)" action_check stale
+    # that version's session index (zellij offers no command to show the
+    # entry; that it survives a kill is that version's behaviour). The older
+    # version then serves the same name under a name-named socket, and muxrd
+    # has to reach it there although the index still points at the socket
+    # that is gone.
+    STALE_SOCKET=""
+    run_check "session stale starts with its own socket ($NEW)" start_stale_new
+    run_check "session stale killed, its socket gone ($NEW)" kill_stale_new
+    run_check "session stale starts again under its name ($OLD)" start_stale_old
+    client_check "action_client on stale ($OLD after $NEW)" action_check stale
 fi
 
 # ── Result ───────────────────────────────────────────────────────────────────
