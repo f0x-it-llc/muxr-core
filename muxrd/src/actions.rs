@@ -323,8 +323,13 @@ pub fn toggle_pane_fullscreen(session: &str, pane: PaneId) -> Result<ActionAck> 
 ///
 /// The new tab id is returned by the server as a `Log` line (affected_tab_id)
 /// and surfaces in [`ActionAck::info`].
+///
+/// A server can answer with a tab id for a tab it never created (zellij 0.46
+/// does so for a session no client has attached to yet), so a successful reply
+/// is confirmed against the session's tab list before it is returned: see
+/// [`confirm_new_tab`].
 pub fn new_tab(session: &str, tab_name: Option<String>) -> Result<ActionAck> {
-    send_action(
+    let ack = send_action(
         session,
         Action::NewTab {
             tiled_layout: None,
@@ -337,7 +342,106 @@ pub fn new_tab(session: &str, tab_name: Option<String>) -> Result<ActionAck> {
             initial_panes: None,
             first_pane_unblock_condition: None,
         },
-    )
+    )?;
+    Ok(confirm_new_tab(
+        session,
+        ack,
+        NEW_TAB_SETTLE,
+        NEW_TAB_CONFIRM_INTERVAL,
+        || {
+            let json = crate::query::query_list_tabs_json(session)?;
+            let tabs = crate::query::parse_list_tabs_json(&json)?;
+            Ok(tabs.iter().map(|tab| tab.tab_id as u64).collect())
+        },
+    ))
+}
+
+/// How long [`confirm_new_tab`] waits after the ack before its first lookup.
+///
+/// A zellij 0.46 server that is about to drop the tab (the session has never
+/// had a client; once one has attached, tabs are created detached as well)
+/// still lists it for a moment: measured at under 25 ms, with a 0x0 display
+/// area and no panes. A lookup made straight after the ack therefore sees a
+/// tab that is not going to exist. The display area cannot tell the two
+/// apart, because a tab that zellij 0.45 does create with no client attached
+/// is 0x0 as well; only time can.
+const NEW_TAB_SETTLE: Duration = Duration::from_millis(250);
+
+/// How many times [`confirm_new_tab`] looks for the new tab before giving up.
+const NEW_TAB_CONFIRM_ATTEMPTS: u32 = 10;
+
+/// Pause between two lookups in [`confirm_new_tab`].
+const NEW_TAB_CONFIRM_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The reason returned when the server acked a tab it did not create.
+const NEW_TAB_NOT_CREATED: &str = "zellij did not create the tab: this zellij version cannot \
+     create a tab in a session that no client has attached to yet. Open the session, then add \
+     the tab.";
+
+/// The tab id a `NewTab` ack names: the first line of its `info`.
+///
+/// A server that created the tab answers with the tab id and then the id of
+/// the tab's first pane, one per line (`"1\nterminal_1"`); a server that is
+/// not going to create it answers with the tab id alone.
+fn acked_tab_id(info: Option<&str>) -> Option<u64> {
+    info?.lines().next()?.trim().parse().ok()
+}
+
+/// Whether the tab the server acked is among the session's tab ids.
+fn tab_is_present(acked_id: u64, tab_ids: &[u64]) -> bool {
+    tab_ids.contains(&acked_id)
+}
+
+/// Confirm that the tab a successful `NewTab` ack names exists.
+///
+/// `lookup` returns the session's current tab ids. The first lookup is made
+/// `settle` after the ack (see [`NEW_TAB_SETTLE`]); the original ack is
+/// returned as soon as a lookup lists the id, which is the first one in the
+/// normal case. Otherwise the lookup is repeated `interval` apart, up to
+/// [`NEW_TAB_CONFIRM_ATTEMPTS`] in all, and if the id never shows the ack is
+/// replaced by a failed one carrying [`NEW_TAB_NOT_CREATED`].
+///
+/// Confirmation never turns a working `NewTab` into a failure on its own
+/// account: an ack that already failed, an ack whose `info` does not start
+/// with a tab id, and a lookup that errors all return the original ack
+/// unchanged.
+fn confirm_new_tab(
+    session: &str,
+    ack: ActionAck,
+    settle: Duration,
+    interval: Duration,
+    mut lookup: impl FnMut() -> Result<Vec<u64>>,
+) -> ActionAck {
+    if !ack.ok {
+        return ack;
+    }
+    let Some(acked_id) = acked_tab_id(ack.info.as_deref()) else {
+        log::debug!(
+            "new_tab: '{session}' ack carries no tab id ({:?}); not confirming",
+            ack.info
+        );
+        return ack;
+    };
+    for attempt in 0..NEW_TAB_CONFIRM_ATTEMPTS {
+        let pause = if attempt == 0 { settle } else { interval };
+        if !pause.is_zero() {
+            std::thread::sleep(pause);
+        }
+        match lookup() {
+            Ok(tab_ids) if tab_is_present(acked_id, &tab_ids) => return ack,
+            Ok(_) => {}
+            Err(e) => {
+                log::debug!("new_tab: '{session}' tab lookup failed ({e:#}); keeping the ack");
+                return ack;
+            }
+        }
+    }
+    log::warn!("new_tab: '{session}' acked tab {acked_id} but the session does not list it");
+    ActionAck {
+        ok: false,
+        error: Some(NEW_TAB_NOT_CREATED.to_owned()),
+        info: None,
+    }
 }
 
 /// `CloseTabById { id }` — close a tab by its stable id.
@@ -616,6 +720,146 @@ pub fn which_zellij() -> Result<std::path::PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn tab_ack(info: &str) -> ActionAck {
+        ActionAck {
+            ok: true,
+            error: None,
+            info: Some(info.to_owned()),
+        }
+    }
+
+    #[test]
+    fn tab_presence_is_decided_by_id() {
+        assert!(tab_is_present(1, &[0, 1]));
+        assert!(!tab_is_present(2, &[0, 1]));
+        assert!(!tab_is_present(0, &[]));
+    }
+
+    /// The normal case: the tab is there on the first lookup, which is the
+    /// only one made.
+    #[test]
+    fn new_tab_present_on_the_first_lookup_is_confirmed() {
+        let mut lookups = 0;
+        let ack = confirm_new_tab("s", tab_ack("1"), Duration::ZERO, Duration::ZERO, || {
+            lookups += 1;
+            Ok(vec![0, 1])
+        });
+        assert!(ack.ok);
+        assert_eq!(ack.info.as_deref(), Some("1"));
+        assert_eq!(lookups, 1);
+    }
+
+    /// The reply of a server that created the tab: the tab id, then the id of
+    /// the tab's first pane. The whole `info` is passed through untouched.
+    #[test]
+    fn new_tab_ack_naming_the_tab_and_its_first_pane_is_confirmed() {
+        assert_eq!(acked_tab_id(Some("1\nterminal_1")), Some(1));
+        assert_eq!(acked_tab_id(Some(" 7 \n")), Some(7));
+        assert_eq!(acked_tab_id(Some("terminal_1")), None);
+        assert_eq!(acked_tab_id(Some("")), None);
+        assert_eq!(acked_tab_id(None), None);
+        let mut lookups = 0;
+        let ack = confirm_new_tab(
+            "s",
+            tab_ack("1\nterminal_1"),
+            Duration::ZERO,
+            Duration::ZERO,
+            || {
+                lookups += 1;
+                Ok(vec![0, 1])
+            },
+        );
+        assert!(ack.ok);
+        assert_eq!(ack.info.as_deref(), Some("1\nterminal_1"));
+        assert_eq!(lookups, 1);
+    }
+
+    #[test]
+    fn new_tab_appearing_on_the_third_lookup_is_confirmed() {
+        let mut lookups = 0;
+        let ack = confirm_new_tab("s", tab_ack("1\n"), Duration::ZERO, Duration::ZERO, || {
+            lookups += 1;
+            Ok(if lookups < 3 { vec![0] } else { vec![0, 1] })
+        });
+        assert!(ack.ok);
+        assert_eq!(lookups, 3);
+    }
+
+    #[test]
+    fn new_tab_that_never_appears_fails_the_ack() {
+        let mut lookups = 0;
+        let ack = confirm_new_tab("s", tab_ack("1"), Duration::ZERO, Duration::ZERO, || {
+            lookups += 1;
+            Ok(vec![0])
+        });
+        assert!(!ack.ok);
+        assert_eq!(
+            ack.error.as_deref(),
+            Some(
+                "zellij did not create the tab: this zellij version cannot create a tab in a \
+                 session that no client has attached to yet. Open the session, then add the tab."
+            )
+        );
+        assert_eq!(ack.info, None);
+        assert_eq!(lookups, 10);
+    }
+
+    #[test]
+    fn new_tab_lookup_error_keeps_the_original_ack() {
+        let mut lookups = 0;
+        let ack = confirm_new_tab("s", tab_ack("1"), Duration::ZERO, Duration::ZERO, || {
+            lookups += 1;
+            bail!("query failed")
+        });
+        assert!(ack.ok);
+        assert_eq!(ack.info.as_deref(), Some("1"));
+        assert_eq!(lookups, 1);
+    }
+
+    /// A lookup that errors keeps the ack even after earlier lookups did not
+    /// list the tab: a query failure is never turned into a NewTab failure.
+    #[test]
+    fn new_tab_lookup_error_after_misses_keeps_the_original_ack() {
+        let mut lookups = 0;
+        let ack = confirm_new_tab("s", tab_ack("1"), Duration::ZERO, Duration::ZERO, || {
+            lookups += 1;
+            if lookups < 3 {
+                Ok(vec![0])
+            } else {
+                bail!("query failed")
+            }
+        });
+        assert!(ack.ok);
+        assert_eq!(ack.info.as_deref(), Some("1"));
+        assert_eq!(lookups, 3);
+    }
+
+    #[test]
+    fn new_tab_ack_without_a_tab_id_is_returned_without_a_lookup() {
+        let mut lookups = 0;
+        let mut lookup = || {
+            lookups += 1;
+            Ok(vec![0])
+        };
+        let ack = confirm_new_tab(
+            "s",
+            tab_ack("not an id"),
+            Duration::ZERO,
+            Duration::ZERO,
+            &mut lookup,
+        );
+        assert!(ack.ok);
+        assert_eq!(ack.info.as_deref(), Some("not an id"));
+        let failed = ActionAck {
+            ok: false,
+            error: Some("refused".to_owned()),
+            info: None,
+        };
+        let ack = confirm_new_tab("s", failed, Duration::ZERO, Duration::ZERO, &mut lookup);
+        assert_eq!(ack.error.as_deref(), Some("refused"));
+        assert_eq!(lookups, 0);
+    }
 
     /// Regression guard: `--layout` MUST precede the `attach` subcommand, else
     /// zellij rejects it ("unexpected argument") and the session never starts.
