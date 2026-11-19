@@ -494,8 +494,9 @@ pub(crate) fn space_is_own(view: &ConnectionSpace, space_id: &str) -> bool {
 ///    its wording varies per failure mode, which would turn every error into a
 ///    finer-grained existence oracle than the `not_found` above (that one is the
 ///    deliberate, documented disclosure — see the `space_id` note in
-///    `muxrd/proto/README.md`, "Space-scoped layout reads"). The legacy path keeps its own chain-forwarding mapper; only
-///    the space path, which takes a client-chosen id, is hardened here.
+///    `muxrd/proto/README.md`, "Space-scoped layout reads"). The legacy path
+///    keeps its own chain-forwarding mapper; only the space path, which takes a
+///    client-chosen id, is hardened here.
 pub(crate) fn space_query_status(space_id: &str, err: &anyhow::Error) -> Status {
     if UnknownSpace::in_chain(err) {
         log::info!("GetLayout: space_id='{space_id}' names no live space → not_found");
