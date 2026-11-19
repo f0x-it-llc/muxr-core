@@ -133,6 +133,8 @@ which = "7"
 base64 = "0.22"
 # Paused-clock tests (`#[tokio::test(start_paused = true)]`); adds no crate.
 tokio = { version = "1", features = ["test-util"] }
+# Decodes the build-time FileDescriptorSet in tests/wire_surface.rs.
+prost-types = "0.14"
 
 # ─── Build deps ──────────────────────────────────────────────────────────────
 
