@@ -1,0 +1,26 @@
+// Server version, detected backends and capability flags (GetVersion).
+syntax = "proto3";
+
+package muxr.v1;
+
+import "muxr/v1/common.proto";
+
+message BackendVersion {
+  Backend backend = 1;
+  string version = 2;
+}
+
+message VersionInfo {
+  // Semantic version of muxrd.
+  string server_version = 1;
+  // Zellij version muxrd was compiled against; equals the zellij BackendVersion.version.
+  string zellij_version = 2;
+  // One entry per detected backend.
+  repeated BackendVersion backends = 3;
+  // Detected, usable backends.
+  repeated Backend available_backends = 4;
+  // Additive feature flags; ignore unknown values. See proto/README.md#capabilities.
+  repeated string capabilities = 5;
+  // Push device relay; empty = push unsupported. See proto/README.md#capabilities.
+  string notification_relay_url = 6;
+}

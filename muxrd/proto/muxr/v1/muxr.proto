@@ -1,0 +1,120 @@
+// The Muxr service: every RPC muxrd serves. Authentication tiers and the
+// contracts shared across RPCs are in proto/README.md.
+syntax = "proto3";
+
+package muxr.v1;
+
+import "muxr/v1/agent.proto";
+import "muxr/v1/auth.proto";
+import "muxr/v1/common.proto";
+import "muxr/v1/layout.proto";
+import "muxr/v1/pane.proto";
+import "muxr/v1/push.proto";
+import "muxr/v1/session.proto";
+import "muxr/v1/space.proto";
+import "muxr/v1/tab.proto";
+import "muxr/v1/terminal.proto";
+import "muxr/v1/version.proto";
+
+service Muxr {
+  // Session: version and login (no auth).
+
+  // Server and backend versions and capability flags. No auth.
+  rpc GetVersion(Empty) returns (VersionInfo);
+  // Exchanges an auth token for a session token. No auth.
+  rpc Login(LoginRequest) returns (LoginResponse);
+
+  // Terminal.
+
+  // The terminal stream; the first ClientFrame must be attach. See proto/README.md#attach.
+  rpc AttachTerminal(stream ClientFrame) returns (stream ServerFrame);
+
+  // Session: listing and layout.
+
+  // Live and resurrectable sessions.
+  rpc ListSessions(Empty) returns (SessionList);
+  // The session's tab and pane tree. See proto/README.md#space-scoped-layout-reads.
+  rpc GetLayout(SessionRef) returns (Layout);
+
+  // Panes.
+
+  // Refused for read-only tokens.
+  rpc WriteToPane(WriteToPaneReq) returns (ActionAck);
+  // Permitted for read-only tokens.
+  rpc FocusPane(PaneTarget) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc ClosePane(PaneTarget) returns (ActionAck);
+  // Answers the new pane id in ActionAck.info. Refused for read-only tokens.
+  rpc NewPane(NewPaneReq) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc RenamePane(RenamePaneReq) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc ResizePane(ResizePaneReq) returns (ActionAck);
+  // Toggles a pane between floating and tiled. Refused for read-only tokens.
+  rpc TogglePaneFloating(PaneTarget) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc TogglePaneFullscreen(ToggleFullscreenReq) returns (ActionAck);
+
+  // Tabs.
+
+  // Answers the new tab id in ActionAck.info. Refused for read-only tokens.
+  rpc NewTab(NewTabReq) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc CloseTab(TabTarget) returns (ActionAck);
+  // Permitted for read-only tokens.
+  rpc GoToTab(TabTarget) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc RenameTab(RenameTabReq) returns (ActionAck);
+
+  // Panes: scroll.
+
+  // Permitted for read-only tokens.
+  rpc ScrollPane(ScrollReq) returns (ActionAck);
+
+  // Session: lifecycle.
+
+  // Refused for read-only tokens.
+  rpc RenameSession(RenameSessionReq) returns (ActionAck);
+  // Kills (removes) a session. Refused for read-only tokens.
+  rpc KillSession(SessionRef) returns (ActionAck);
+  // Creates a detached session. Refused for read-only tokens.
+  rpc CreateSession(CreateSessionReq) returns (ActionAck);
+
+  // Spaces (herdr workspaces).
+
+  // Empty on a backend without spaces (zellij).
+  rpc GetSpaces(SessionRef) returns (SpaceList);
+  // Permitted for read-only tokens.
+  rpc SwitchSpace(SwitchSpaceReq) returns (ActionAck);
+  // Answers the new space id in ActionAck.info. Refused for read-only tokens.
+  rpc CreateSpace(CreateSpaceReq) returns (ActionAck);
+  // Refused for read-only tokens.
+  rpc RenameSpace(RenameSpaceReq) returns (ActionAck);
+  // Refused for read-only tokens. See proto/README.md#closing-a-space.
+  rpc CloseSpace(CloseSpaceReq) returns (ActionAck);
+
+  // Agents.
+
+  // Session-wide agent inventory, most urgent first. See proto/README.md#agents.
+  rpc ListAgents(SessionRef) returns (AgentList);
+  // A snapshot, then live agent changes. See proto/README.md#agents.
+  rpc WatchAgents(SessionRef) returns (stream AgentEvent);
+
+  // Tokens (admin).
+
+  // Returns the secret once, in TokenInfo.token. Refused for read-only tokens.
+  rpc CreateToken(CreateTokenReq) returns (TokenInfo);
+  // Metadata only, never the secret. Refused for read-only tokens.
+  rpc ListTokens(Empty) returns (TokenList);
+  // Refused for read-only tokens.
+  rpc RevokeToken(RevokeTokenReq) returns (ActionAck);
+
+  // Push targets (admin).
+
+  // Fails failed_precondition without a relay. Refused for read-only tokens.
+  rpc RegisterPushTarget(RegisterPushTargetReq) returns (ActionAck);
+  // Metadata and handle prefix only. Refused for read-only tokens.
+  rpc ListPushTargets(ListPushTargetsReq) returns (ListPushTargetsResp);
+  // Refused for read-only tokens.
+  rpc RemovePushTarget(RemovePushTargetReq) returns (ActionAck);
+}

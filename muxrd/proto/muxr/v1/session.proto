@@ -1,0 +1,51 @@
+// Session listing and lifecycle (ListSessions, RenameSession,
+// CreateSession).
+syntax = "proto3";
+
+package muxr.v1;
+
+import "muxr/v1/agent.proto";
+import "muxr/v1/common.proto";
+
+message SessionList {
+  repeated SessionInfo sessions = 1;
+}
+
+// tab_count to connected_clients: live sessions only (0/false when resurrectable).
+message SessionInfo {
+  string name = 1;
+  // Approximate age in seconds, from the socket mtime.
+  uint64 age_secs = 2;
+  // Dead but recoverable.
+  bool resurrectable = 3;
+  uint32 tab_count = 4;
+  // Panes across all tabs.
+  uint32 pane_count = 5;
+  // True if any tab has an active bell.
+  bool has_bell = 6;
+  // True if this is the session the requesting token is attached to.
+  bool is_current = 7;
+  // AttachTerminal streams on this session through muxrd, not backend-level clients.
+  uint32 connected_clients = 8;
+  Backend backend = 9;
+  // Opaque backend-qualified routing key, e.g. "zellij:dev".
+  string id = 10;
+  // Spaces (herdr workspaces); 0 on a backend without spaces.
+  uint32 space_count = 11;
+  // Unset = no agents reported, resurrectable, or the agent query failed; never drops the session.
+  AgentSummary agents = 12;
+}
+
+message RenameSessionReq {
+  // Must match the bearer token's session.
+  string session = 1;
+  string name = 2;
+}
+
+message CreateSessionReq {
+  string name = 1;
+  // Layout file path passed to zellij as --layout; empty = none.
+  string layout = 2;
+  // Required when more than one backend is available.
+  Backend backend = 3;
+}

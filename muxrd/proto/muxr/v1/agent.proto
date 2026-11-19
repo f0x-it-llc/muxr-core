@@ -1,0 +1,94 @@
+// Agents: coding-assistant CLIs a backend recognised in a pane
+// (ListAgents, WatchAgents). See proto/README.md#agents.
+syntax = "proto3";
+
+package muxr.v1;
+
+// Treat an unknown value as AGENT_STATUS_UNKNOWN.
+enum AgentStatus {
+  // Never sent.
+  AGENT_STATUS_UNSPECIFIED = 0;
+  // At rest.
+  AGENT_STATUS_IDLE = 1;
+  // Producing output.
+  AGENT_STATUS_WORKING = 2;
+  // Waiting for user input.
+  AGENT_STATUS_BLOCKED = 3;
+  // Finished, and its pane has not been viewed since.
+  AGENT_STATUS_DONE = 4;
+  // The backend reported a state it could not classify.
+  AGENT_STATUS_UNKNOWN = 5;
+}
+
+// The agent marker on a PaneMsg.
+message AgentMark {
+  // The CLI's canonical label as the backend reports it.
+  string kind = 1;
+  // User-facing agent name; empty when the backend has none.
+  string name = 2;
+  AgentStatus status = 3;
+}
+
+message AgentMsg {
+  // The id GetLayout's PaneMsg.id carries.
+  uint32 pane_id = 1;
+  // The id GetLayout's TabMsg.tab_id carries.
+  uint64 tab_id = 2;
+  // The id GetSpaces and SwitchSpace use; empty on a backend without spaces.
+  string space_id = 3;
+  // Empty on a backend without spaces.
+  string space_name = 4;
+  string tab_name = 5;
+  // The CLI's canonical label as the backend reports it.
+  string kind = 6;
+  // User-facing agent name; empty when the backend has none.
+  string name = 7;
+  // Human-readable form of kind; empty = display kind itself.
+  string display_kind = 8;
+  AgentStatus status = 9;
+  // Pane or agent title; empty when unknown.
+  string title = 10;
+  // Short summary of the current activity; empty when unknown.
+  string summary = 11;
+  // Working directory of the pane; empty when unknown.
+  string cwd = 12;
+  // True if the pane is the backend's focused pane.
+  bool focused = 13;
+  // Monotonic; advances on every state change of this agent (larger = more recent).
+  uint64 change_seq = 14;
+  // Monotonic counter of the last completion; meaningful only when has_completion_seq.
+  uint64 completion_seq = 15;
+  // Presence flag for completion_seq. See proto/README.md#completion-counter.
+  bool has_completion_seq = 16;
+}
+
+// Agent counts over a set of agents.
+message AgentSummary {
+  uint32 total = 1;
+  uint32 blocked = 2;
+  uint32 done = 3;
+  uint32 working = 4;
+  uint32 idle = 5;
+  uint32 unknown = 6;
+  // Distinct kinds, most urgent agent first, at most 8.
+  repeated string kinds = 7;
+}
+
+message AgentList {
+  // Most urgent first. See proto/README.md#agents.
+  repeated AgentMsg agents = 1;
+  // Counts over agents; always set, even when agents is empty.
+  AgentSummary summary = 2;
+}
+
+// One WatchAgents message. See proto/README.md#agents.
+message AgentEvent {
+  oneof kind {
+    // The whole inventory; first message, and resent to replace all client state.
+    AgentList snapshot = 1;
+    // One agent's complete current state; insert or replace by pane_id.
+    AgentMsg changed = 2;
+    // The agent in this pane is gone.
+    uint32 removed_pane_id = 3;
+  }
+}

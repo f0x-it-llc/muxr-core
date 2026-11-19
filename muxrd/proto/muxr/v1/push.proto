@@ -1,0 +1,32 @@
+// Push-notification device registry. Admin-gated; no RPC ever returns a
+// full push handle.
+syntax = "proto3";
+
+package muxr.v1;
+
+message RegisterPushTargetReq {
+  // Relay-issued opaque handle: lowercase hex, 32-128 chars. Never logged or echoed in full.
+  string push_handle = 1;
+  // 1-64 chars of [A-Za-z0-9 _.-]; unique, so re-registering a name replaces its entry.
+  string device_name = 2;
+  // Client-reported platform, e.g. "android" or "ios".
+  string platform = 3;
+}
+
+message ListPushTargetsReq {}
+
+message PushTargetInfo {
+  string device_name = 1;
+  string platform = 2;
+  uint64 registered_at = 3;
+  // First 8 hex characters of the push handle.
+  string handle_prefix = 4;
+}
+
+message ListPushTargetsResp {
+  repeated PushTargetInfo targets = 1;
+}
+
+message RemovePushTargetReq {
+  string device_name = 1;
+}
