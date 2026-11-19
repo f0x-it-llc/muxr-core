@@ -1746,7 +1746,7 @@ mod tests {
     /// pane's application exactly like a keystroke, so a read-only token must
     /// never get one through.
     ///
-    /// `MouseKind` in `muxr.proto` carries only the two wheel kinds at this
+    /// `MouseKind` in `muxr/v1/terminal.proto` carries only the two wheel kinds at this
     /// revision, so the frame is built the way a click from a client that knows
     /// more kinds arrives on the wire: a `kind` value outside the wheel
     /// allow-list. That is also the case the gate must fail closed on — reading

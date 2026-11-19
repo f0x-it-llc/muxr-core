@@ -188,7 +188,7 @@ const RELAY_HOP_SLACK: std::time::Duration = std::time::Duration::from_secs(1);
 /// Stable prefix of a create ack's `error` when the object WAS created but the
 /// caller's connection could not be re-pointed at it. `info` then names the
 /// created object exactly as a success would. Wire contract (see the
-/// `NewPaneReq` / `NewTabReq` / `CreateSpaceReq` comments in `muxr.proto`).
+/// `NewPaneReq` / `NewTabReq` / `CreateSpaceReq` comments in `muxr/v1/pane.proto`, `tab.proto` and `space.proto`).
 pub(super) const CREATED_NOT_ATTACHED: &str = "created-not-attached:";
 
 /// Stable prefix of a create ack's `error` when it cannot be said whether the

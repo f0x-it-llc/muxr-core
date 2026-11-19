@@ -304,7 +304,7 @@ The IP can change when the container is recreated, so re-apply after a redeploy.
 **Verify from outside** — this exercises the whole chain, edge proxy included:
 
 ```bash
-grpcurl -import-path muxrd/proto -proto muxr.proto demo.example.com:443 muxr.v1.Muxr/GetVersion
+grpcurl -import-path muxrd/proto -proto muxr/v1/muxr.proto demo.example.com:443 muxr.v1.Muxr/GetVersion
 docker exec muxr-demo cat /run/demo/pairing.txt      # tls mode: proxied, tm=ca, no fp=
 ```
 
