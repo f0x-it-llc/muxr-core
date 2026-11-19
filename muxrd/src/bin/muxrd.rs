@@ -109,16 +109,17 @@ fn pidfile_path() -> Result<PathBuf> {
     Ok(config::data_dir()?.join(PIDFILE_NAME))
 }
 
-/// Env var that bypasses the zellij version-mismatch check (review Major F).
-/// Referenced in error messages; the actual skip logic lives in
+/// Env var that bypasses the supported-zellij-version check (review Major F).
+/// Referenced in the startup warning; the actual skip logic lives in
 /// `muxrd::multiplexer::detect::probe_zellij`.
 const SKIP_VERSION_CHECK_ENV: &str = "MUXRD_SKIP_VERSION_CHECK";
 
-/// Refuse to start when the **installed** `zellij` binary's version differs from
-/// the zellij crate this server was compiled against.
+/// Refuse to start when the **installed** `zellij` binary is missing or is not
+/// one of the versions this server supports
+/// ([`detect::SUPPORTED_ZELLIJ`]).
 ///
 /// Delegates the actual probe (binary discovery, `zellij --version` run,
-/// version comparison, and `MUXRD_SKIP_VERSION_CHECK` handling) to
+/// supported-version decision, and `MUXRD_SKIP_VERSION_CHECK` handling) to
 /// [`detect::probe_zellij`] so the startup check and backend auto-detection
 /// share a single implementation.
 ///
@@ -126,17 +127,15 @@ const SKIP_VERSION_CHECK_ENV: &str = "MUXRD_SKIP_VERSION_CHECK";
 /// `create_session` (TOCTOU fix: resolve once, pass everywhere).
 fn check_zellij_version() -> Result<PathBuf> {
     if std::env::var(SKIP_VERSION_CHECK_ENV).is_ok_and(|v| !v.is_empty() && v != "0") {
-        log::warn!("{SKIP_VERSION_CHECK_ENV} set — skipping zellij version-mismatch check");
+        log::warn!("{SKIP_VERSION_CHECK_ENV} set — skipping the supported-zellij-version check");
     }
     if !detect::probe_zellij() {
-        let linked = zellij_utils::consts::VERSION;
         anyhow::bail!(
-            "zellij version check failed: the zellij binary was not found on PATH or its \
-             version does not match the linked IPC contract {linked}. \
-             Install zellij {linked}, or set {SKIP_VERSION_CHECK_ENV}=1 to proceed anyway.",
+            "zellij version check failed: {}",
+            detect::zellij_unavailable_reason()
         );
     }
-    // probe_zellij passed → the binary is present and version-matched.
+    // probe_zellij passed → the binary is present and its version is supported.
     // Resolve its path for the caller (cheap second lookup on the same PATH).
     muxrd::actions::which_zellij().context("locate zellij binary (post version-check)")
 }
@@ -459,11 +458,13 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         .context("no usable multiplexer backend available")?;
 
     // ── Zellij version assert (only when zellij is among the served set) ─────
-    // Major F: refuse to start when the installed `zellij` binary's version
-    // disagrees with the zellij crate we linked against — a mismatch causes
-    // silent IPC decode failures at runtime. `detect_backends` already probed
-    // the version, but we keep the explicit assert for its detailed error
-    // message. The herdr-only path skips it: herdr has no zellij dependency.
+    // Major F: refuse to start when the installed `zellij` binary is not a
+    // version this server supports — an unsupported server causes silent IPC
+    // decode failures at runtime. `detect_backends` already probed the version
+    // (and, when zellij was requested explicitly, failed with this same
+    // reason); the explicit assert stays as a second line of defence and
+    // resolves the binary's path. The herdr-only
+    // path skips it: herdr has no zellij dependency.
     if resolved_kinds.contains(&BackendKind::Zellij) {
         let _zellij_bin = check_zellij_version()?;
         // Note: _zellij_bin is currently unused here because create_session

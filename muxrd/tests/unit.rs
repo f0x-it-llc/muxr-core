@@ -246,9 +246,10 @@ mod config_precedence {
 
 #[test]
 fn parse_version_standard() {
-    // Mirror the parse logic from bin/muxrd.rs `parse_zellij_version`.
-    // The function lives in the binary crate and is not accessible directly from
-    // integration tests, so we replicate and test the one-liner logic.
+    // Mirror the parse logic of `parse_zellij_version` in
+    // `multiplexer::detect`. The function is private to that module, so the
+    // one-liner is replicated here and exercised with the output of both
+    // supported zellij versions.
     fn parse(output: &str) -> String {
         output
             .split_whitespace()
@@ -261,6 +262,9 @@ fn parse_version_standard() {
     assert_eq!(parse("zellij 0.45.1"), "0.45.1");
     assert_eq!(parse("zellij 0.45.1\n"), "0.45.1");
     assert_eq!(parse("  zellij   0.45.1  "), "0.45.1");
+    assert_eq!(parse("zellij 0.46.0"), "0.46.0");
+    assert_eq!(parse("zellij 0.46.0\n"), "0.46.0");
+    assert_eq!(parse("  zellij   0.46.0  "), "0.46.0");
     assert_eq!(parse(""), "");
     // Unexpected single-token format → last token is the whole string.
     assert_eq!(parse("zellij"), "zellij");

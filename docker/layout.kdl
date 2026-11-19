@@ -24,8 +24,8 @@ layout {
     }
     // Floating pane fixture — exercises the floating-fullscreen code path
     // (BE-HANG fix). Bare integer coords required; percent strings silently
-    // drop the whole tab in zellij 0.45.1 (the KDL floating-pane coordinate
-    // parsing is unchanged from 0.44.3, so the workaround still stands).
+    // drop the whole tab (seen on zellij 0.44.3 and 0.45.1). With bare
+    // integers this tab and its floating pane come up on 0.45.1 and 0.46.0.
     tab name="float-test" {
         pane cwd="/root"
         floating_panes {

@@ -98,7 +98,7 @@ pub(crate) fn parse_zellij_layout(tabs_json: &str, panes_json: &str) -> Result<L
     let (tabs, panes): (ListTabsResponse, ListPanesResponse) =
         match query::parse_list_tabs_json(tabs_json) {
             Ok(tabs) => {
-                let panes = serde_json::from_str(panes_json).map_err(|e| {
+                let panes = query::parse_list_panes_json(panes_json).map_err(|e| {
                     log::warn!(
                         "parse_zellij_layout: ListPanes JSON failed to parse ({e}); first 200 \
                          bytes: {:?}",
@@ -112,7 +112,7 @@ pub(crate) fn parse_zellij_layout(tabs_json: &str, panes_json: &str) -> Result<L
                 let swapped = query::parse_list_tabs_json(panes_json)
                     .ok()
                     .and_then(|tabs| {
-                        serde_json::from_str::<ListPanesResponse>(tabs_json)
+                        query::parse_list_panes_json(tabs_json)
                             .ok()
                             .map(|panes| (tabs, panes))
                     });
@@ -253,6 +253,7 @@ fn fullscreen_actions(pane_id: PaneId, hint: FullscreenHint) -> Vec<Action> {
                 height: Some(PercentOrFixed::Percent(100)),
                 pinned: None,
                 borderless: Some(true),
+                ..Default::default()
             };
             // No focus move when the target already holds the relay's focus.
             let mut actions = Vec::with_capacity(2);
@@ -485,8 +486,16 @@ impl MuxBackend for ZellijBackend {
     // ── Backend identity ────────────────────────────────────────────────────
 
     fn backend_version(&self) -> String {
-        zellij_utils::consts::VERSION.to_string()
+        reported_zellij_version(super::detect::detected_zellij_version())
     }
+}
+
+/// The zellij version reported to clients: the installed binary's version
+/// when the startup probe recorded one, the linked crate's otherwise.
+fn reported_zellij_version(detected: Option<&str>) -> String {
+    detected
+        .unwrap_or(zellij_utils::consts::VERSION)
+        .to_string()
 }
 
 // ─── ZellijMuxSender ────────────────────────────────────────────────────────────
@@ -749,17 +758,16 @@ mod tests {
     }
 
     /// The device-gate payload: a `ListPanes` array (first entry a plugin pane
-    /// with no command/cwd) in the tabs slot fails at exactly line 31 column 3
-    /// on the strict decode — proof of what the relay had paired.
+    /// with no command/cwd) in the tabs slot fails the strict decode — proof of
+    /// what the relay had paired. Only the failure is asserted, not the serde
+    /// message: its text depends on the upstream type's field order.
     #[test]
     fn panes_payload_in_tabs_slot_matches_the_device_gate_error() {
         let mut plugin = pane_entry(0, 0, false, false);
         plugin.pane_info.is_plugin = true;
         let panes = panes_json(&[plugin, pane_entry(1, 0, false, true)]);
-        let err = serde_json::from_str::<zellij_utils::data::ListTabsResponse>(&panes)
-            .unwrap_err()
-            .to_string();
-        assert_eq!(err, "missing field `position` at line 31 column 3");
+        let result = serde_json::from_str::<zellij_utils::data::ListTabsResponse>(&panes);
+        assert!(result.is_err(), "a panes array must not decode as tabs");
     }
 
     /// A swapped pair — the replaced query's panes Log landed in the next
@@ -775,6 +783,49 @@ mod tests {
         let snapshot = parse_zellij_layout(&panes, &tabs).expect("swapped pair recovered");
         assert_eq!(snapshot.tabs.len(), 1);
         assert_eq!(snapshot.tabs[0].panes.len(), 2);
+    }
+
+    /// A 0.45.1 server's pair (no `attention`/`other_focused_client_slots` on
+    /// tabs; none of the five 0.46.0 keys on panes) yields the expected snapshot.
+    #[test]
+    fn layout_from_a_045_server_parses() {
+        let tabs = vec![tab_info(0, 0, false, false), tab_info(1, 1, true, false)];
+        let mut tabs_value = serde_json::to_value(&tabs).unwrap();
+        for tab in tabs_value.as_array_mut().unwrap() {
+            for key in ["attention", "other_focused_client_slots"] {
+                tab.as_object_mut().unwrap().remove(key);
+            }
+        }
+        let entries = [pane_entry(0, 0, false, true), pane_entry(2, 1, false, true)];
+        let mut panes_value = serde_json::to_value(entries).unwrap();
+        for pane in panes_value.as_array_mut().unwrap() {
+            for key in [
+                "attention",
+                "command_state",
+                "is_collapsed",
+                "nested_session_name",
+                "program_status",
+            ] {
+                pane.as_object_mut().unwrap().remove(key);
+            }
+        }
+        let snapshot = parse_zellij_layout(
+            &serde_json::to_string_pretty(&tabs_value).unwrap(),
+            &serde_json::to_string_pretty(&panes_value).unwrap(),
+        )
+        .expect("0.45.1 pair parses");
+        assert_eq!(snapshot.tabs.len(), 2);
+        assert_eq!(snapshot.tabs[1].tab_id, 1);
+        assert!(snapshot.tabs[1].fullscreen_active);
+        assert_eq!(snapshot.tabs[0].panes.len(), 1);
+        assert_eq!(snapshot.tabs[0].panes[0].id, 0);
+        assert_eq!(snapshot.tabs[1].panes[0].id, 2);
+    }
+
+    #[test]
+    fn the_reported_version_is_the_detected_one_else_the_linked_one() {
+        assert_eq!(reported_zellij_version(Some("0.45.1")), "0.45.1");
+        assert_eq!(reported_zellij_version(None), zellij_utils::consts::VERSION);
     }
 
     #[test]

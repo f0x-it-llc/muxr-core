@@ -1,13 +1,15 @@
 // Muxr dev-rig zellij config.
 //
 // Intentionally minimal: zellij fills in its built-in defaults for every section
-// we omit (keybinds, plugin aliases, themes, web client, …). The one thing we pin
-// is an empty `load_plugins` block.
+// we omit (keybinds, plugin aliases, themes, web client, …). What we pin is an
+// empty `load_plugins` block and the two start-up pane settings at the end.
 //
-// zellij 0.45.1's bundled default config ships `load_plugins { "zellij:link" }` —
-// a background plugin (makes terminal file-paths clickable) that loads on every
-// new session and surfaced as a stray pane in app-created sessions. An explicit
-// empty block keeps it — and any other background plugin — from loading.
+// zellij's bundled default config loads background plugins through
+// `load_plugins` (in 0.45.1: `load_plugins { "zellij:link" }`, which makes
+// terminal file-paths clickable). Such a plugin loads on every new session and
+// surfaced as a stray pane in app-created sessions. An explicit empty block
+// keeps it — and any other background plugin — from loading, on 0.45.1 and
+// 0.46.0 alike.
 //
 // Installed by entrypoint.sh on every boot. The config dir (/root/.config/zellij)
 // is a persisted named volume in compose.yaml, so a build-time COPY alone would
@@ -15,3 +17,11 @@
 // (re)install.
 load_plugins {
 }
+
+// zellij opens a floating plugin pane on a version's first run: release notes
+// (seen on 0.46.0 in this rig) or start-up tips. In a rig whose sessions a
+// phone attaches to, that is one more pane to dismiss. With the pane, zellij
+// 0.46.0 also logged two failed background commands here; with these settings
+// it logs none. Both settings load on 0.45.1 and 0.46.0.
+show_release_notes false
+show_startup_tips false

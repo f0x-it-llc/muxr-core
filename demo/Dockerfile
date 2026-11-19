@@ -4,7 +4,7 @@
 # A locked-down, multi-tenant-safe muxrd instance whose ONLY purpose is to let
 # a store reviewer (or anyone with the published pairing link) attach the
 # mobile app and drive a real — but heavily sandboxed — terminal. muxrd serves
-# BOTH backends (zellij 0.45.1 AND herdr), so either session type shows up in
+# BOTH backends (zellij AND herdr), so either session type shows up in
 # the app's session list.
 #
 # Like the muxr-core dev rig, this image does NOT build from source. It
@@ -39,13 +39,15 @@ ENV DEBIAN_FRONTEND=noninteractive \
 #
 # MINIMUM 0.4.3 — do NOT downgrade.
 #
-# 0.4.2 reason (zellij 0.45.1 rebaseline): muxrd refuses to drive a zellij
-# whose version differs from the zellij-utils it was linked against, and
-# silently drops the backend rather than failing: `backend: zellij not in
-# served set`. v0.4.1 was tagged 2026-08-22, BEFORE the zellij 0.45.1
-# rebaseline merged (9c912b5, 2026-09-09), so a 0.4.1 binary links
-# zellij-utils 0.44.3 and this image — which installs zellij 0.45.1 — serves
-# herdr ONLY. v0.4.2 is the first release containing that rebaseline.
+# 0.4.2 reason (zellij 0.45.1 rebaseline): muxrd releases up to and including
+# 0.5.3 refuse to drive a zellij whose version differs from the zellij-utils
+# they were linked against, and silently drop the backend rather than failing:
+# `backend: zellij not in served set`. v0.4.1 was tagged 2026-08-22, BEFORE the
+# zellij 0.45.1 rebaseline merged (9c912b5, 2026-09-09), so a 0.4.1 binary
+# links zellij-utils 0.44.3 and this image — which installs zellij 0.45.1 by
+# default — serves herdr ONLY. v0.4.2 is the first release containing that
+# rebaseline. Releases 0.4.2 to 0.5.3 require zellij exactly 0.45.1; muxrd
+# releases after 0.5.3 support zellij 0.45.x (from 0.45.1) and 0.46.x.
 #
 # 0.4.3 reason (read-only navigate + resize): below 0.4.3 a read-only token is
 # pinned to a single fixed-size tab, so a public demo visitor cannot navigate
@@ -54,10 +56,16 @@ ENV DEBIAN_FRONTEND=noninteractive \
 # and resize its own viewport (floored at MIN_TERMINAL_ROWS/MIN_TERMINAL_COLS)
 # via the attach stream's Resize frame.
 #
-# If you bump the zellij pin below, bump this to a release built against the
-# same zellij, and re-check that muxrd actually reports BOTH backends at
+# If you change ZELLIJ_VERSION below, set this to a release that supports
+# that zellij, and re-check that muxrd actually reports BOTH backends at
 # startup.
 ARG MUXR_VERSION="0.4.3"
+
+# The zellij release the image installs. It may move to 0.46.0 only together
+# with a MUXR_VERSION that supports it, which means a muxrd release after
+# 0.5.3: every release up to 0.5.3 requires exactly 0.45.1 and would start
+# without its zellij backend.
+ARG ZELLIJ_VERSION="0.45.1"
 
 # Pin the herdr release muxrd is TESTED against (HERDR_MAX_TESTED_PROTOCOL in
 # muxrd/src/multiplexer/herdr/wire.rs — currently wire protocol 22). muxrd
@@ -118,9 +126,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       curl xz-utils build-essential \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Zellij PINNED v0.45.1 (the version muxrd is compiled against) ────────────
-# muxrd refuses to start on any other version — do NOT change this without
-# also updating docker/Dockerfile's identical pin.
+# ── Zellij (ZELLIJ_VERSION, declared with the other version arguments) ───────
+# The installed muxrd release decides which zellij versions are usable: up to
+# 0.5.3 exactly 0.45.1, after 0.5.3 also 0.46.x. Do not change the default
+# without a MUXR_VERSION that supports the new value. The argument is in scope
+# here without a second declaration: the image has a single build stage.
 #
 # Architecture-aware: `TARGETARCH` is `amd64`/`arm64`, while zellij names its
 # assets after Rust target triples — hence the mapping to `x86_64`/`aarch64`.
@@ -132,11 +142,11 @@ RUN set -eux; \
       *) echo "ERROR: unsupported TARGETARCH '${TARGETARCH}'" >&2; exit 1 ;; \
     esac; \
     curl -fsSL \
-      "https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
+      "https://github.com/zellij-org/zellij/releases/download/v${ZELLIJ_VERSION}/zellij-${zj_arch}-unknown-linux-musl.tar.gz" \
       | tar -xz -C /usr/local/bin; \
     chmod +x /usr/local/bin/zellij; \
     zellij --version; \
-    zellij --version | grep -q "0.45.1" || { echo "ERROR: zellij version is not 0.45.1" >&2; exit 1; }
+    zellij --version | grep -qx "zellij ${ZELLIJ_VERSION}" || { echo "ERROR: zellij version is not ${ZELLIJ_VERSION}" >&2; exit 1; }
 
 # ── herdr PINNED $HERDR_VERSION (second backend; muxrd serves both) ──────────
 # herdr spells its ARM asset `aarch64` (like zellij, unlike lazygit — not used

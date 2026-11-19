@@ -41,9 +41,13 @@ path = "examples/session_client.rs"
 # ─── Runtime deps ────────────────────────────────────────────────────────────
 
 [dependencies]
-# Zellij IPC / utils — exact version so structs match the running server.
+# Zellij IPC / utils. The requirement is exact ("="): the linked crate is the
+# newest row of the supported-version table in src/multiplexer/detect.rs and
+# the version the two-version checks ran against, so no resolver run may move
+# it. To change it: bump it here and in muxrctl, add a table row, re-run those
+# checks.
 # web_server_capability enables web_authentication_tokens (bundled SQLite via rusqlite).
-zellij-utils = { version = "0.45.1", default-features = false, features = ["web_server_capability"] }
+zellij-utils = { version = "=0.46.0", default-features = false, features = ["web_server_capability"] }
 
 # gRPC stack — tls-ring adds rustls/ring-backed TLS support to tonic transport.
 tonic = { version = "0.14", features = ["transport", "tls-ring"] }

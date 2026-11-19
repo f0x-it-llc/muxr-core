@@ -62,8 +62,12 @@ Verified against this repository, the muxr-app repository and the store listings
 
 ### What it works with
 
-- zellij: yes. muxrd is built against zellij 0.45.1.
-  (muxrd/Cargo.toml `zellij-utils = "0.45.1"`; docker/README.md)
+- zellij: yes. muxrd works with zellij 0.45.1 and 0.46.0: any 0.45.x from
+  0.45.1 and any 0.46.x. It refuses to drive other versions. When zellij is
+  the requested backend the refusal names the supported versions; when muxrd
+  picks its backends itself it leaves an unsupported zellij out.
+  (muxrd/src/multiplexer/detect.rs `SUPPORTED_ZELLIJ`; muxrd/Cargo.toml
+  `zellij-utils = "=0.46.0"`)
 - herdr: yes. muxrd drives a user-installed `herdr` binary over herdr's public
   Unix sockets (the JSON control socket `herdr.sock` and the wire socket
   `herdr-client.sock`). Supported floor 0.9.0; newest tested release 0.9.5.

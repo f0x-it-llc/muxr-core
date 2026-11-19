@@ -35,11 +35,6 @@ mod space_ops;
 mod tab_ops;
 mod token_ops;
 
-/// The zellij source version this server was compiled against.
-///
-/// Asserted at service construction to catch version drift early.
-pub const ZELLIJ_CONTRACT_VERSION: &str = "0.45.1";
-
 /// muxrd's own semantic version (tracks the crate version).
 pub const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -113,19 +108,14 @@ impl Default for MuxrService {
 
 impl MuxrService {
     pub fn new() -> Self {
-        // Assert that the linked zellij crate matches our expected contract.
-        // This catches accidental version drift without waiting for a runtime
-        // failure deeper in the IPC layer.
-        let linked = zellij_utils::consts::VERSION;
-        if linked != ZELLIJ_CONTRACT_VERSION {
-            log::warn!(
-                "linked zellij version '{linked}' differs from expected \
-                 contract version '{ZELLIJ_CONTRACT_VERSION}' — IPC \
-                 compatibility not guaranteed"
-            );
-        } else {
-            log::info!("linked zellij contract version verified: {ZELLIJ_CONTRACT_VERSION}");
-        }
+        // Which zellij versions this build drives is decided by the table in
+        // `multiplexer::detect`; a test there ties its newest row to the
+        // linked crate. Here it is only stated for the log.
+        log::info!(
+            "linked zellij-utils {}; supported zellij: {}",
+            zellij_utils::consts::VERSION,
+            crate::multiplexer::detect::supported_zellij_description()
+        );
         Self {
             clients: crate::client_count::SessionClients::new(),
             control: crate::relay::ControlRegistry::default(),

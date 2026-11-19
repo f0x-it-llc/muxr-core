@@ -517,7 +517,9 @@ pub trait MuxBackend: Send + Sync + std::fmt::Debug {
 
     // ── Backend identity ────────────────────────────────────────────────────
 
-    /// Backend version string (today: `zellij_utils::consts::VERSION`).
+    /// Backend version string. For zellij: the installed zellij binary's
+    /// version, falling back to the linked crate version
+    /// (`zellij_utils::consts::VERSION`) when no probe read one.
     fn backend_version(&self) -> String;
 }
 

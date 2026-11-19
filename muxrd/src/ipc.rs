@@ -5,7 +5,7 @@
 //! exchange render/input messages without touching zellij internals
 //! directly.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -41,12 +41,59 @@ pub fn pick_first_session() -> Result<String> {
 }
 
 /// Resolve the socket path for a named session.
+///
+/// zellij 0.46 names a session's socket after a generated id and keeps the
+/// name-to-id mapping in a session index; zellij 0.45 names it after the
+/// session. zellij's own resolver returns the id-named path when the index
+/// knows the name and `ZELLIJ_SOCK_DIR/<name>` otherwise. Its answer is not
+/// taken on trust (see [`choose_socket_path`]): an index row outlives its
+/// session, and a server that predates ids binds the name, so a row left
+/// behind by an earlier session must not hide a live session of that name.
+///
+/// The id does not exist until the session has started, so callers waiting
+/// for a new session must resolve again on every attempt.
 pub fn session_socket_path(session_name: &str) -> PathBuf {
-    zellij_utils::consts::ZELLIJ_SOCK_DIR.join(session_name)
+    choose_socket_path(
+        &zellij_utils::consts::ZELLIJ_SOCK_DIR,
+        session_name,
+        zellij_utils::consts::session_socket_path(session_name),
+    )
+}
+
+/// Choose between the path zellij's resolver gave for `session_name` and the
+/// name-named path `<sock_dir>/<session_name>`.
+///
+/// - A resolved path that is not a file directly inside `sock_dir` is
+///   discarded: its last component comes from the session index, not from the
+///   validated name.
+/// - A resolved path that exists stands, whatever its file name: zellij can
+///   keep a name from before ids as a session's id, and such a name need not
+///   satisfy [`validate_session_name`]. When both paths exist the resolved one
+///   wins.
+/// - A resolved path that does not exist gives way to the name-named path
+///   when that one exists, and also when its file name is not a valid session
+///   name. Otherwise it stands, so a session still starting is awaited where
+///   the index says it will appear.
+fn choose_socket_path(sock_dir: &Path, session_name: &str, resolved: PathBuf) -> PathBuf {
+    let by_name = sock_dir.join(session_name);
+    let file_name = match resolved
+        .file_name()
+        .and_then(|file_name| file_name.to_str())
+    {
+        Some(file_name) if resolved.parent() == Some(sock_dir) => file_name,
+        _ => return by_name,
+    };
+    if resolved.exists() {
+        return resolved;
+    }
+    if by_name.exists() || validate_session_name(file_name).is_err() {
+        return by_name;
+    }
+    resolved
 }
 
 /// Validate a session name before it is ever used to build a socket path
-/// (`ZELLIJ_SOCK_DIR.join(name)`) or passed as an argument to the spawned
+/// (resolved to an id-named or name-named path under `ZELLIJ_SOCK_DIR`) or passed as an argument to the spawned
 /// `zellij` binary.
 ///
 /// **Security (review Major G — path traversal):** an un-validated name like
@@ -469,4 +516,116 @@ pub fn dismiss_overlay(handle: &mut AttachHandle) -> Result<()> {
     handle.send_bytes(vec![0x0d])?; // CR / Enter
     std::thread::sleep(Duration::from_millis(300));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A fresh directory standing in for the socket directory; files stand in
+    /// for sockets. Removed on drop.
+    struct SockDir(PathBuf);
+
+    impl SockDir {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("muxrd-ipc-test-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("create the test socket directory");
+            Self(dir)
+        }
+
+        fn socket(&self, file_name: &str) -> PathBuf {
+            let path = self.0.join(file_name);
+            std::fs::write(&path, b"").expect("create a stand-in socket");
+            path
+        }
+
+        fn choose(&self, name: &str, resolved: PathBuf) -> PathBuf {
+            choose_socket_path(&self.0, name, resolved)
+        }
+    }
+
+    impl Drop for SockDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    const ID: &str = "8df2c8d1f6f1";
+
+    /// The index still maps the name to an id whose socket is gone, and a
+    /// server that predates ids is serving the name.
+    #[test]
+    fn a_missing_id_socket_gives_way_to_a_live_name_socket() {
+        let dir = SockDir::new("stale");
+        let by_name = dir.socket("demo");
+        assert_eq!(dir.choose("demo", dir.0.join(ID)), by_name);
+    }
+
+    #[test]
+    fn a_live_id_socket_wins_over_a_name_socket() {
+        let dir = SockDir::new("both");
+        let by_id = dir.socket(ID);
+        dir.socket("demo");
+        assert_eq!(dir.choose("demo", by_id.clone()), by_id);
+    }
+
+    #[test]
+    fn a_live_id_socket_is_used_when_no_name_socket_exists() {
+        let dir = SockDir::new("id-only");
+        let by_id = dir.socket(ID);
+        assert_eq!(dir.choose("demo", by_id.clone()), by_id);
+    }
+
+    /// A session that is still starting: wait where the index says.
+    #[test]
+    fn the_resolved_path_stands_when_neither_socket_exists() {
+        let dir = SockDir::new("neither");
+        assert_eq!(dir.choose("demo", dir.0.join(ID)), dir.0.join(ID));
+    }
+
+    #[test]
+    fn a_name_named_resolution_is_returned_present_or_not() {
+        let dir = SockDir::new("by-name");
+        let by_name = dir.0.join("demo");
+        assert_eq!(dir.choose("demo", by_name.clone()), by_name);
+        dir.socket("demo");
+        assert_eq!(dir.choose("demo", by_name.clone()), by_name);
+    }
+
+    #[test]
+    fn a_resolution_outside_the_socket_directory_is_discarded() {
+        let dir = SockDir::new("outside");
+        let by_name = dir.0.join("demo");
+        let elsewhere = std::env::temp_dir().join("muxrd-ipc-test-elsewhere-socket");
+        assert_eq!(dir.choose("demo", elsewhere), by_name);
+        assert_eq!(dir.choose("demo", dir.0.join("..").join(ID)), by_name);
+        assert_eq!(dir.choose("demo", dir.0.join("sub").join(ID)), by_name);
+        assert_eq!(dir.choose("demo", dir.0.clone()), by_name);
+    }
+
+    /// zellij can keep a name from before ids as a session's id; such a name
+    /// may contain characters muxrd does not accept in a client-supplied name.
+    #[test]
+    fn a_live_socket_with_an_unusual_file_name_is_used() {
+        let dir = SockDir::new("legacy-id");
+        for file_name in ["my.proj", "has space"] {
+            let live = dir.socket(file_name);
+            assert_eq!(dir.choose("proj", live.clone()), live, "{file_name:?}");
+        }
+    }
+
+    #[test]
+    fn a_missing_resolution_with_an_invalid_file_name_is_discarded() {
+        let dir = SockDir::new("bad-name");
+        let by_name = dir.0.join("demo");
+        for file_name in ["has space", "dot.ted", ".hidden", "semi;colon"] {
+            assert_eq!(
+                dir.choose("demo", dir.0.join(file_name)),
+                by_name,
+                "{file_name:?}"
+            );
+        }
+    }
 }

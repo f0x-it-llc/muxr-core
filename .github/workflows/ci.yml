@@ -87,8 +87,58 @@ jobs:
 
       - name: cargo test
         run: cargo test --workspace
-        # Live-backend integration tests (herdr, zellij) are #[ignore]'d and do
-        # not run under a plain `cargo test`, so they do not block CI.
+        # Live-backend integration tests are #[ignore]'d and do not run under
+        # a plain `cargo test`, so they do not block CI here. The zellij live
+        # check runs in the `zellij-live` job below; herdr has no live job.
 
       - name: cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  zellij-live:
+    name: Live zellij / ${{ matrix.zellij }}
+    runs-on: ubuntu-latest
+    # A cold build of muxrd and its examples plus the downloads and the checks.
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        # This list must match the supported set in
+        # muxrd/src/multiplexer/detect.rs (`SUPPORTED_ZELLIJ`): when a version
+        # is added there, add it here. `mixed` runs sessions of both versions
+        # in one socket directory.
+        zellij: ["0.45.1", "0.46.0", "mixed"]
+
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          persist-credentials: false
+
+      - name: Install build dependencies (Linux)
+        # protoc: muxrd/build.rs compiles the proto via tonic-prost-build.
+        # cmake + clang: aws-lc-rs is force-compiled into the rustls graph.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler cmake clang
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
+        # NOTE: pinned to a commit SHA for supply-chain immutability; the rustc
+        # version still tracks 'stable' at workflow runtime.
+
+      - name: Cache cargo registry, index, and target
+        uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+        with:
+          # Its own key so this job's cache does not evict the check job's;
+          # the three matrix entries build the same binaries and share it.
+          shared-key: zellij-live
+
+      - name: Live check against zellij
+        # The runner has no terminal; the script creates the pseudo-terminal
+        # it needs itself through script(1).
+        env:
+          ZELLIJ_MATRIX: ${{ matrix.zellij }}
+        run: |
+          case "$ZELLIJ_MATRIX" in
+            mixed) scripts/zellij-matrix.sh --mixed 0.45.1 0.46.0 ;;
+            *)     scripts/zellij-matrix.sh "$ZELLIJ_MATRIX" ;;
+          esac

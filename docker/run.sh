@@ -24,6 +24,12 @@
 #                   ./docker/stop.sh first.)
 #   -h, --help      Show this help and exit.
 #
+# Environment:
+#   ZELLIJ_VERSION  zellij release the image installs: 0.46.0 (default) or
+#                   0.45.1, the two versions muxrd supports. Changing it
+#                   rebuilds the image layer that installs zellij.
+#   HERDR_VERSION   herdr release for --herdr / --both (see the Dockerfile).
+#
 # Examples:
 #   # Loopback only — safe for local testing (zellij backend):
 #   ./docker/run.sh
@@ -143,6 +149,11 @@ backend_label=zellij
 [[ "${BOTH}" -eq 1 ]]  && backend_label="both (zellij+herdr)"
 
 echo "[run.sh] BIND_ADDR=${BIND_ADDR}  backend=${backend_label}"
+# Surface the zellij release this build will install, the same way as the
+# herdr one below: a ZELLIJ_VERSION from the environment overrides the compose
+# default, so say which one won. Every rig image installs zellij, the herdr
+# one included, so this is printed for every mode.
+echo "[run.sh] zellij release: ${ZELLIJ_VERSION:-0.46.0 (the compose default)}"
 if [[ "${HERDR}" -eq 1 || "${BOTH}" -eq 1 ]]; then
   # Surface the herdr release this build will install. The compose default is
   # PINNED to the last wire-protocol-tested release (see Dockerfile) — an
