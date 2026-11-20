@@ -1,0 +1,54 @@
+// Spaces: herdr workspaces. A backend without spaces (zellij) answers an
+// empty SpaceList.
+syntax = "proto3";
+
+package muxr.v1;
+
+message Space {
+  // Opaque herdr workspace id.
+  string id = 1;
+  string name = 2;
+  // True for the currently active workspace.
+  bool active = 3;
+}
+
+message SpaceList {
+  repeated Space spaces = 1;
+}
+
+message SwitchSpaceReq {
+  // Backend-qualified session id, verbatim from SessionInfo.id.
+  string session = 1;
+  string space_id = 2;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 3;
+}
+
+message CreateSpaceReq {
+  // Backend-qualified session id, verbatim from SessionInfo.id.
+  string session = 1;
+  // Empty is allowed.
+  string label = 2;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routed-create.
+  string connection_id = 3;
+}
+
+message RenameSpaceReq {
+  // Backend-qualified session id, verbatim from SessionInfo.id.
+  string session = 1;
+  string space_id = 2;
+  // New display label.
+  string label = 3;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 4;
+}
+
+message CloseSpaceReq {
+  // Backend-qualified session id, verbatim from SessionInfo.id.
+  string session = 1;
+  string space_id = 2;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 3;
+  // Also close a primary's linked-worktree spaces. See proto/README.md#closing-a-space.
+  bool close_group = 4;
+}

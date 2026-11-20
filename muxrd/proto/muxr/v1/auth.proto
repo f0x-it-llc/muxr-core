@@ -1,0 +1,40 @@
+// Login and auth-token management. Token management is admin-gated; see
+// proto/README.md#authentication.
+syntax = "proto3";
+
+package muxr.v1;
+
+message LoginRequest {
+  // A persistent zellij web authentication token.
+  string auth_token = 1;
+  // True = the session token lives 28 days; false = about 5 minutes.
+  bool remember_me = 2;
+}
+
+message LoginResponse {
+  string session_token = 1;
+  // True if the auth token is read-only. See proto/README.md#authentication.
+  bool is_read_only = 2;
+}
+
+message TokenInfo {
+  string name = 1;
+  // The secret: populated only on create, empty on list.
+  string token = 2;
+  bool read_only = 3;
+  // Creation time as zellij stores it (SQLite DATETIME string); empty if unknown.
+  string created_at = 4;
+}
+
+message TokenList {
+  repeated TokenInfo tokens = 1;
+}
+
+message CreateTokenReq {
+  string name = 1;
+  bool read_only = 2;
+}
+
+message RevokeTokenReq {
+  string name = 1;
+}

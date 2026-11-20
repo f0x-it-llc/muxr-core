@@ -1,0 +1,78 @@
+// Pane operation requests: write, create, rename, resize, fullscreen and
+// scroll.
+syntax = "proto3";
+
+package muxr.v1;
+
+import "muxr/v1/common.proto";
+
+message WriteToPaneReq {
+  PaneTarget target = 1;
+  // Raw bytes, e.g. keystrokes including newlines.
+  bytes data = 2;
+}
+
+message NewPaneReq {
+  string session = 1;
+  // True = a floating pane; false = a focused tiled pane.
+  bool floating = 2;
+  // Empty = unnamed.
+  string pane_name = 3;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routed-create.
+  string connection_id = 4;
+}
+
+message RenamePaneReq {
+  PaneTarget target = 1;
+  string name = 2;
+}
+
+// Border or direction to grow or shrink.
+enum ResizeDirection {
+  RESIZE_DIRECTION_UNSPECIFIED = 0;
+  RESIZE_DIRECTION_LEFT = 1;
+  RESIZE_DIRECTION_RIGHT = 2;
+  RESIZE_DIRECTION_UP = 3;
+  RESIZE_DIRECTION_DOWN = 4;
+}
+
+enum ResizeKind {
+  RESIZE_KIND_INCREASE = 0;
+  RESIZE_KIND_DECREASE = 1;
+}
+
+message ResizePaneReq {
+  PaneTarget target = 1;
+  ResizeKind resize = 2;
+  // UNSPECIFIED = resize uniformly.
+  ResizeDirection direction = 3;
+}
+
+// See proto/README.md#fullscreen-hint.
+message ToggleFullscreenReq {
+  PaneTarget target = 1;
+  // The target's PaneMsg.is_floating.
+  bool target_is_floating = 2;
+  // The target tab's TabMsg.floating_panes_visible.
+  bool floating_visible = 3;
+  // target_is_floating && floating_visible && the target's PaneMsg.is_focused.
+  bool target_is_focused_floating = 4;
+  // True = trust the three fields above; false = the server queries the live state.
+  bool has_floating_hint = 5;
+}
+
+enum ScrollDirection {
+  SCROLL_DIRECTION_UP = 0;
+  SCROLL_DIRECTION_DOWN = 1;
+  SCROLL_DIRECTION_TO_TOP = 2;
+  SCROLL_DIRECTION_TO_BOTTOM = 3;
+  SCROLL_DIRECTION_PAGE_UP = 4;
+  SCROLL_DIRECTION_PAGE_DOWN = 5;
+  SCROLL_DIRECTION_HALF_PAGE_UP = 6;
+  SCROLL_DIRECTION_HALF_PAGE_DOWN = 7;
+}
+
+message ScrollReq {
+  PaneTarget target = 1;
+  ScrollDirection direction = 2;
+}

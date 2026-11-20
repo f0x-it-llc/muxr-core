@@ -1,0 +1,64 @@
+// Frames of the AttachTerminal stream. See proto/README.md#attach.
+syntax = "proto3";
+
+package muxr.v1;
+
+// Client to server.
+message ClientFrame {
+  oneof kind {
+    // Must be the first frame of a stream.
+    AttachReq attach = 1;
+    // Raw input bytes for the focused pane.
+    bytes input = 2;
+    Resize resize = 3;
+    // Needs the "mouse-input" capability.
+    MouseInput mouse = 4;
+  }
+}
+
+// Server to client.
+message ServerFrame {
+  oneof kind {
+    // Raw ANSI render bytes.
+    bytes render = 1;
+    ControlEvent control = 2;
+  }
+}
+
+message AttachReq {
+  string session = 1;
+  uint32 rows = 2;
+  uint32 cols = 3;
+  // herdr resume hint: a GetSpaces space id; empty = no hint. See proto/README.md#resume-hints.
+  string resume_space_id = 4;
+  // herdr resume hint: GetLayout's TabMsg.tab_id; 0 = no hint.
+  uint64 resume_tab_id = 5;
+  // herdr resume hint: GetLayout's PaneMsg.id, honoured only with resume_tab_id; 0 = no hint.
+  uint32 resume_pane_id = 6;
+  // Client-chosen per-view id; empty = no eviction. See proto/README.md#client-instance-id.
+  string client_instance_id = 7;
+}
+
+message Resize {
+  uint32 rows = 1;
+  uint32 cols = 2;
+}
+
+// Only the wheel kinds exist; press and drag would be added as new values.
+enum MouseKind {
+  MOUSE_KIND_WHEEL_UP = 0;
+  MOUSE_KIND_WHEEL_DOWN = 1;
+}
+
+// Zero-based cell coordinates in this stream's grid. See proto/README.md#mouse-input.
+message MouseInput {
+  MouseKind kind = 1;
+  uint32 col = 2;
+  uint32 row = 3;
+}
+
+// Out-of-band event, e.g. kind "connection_id". See proto/README.md#routing.
+message ControlEvent {
+  string kind = 1;
+  string payload = 2;
+}

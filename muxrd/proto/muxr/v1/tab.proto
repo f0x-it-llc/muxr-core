@@ -1,0 +1,18 @@
+// Tab operation requests: create and rename.
+syntax = "proto3";
+
+package muxr.v1;
+
+message NewTabReq {
+  string session = 1;
+  // Empty = unnamed.
+  string tab_name = 2;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routed-create.
+  string connection_id = 3;
+}
+
+message RenameTabReq {
+  string session = 1;
+  uint64 tab_id = 2;
+  string name = 3;
+}

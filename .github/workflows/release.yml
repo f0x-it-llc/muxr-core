@@ -139,7 +139,7 @@ jobs:
           ref: ${{ needs.version.outputs.tag }}
 
       - name: Install build dependencies
-        # protoc: muxrd/build.rs compiles proto/muxr.proto via tonic-prost-build.
+        # protoc: muxrd/build.rs compiles the protos under proto/ via tonic-prost-build.
         # cmake + clang: aws-lc-rs is force-compiled into the rustls graph.
         run: |
           sudo apt-get update

@@ -1,0 +1,51 @@
+// The tab and pane tree GetLayout returns.
+syntax = "proto3";
+
+package muxr.v1;
+
+import "muxr/v1/agent.proto";
+
+message Layout {
+  repeated TabMsg tabs = 1;
+}
+
+message TabMsg {
+  // Zero-based tab position.
+  uint32 position = 1;
+  string name = 2;
+  bool active = 3;
+  // True if the tab has an active (persistent) bell.
+  bool has_bell = 4;
+  // Number of suppressed (hidden) panes.
+  uint32 panes_to_hide = 5;
+  // Stable tab id; the id AttachReq.resume_tab_id and AgentMsg.tab_id carry.
+  uint32 tab_id = 6;
+  repeated PaneMsg panes = 7;
+  // True if a pane in this tab is fullscreened.
+  bool fullscreen_active = 8;
+  bool floating_panes_visible = 9;
+}
+
+message PaneMsg {
+  // Unique within its kind (terminal or plugin); the id PaneTarget.pane_id takes.
+  uint32 id = 1;
+  string title = 2;
+  // Focused within its layer (tiled or floating).
+  bool is_focused = 3;
+  bool is_floating = 4;
+  // The pane's command has exited (command panes only).
+  bool exited = 5;
+  // Command running in the pane; empty if none.
+  string command = 6;
+  // Working directory; empty if unknown.
+  string cwd = 7;
+  // Geometry in cells.
+  uint32 x = 8;
+  uint32 y = 9;
+  uint32 rows = 10;
+  uint32 cols = 11;
+  bool is_plugin = 12;
+  bool is_fullscreen = 13;
+  // Unset = no agent in this pane, or a backend without agents.
+  AgentMark agent = 14;
+}

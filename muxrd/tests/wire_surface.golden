@@ -1,0 +1,239 @@
+enum muxr.v1.AgentStatus.AGENT_STATUS_BLOCKED = 3
+enum muxr.v1.AgentStatus.AGENT_STATUS_DONE = 4
+enum muxr.v1.AgentStatus.AGENT_STATUS_IDLE = 1
+enum muxr.v1.AgentStatus.AGENT_STATUS_UNKNOWN = 5
+enum muxr.v1.AgentStatus.AGENT_STATUS_UNSPECIFIED = 0
+enum muxr.v1.AgentStatus.AGENT_STATUS_WORKING = 2
+enum muxr.v1.Backend.BACKEND_HERDR = 2
+enum muxr.v1.Backend.BACKEND_UNSPECIFIED = 0
+enum muxr.v1.Backend.BACKEND_ZELLIJ = 1
+enum muxr.v1.MouseKind.MOUSE_KIND_WHEEL_DOWN = 1
+enum muxr.v1.MouseKind.MOUSE_KIND_WHEEL_UP = 0
+enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_DOWN = 4
+enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_LEFT = 1
+enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_RIGHT = 2
+enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_UNSPECIFIED = 0
+enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_UP = 3
+enum muxr.v1.ResizeKind.RESIZE_KIND_DECREASE = 1
+enum muxr.v1.ResizeKind.RESIZE_KIND_INCREASE = 0
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_DOWN = 1
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_HALF_PAGE_DOWN = 7
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_HALF_PAGE_UP = 6
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_PAGE_DOWN = 5
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_PAGE_UP = 4
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_TO_BOTTOM = 3
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_TO_TOP = 2
+enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_UP = 0
+field muxr.v1.ActionAck.error = 2 optional string
+field muxr.v1.ActionAck.info = 3 optional string
+field muxr.v1.ActionAck.ok = 1 optional bool
+field muxr.v1.AgentEvent.changed = 2 optional message muxr.v1.AgentMsg oneof=kind
+field muxr.v1.AgentEvent.removed_pane_id = 3 optional uint32 oneof=kind
+field muxr.v1.AgentEvent.snapshot = 1 optional message muxr.v1.AgentList oneof=kind
+field muxr.v1.AgentList.agents = 1 repeated message muxr.v1.AgentMsg
+field muxr.v1.AgentList.summary = 2 optional message muxr.v1.AgentSummary
+field muxr.v1.AgentMark.kind = 1 optional string
+field muxr.v1.AgentMark.name = 2 optional string
+field muxr.v1.AgentMark.status = 3 optional enum muxr.v1.AgentStatus
+field muxr.v1.AgentMsg.change_seq = 14 optional uint64
+field muxr.v1.AgentMsg.completion_seq = 15 optional uint64
+field muxr.v1.AgentMsg.cwd = 12 optional string
+field muxr.v1.AgentMsg.display_kind = 8 optional string
+field muxr.v1.AgentMsg.focused = 13 optional bool
+field muxr.v1.AgentMsg.has_completion_seq = 16 optional bool
+field muxr.v1.AgentMsg.kind = 6 optional string
+field muxr.v1.AgentMsg.name = 7 optional string
+field muxr.v1.AgentMsg.pane_id = 1 optional uint32
+field muxr.v1.AgentMsg.space_id = 3 optional string
+field muxr.v1.AgentMsg.space_name = 4 optional string
+field muxr.v1.AgentMsg.status = 9 optional enum muxr.v1.AgentStatus
+field muxr.v1.AgentMsg.summary = 11 optional string
+field muxr.v1.AgentMsg.tab_id = 2 optional uint64
+field muxr.v1.AgentMsg.tab_name = 5 optional string
+field muxr.v1.AgentMsg.title = 10 optional string
+field muxr.v1.AgentSummary.blocked = 2 optional uint32
+field muxr.v1.AgentSummary.done = 3 optional uint32
+field muxr.v1.AgentSummary.idle = 5 optional uint32
+field muxr.v1.AgentSummary.kinds = 7 repeated string
+field muxr.v1.AgentSummary.total = 1 optional uint32
+field muxr.v1.AgentSummary.unknown = 6 optional uint32
+field muxr.v1.AgentSummary.working = 4 optional uint32
+field muxr.v1.AttachReq.client_instance_id = 7 optional string
+field muxr.v1.AttachReq.cols = 3 optional uint32
+field muxr.v1.AttachReq.resume_pane_id = 6 optional uint32
+field muxr.v1.AttachReq.resume_space_id = 4 optional string
+field muxr.v1.AttachReq.resume_tab_id = 5 optional uint64
+field muxr.v1.AttachReq.rows = 2 optional uint32
+field muxr.v1.AttachReq.session = 1 optional string
+field muxr.v1.BackendVersion.backend = 1 optional enum muxr.v1.Backend
+field muxr.v1.BackendVersion.version = 2 optional string
+field muxr.v1.ClientFrame.attach = 1 optional message muxr.v1.AttachReq oneof=kind
+field muxr.v1.ClientFrame.input = 2 optional bytes oneof=kind
+field muxr.v1.ClientFrame.mouse = 4 optional message muxr.v1.MouseInput oneof=kind
+field muxr.v1.ClientFrame.resize = 3 optional message muxr.v1.Resize oneof=kind
+field muxr.v1.CloseSpaceReq.close_group = 4 optional bool
+field muxr.v1.CloseSpaceReq.connection_id = 3 optional string
+field muxr.v1.CloseSpaceReq.session = 1 optional string
+field muxr.v1.CloseSpaceReq.space_id = 2 optional string
+field muxr.v1.ControlEvent.kind = 1 optional string
+field muxr.v1.ControlEvent.payload = 2 optional string
+field muxr.v1.CreateSessionReq.backend = 3 optional enum muxr.v1.Backend
+field muxr.v1.CreateSessionReq.layout = 2 optional string
+field muxr.v1.CreateSessionReq.name = 1 optional string
+field muxr.v1.CreateSpaceReq.connection_id = 3 optional string
+field muxr.v1.CreateSpaceReq.label = 2 optional string
+field muxr.v1.CreateSpaceReq.session = 1 optional string
+field muxr.v1.CreateTokenReq.name = 1 optional string
+field muxr.v1.CreateTokenReq.read_only = 2 optional bool
+field muxr.v1.Layout.tabs = 1 repeated message muxr.v1.TabMsg
+field muxr.v1.ListPushTargetsResp.targets = 1 repeated message muxr.v1.PushTargetInfo
+field muxr.v1.LoginRequest.auth_token = 1 optional string
+field muxr.v1.LoginRequest.remember_me = 2 optional bool
+field muxr.v1.LoginResponse.is_read_only = 2 optional bool
+field muxr.v1.LoginResponse.session_token = 1 optional string
+field muxr.v1.MouseInput.col = 2 optional uint32
+field muxr.v1.MouseInput.kind = 1 optional enum muxr.v1.MouseKind
+field muxr.v1.MouseInput.row = 3 optional uint32
+field muxr.v1.NewPaneReq.connection_id = 4 optional string
+field muxr.v1.NewPaneReq.floating = 2 optional bool
+field muxr.v1.NewPaneReq.pane_name = 3 optional string
+field muxr.v1.NewPaneReq.session = 1 optional string
+field muxr.v1.NewTabReq.connection_id = 3 optional string
+field muxr.v1.NewTabReq.session = 1 optional string
+field muxr.v1.NewTabReq.tab_name = 2 optional string
+field muxr.v1.PaneMsg.agent = 14 optional message muxr.v1.AgentMark
+field muxr.v1.PaneMsg.cols = 11 optional uint32
+field muxr.v1.PaneMsg.command = 6 optional string
+field muxr.v1.PaneMsg.cwd = 7 optional string
+field muxr.v1.PaneMsg.exited = 5 optional bool
+field muxr.v1.PaneMsg.id = 1 optional uint32
+field muxr.v1.PaneMsg.is_floating = 4 optional bool
+field muxr.v1.PaneMsg.is_focused = 3 optional bool
+field muxr.v1.PaneMsg.is_fullscreen = 13 optional bool
+field muxr.v1.PaneMsg.is_plugin = 12 optional bool
+field muxr.v1.PaneMsg.rows = 10 optional uint32
+field muxr.v1.PaneMsg.title = 2 optional string
+field muxr.v1.PaneMsg.x = 8 optional uint32
+field muxr.v1.PaneMsg.y = 9 optional uint32
+field muxr.v1.PaneTarget.connection_id = 4 optional string
+field muxr.v1.PaneTarget.is_plugin = 3 optional bool
+field muxr.v1.PaneTarget.pane_id = 2 optional uint32
+field muxr.v1.PaneTarget.session = 1 optional string
+field muxr.v1.PushTargetInfo.device_name = 1 optional string
+field muxr.v1.PushTargetInfo.handle_prefix = 4 optional string
+field muxr.v1.PushTargetInfo.platform = 2 optional string
+field muxr.v1.PushTargetInfo.registered_at = 3 optional uint64
+field muxr.v1.RegisterPushTargetReq.device_name = 2 optional string
+field muxr.v1.RegisterPushTargetReq.platform = 3 optional string
+field muxr.v1.RegisterPushTargetReq.push_handle = 1 optional string
+field muxr.v1.RemovePushTargetReq.device_name = 1 optional string
+field muxr.v1.RenamePaneReq.name = 2 optional string
+field muxr.v1.RenamePaneReq.target = 1 optional message muxr.v1.PaneTarget
+field muxr.v1.RenameSessionReq.name = 2 optional string
+field muxr.v1.RenameSessionReq.session = 1 optional string
+field muxr.v1.RenameSpaceReq.connection_id = 4 optional string
+field muxr.v1.RenameSpaceReq.label = 3 optional string
+field muxr.v1.RenameSpaceReq.session = 1 optional string
+field muxr.v1.RenameSpaceReq.space_id = 2 optional string
+field muxr.v1.RenameTabReq.name = 3 optional string
+field muxr.v1.RenameTabReq.session = 1 optional string
+field muxr.v1.RenameTabReq.tab_id = 2 optional uint64
+field muxr.v1.Resize.cols = 2 optional uint32
+field muxr.v1.Resize.rows = 1 optional uint32
+field muxr.v1.ResizePaneReq.direction = 3 optional enum muxr.v1.ResizeDirection
+field muxr.v1.ResizePaneReq.resize = 2 optional enum muxr.v1.ResizeKind
+field muxr.v1.ResizePaneReq.target = 1 optional message muxr.v1.PaneTarget
+field muxr.v1.RevokeTokenReq.name = 1 optional string
+field muxr.v1.ScrollReq.direction = 2 optional enum muxr.v1.ScrollDirection
+field muxr.v1.ScrollReq.target = 1 optional message muxr.v1.PaneTarget
+field muxr.v1.ServerFrame.control = 2 optional message muxr.v1.ControlEvent oneof=kind
+field muxr.v1.ServerFrame.render = 1 optional bytes oneof=kind
+field muxr.v1.SessionInfo.age_secs = 2 optional uint64
+field muxr.v1.SessionInfo.agents = 12 optional message muxr.v1.AgentSummary
+field muxr.v1.SessionInfo.backend = 9 optional enum muxr.v1.Backend
+field muxr.v1.SessionInfo.connected_clients = 8 optional uint32
+field muxr.v1.SessionInfo.has_bell = 6 optional bool
+field muxr.v1.SessionInfo.id = 10 optional string
+field muxr.v1.SessionInfo.is_current = 7 optional bool
+field muxr.v1.SessionInfo.name = 1 optional string
+field muxr.v1.SessionInfo.pane_count = 5 optional uint32
+field muxr.v1.SessionInfo.resurrectable = 3 optional bool
+field muxr.v1.SessionInfo.space_count = 11 optional uint32
+field muxr.v1.SessionInfo.tab_count = 4 optional uint32
+field muxr.v1.SessionList.sessions = 1 repeated message muxr.v1.SessionInfo
+field muxr.v1.SessionRef.connection_id = 2 optional string
+field muxr.v1.SessionRef.session = 1 optional string
+field muxr.v1.SessionRef.space_id = 3 optional string
+field muxr.v1.Space.active = 3 optional bool
+field muxr.v1.Space.id = 1 optional string
+field muxr.v1.Space.name = 2 optional string
+field muxr.v1.SpaceList.spaces = 1 repeated message muxr.v1.Space
+field muxr.v1.SwitchSpaceReq.connection_id = 3 optional string
+field muxr.v1.SwitchSpaceReq.session = 1 optional string
+field muxr.v1.SwitchSpaceReq.space_id = 2 optional string
+field muxr.v1.TabMsg.active = 3 optional bool
+field muxr.v1.TabMsg.floating_panes_visible = 9 optional bool
+field muxr.v1.TabMsg.fullscreen_active = 8 optional bool
+field muxr.v1.TabMsg.has_bell = 4 optional bool
+field muxr.v1.TabMsg.name = 2 optional string
+field muxr.v1.TabMsg.panes = 7 repeated message muxr.v1.PaneMsg
+field muxr.v1.TabMsg.panes_to_hide = 5 optional uint32
+field muxr.v1.TabMsg.position = 1 optional uint32
+field muxr.v1.TabMsg.tab_id = 6 optional uint32
+field muxr.v1.TabTarget.connection_id = 3 optional string
+field muxr.v1.TabTarget.session = 1 optional string
+field muxr.v1.TabTarget.tab_id = 2 optional uint64
+field muxr.v1.ToggleFullscreenReq.floating_visible = 3 optional bool
+field muxr.v1.ToggleFullscreenReq.has_floating_hint = 5 optional bool
+field muxr.v1.ToggleFullscreenReq.target = 1 optional message muxr.v1.PaneTarget
+field muxr.v1.ToggleFullscreenReq.target_is_floating = 2 optional bool
+field muxr.v1.ToggleFullscreenReq.target_is_focused_floating = 4 optional bool
+field muxr.v1.TokenInfo.created_at = 4 optional string
+field muxr.v1.TokenInfo.name = 1 optional string
+field muxr.v1.TokenInfo.read_only = 3 optional bool
+field muxr.v1.TokenInfo.token = 2 optional string
+field muxr.v1.TokenList.tokens = 1 repeated message muxr.v1.TokenInfo
+field muxr.v1.VersionInfo.available_backends = 4 repeated enum muxr.v1.Backend
+field muxr.v1.VersionInfo.backends = 3 repeated message muxr.v1.BackendVersion
+field muxr.v1.VersionInfo.capabilities = 5 repeated string
+field muxr.v1.VersionInfo.notification_relay_url = 6 optional string
+field muxr.v1.VersionInfo.server_version = 1 optional string
+field muxr.v1.VersionInfo.zellij_version = 2 optional string
+field muxr.v1.WriteToPaneReq.data = 2 optional bytes
+field muxr.v1.WriteToPaneReq.target = 1 optional message muxr.v1.PaneTarget
+message muxr.v1.Empty
+message muxr.v1.ListPushTargetsReq
+rpc muxr.v1.Muxr/AttachTerminal (stream muxr.v1.ClientFrame) returns (stream muxr.v1.ServerFrame)
+rpc muxr.v1.Muxr/ClosePane (muxr.v1.PaneTarget) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/CloseSpace (muxr.v1.CloseSpaceReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/CloseTab (muxr.v1.TabTarget) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/CreateSession (muxr.v1.CreateSessionReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/CreateSpace (muxr.v1.CreateSpaceReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/CreateToken (muxr.v1.CreateTokenReq) returns (muxr.v1.TokenInfo)
+rpc muxr.v1.Muxr/FocusPane (muxr.v1.PaneTarget) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/GetLayout (muxr.v1.SessionRef) returns (muxr.v1.Layout)
+rpc muxr.v1.Muxr/GetSpaces (muxr.v1.SessionRef) returns (muxr.v1.SpaceList)
+rpc muxr.v1.Muxr/GetVersion (muxr.v1.Empty) returns (muxr.v1.VersionInfo)
+rpc muxr.v1.Muxr/GoToTab (muxr.v1.TabTarget) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/KillSession (muxr.v1.SessionRef) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/ListAgents (muxr.v1.SessionRef) returns (muxr.v1.AgentList)
+rpc muxr.v1.Muxr/ListPushTargets (muxr.v1.ListPushTargetsReq) returns (muxr.v1.ListPushTargetsResp)
+rpc muxr.v1.Muxr/ListSessions (muxr.v1.Empty) returns (muxr.v1.SessionList)
+rpc muxr.v1.Muxr/ListTokens (muxr.v1.Empty) returns (muxr.v1.TokenList)
+rpc muxr.v1.Muxr/Login (muxr.v1.LoginRequest) returns (muxr.v1.LoginResponse)
+rpc muxr.v1.Muxr/NewPane (muxr.v1.NewPaneReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/NewTab (muxr.v1.NewTabReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RegisterPushTarget (muxr.v1.RegisterPushTargetReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RemovePushTarget (muxr.v1.RemovePushTargetReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RenamePane (muxr.v1.RenamePaneReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RenameSession (muxr.v1.RenameSessionReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RenameSpace (muxr.v1.RenameSpaceReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RenameTab (muxr.v1.RenameTabReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/ResizePane (muxr.v1.ResizePaneReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/RevokeToken (muxr.v1.RevokeTokenReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/ScrollPane (muxr.v1.ScrollReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/SwitchSpace (muxr.v1.SwitchSpaceReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/TogglePaneFloating (muxr.v1.PaneTarget) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/TogglePaneFullscreen (muxr.v1.ToggleFullscreenReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/WatchAgents (muxr.v1.SessionRef) returns (stream muxr.v1.AgentEvent)
+rpc muxr.v1.Muxr/WriteToPane (muxr.v1.WriteToPaneReq) returns (muxr.v1.ActionAck)

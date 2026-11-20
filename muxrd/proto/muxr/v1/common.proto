@@ -1,0 +1,49 @@
+// Shared types: the empty message, the backend enum, the action
+// acknowledgement and the session, pane and tab targets.
+syntax = "proto3";
+
+package muxr.v1;
+
+message Empty {}
+
+// Multiplexer backend that owns a session.
+enum Backend {
+  BACKEND_UNSPECIFIED = 0;
+  BACKEND_ZELLIJ = 1;
+  BACKEND_HERDR = 2;
+}
+
+// Answer of every action RPC.
+message ActionAck {
+  // True if the action completed without a surfaced error.
+  bool ok = 1;
+  // Surfaced error message; empty if none.
+  string error = 2;
+  // Result payload, e.g. a created pane id "terminal_<n>"; empty if none.
+  string info = 3;
+}
+
+message SessionRef {
+  string session = 1;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 2;
+  // GetLayout only: the herdr space to read. See proto/README.md#space-scoped-layout-reads.
+  string space_id = 3;
+}
+
+message PaneTarget {
+  string session = 1;
+  // The id GetLayout's PaneMsg.id carries; unique within its kind (terminal or plugin).
+  uint32 pane_id = 2;
+  // True for a plugin pane, false for a terminal pane.
+  bool is_plugin = 3;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 4;
+}
+
+message TabTarget {
+  string session = 1;
+  uint64 tab_id = 2;
+  // AttachTerminal's connection id; empty = legacy routing. See proto/README.md#routing.
+  string connection_id = 3;
+}

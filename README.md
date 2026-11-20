@@ -149,9 +149,10 @@ BIND_ADDR=100.x.y.z docker compose -f docker/compose.yaml up --build
 
 ## gRPC contract
 
-The wire contract is `muxrd/proto/muxr.proto` (package
-`muxr.v1`). The server compiles it via `build.rs`; clients generate
-their own stubs from the same file. A reference Dart client lives in
+The wire contract is package `muxr.v1` under `muxrd/proto/muxr/v1/`
+(include root `muxrd/proto/`; see [`muxrd/proto/README.md`](muxrd/proto/README.md)).
+The server compiles it via `build.rs`; clients generate their own stubs from
+the same files. A reference Dart client lives in
 [`muxrd/clients/dart_test_client/`](muxrd/clients/dart_test_client/).
 
 A read-only token can navigate tabs, panes and spaces, scroll, and resize
@@ -162,7 +163,7 @@ the read-only-token check, so a read-only token can list every herdr space
 (`GetSpaces`) and read any one space's tab/pane *structure* via
 `SessionRef.space_id` on `GetLayout` — not just the space its connection is
 viewing. Pane content still requires an attach, and neither call mutates
-anything or moves focus. See the `space_id` comment in `muxr.proto`.
+anything or moves focus. See "Space-scoped layout reads" in `muxrd/proto/README.md`.
 
 **Agent inventory:** `ListAgents` lists the coding agents running in a session,
 across all of its spaces, most urgent first (blocked, then done, working, idle),
