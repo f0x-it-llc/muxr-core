@@ -12,7 +12,8 @@
 //! the `Location` header — the same method `install.sh` uses, and it is not
 //! subject to the REST API rate limit. The request carries a
 //! `muxrd/<version>` user agent and nothing else: no body, no token, no
-//! identifier. System proxy settings are honoured.
+//! identifier. The `HTTP_PROXY`/`HTTPS_PROXY`/`NO_PROXY` environment variables
+//! are honoured; an operating system's own proxy settings are not read.
 //!
 //! ## Opting out
 //!
@@ -217,8 +218,9 @@ pub async fn run_update_check<S: ReleaseSource>(
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut wait = first_delay;
-    // Only the first failure is worth an operator's attention; a daemon with
-    // no route to github.com would otherwise warn once a day forever.
+    // Only the first failure of a run of failures is worth an operator's
+    // attention; a daemon with no route to github.com would otherwise warn
+    // once a day forever.
     let mut warned = false;
     loop {
         tokio::select! {
@@ -243,6 +245,8 @@ pub async fn run_update_check<S: ReleaseSource>(
                     ),
                 }
                 state.set_latest(latest);
+                // A later outage is a new event and worth one warn again.
+                warned = false;
             }
             Err(err) if !warned => {
                 warned = true;
