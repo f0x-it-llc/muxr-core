@@ -7,6 +7,9 @@
 //! 3. Config file (`$DATA_DIR/muxrd/config.toml`)
 //! 4. Hard-coded defaults (`127.0.0.1:50051`)
 //!
+//! Not every key has every source: `update_check` has no CLI flag and
+//! resolves as `MUXRD_UPDATE_CHECK` > config file > default (`true`).
+//!
 //! ## Config file format (TOML)
 //!
 //! ```toml
@@ -14,6 +17,7 @@
 //! bind_addr = "127.0.0.1:50051"
 //! cert_dir  = "/home/user/.local/share/zellij/muxrd"
 //! log_path  = "/home/user/.local/share/zellij/muxrd/muxrd.log"
+//! update_check = true
 //! ```
 //!
 //! All fields are optional; missing fields fall back to defaults.
@@ -35,6 +39,13 @@ pub const DEFAULT_NOTIFY_RELAY_URL: &str = "https://noti.muxr.app";
 /// Default notification payload verbosity.
 pub const DEFAULT_NOTIFY_VERBOSITY: &str = "normal";
 
+/// Whether the daily check for a newer muxrd release runs when nothing
+/// overrides it.
+pub const DEFAULT_UPDATE_CHECK: bool = true;
+
+/// Environment variable that overrides the `update_check` config key.
+pub const UPDATE_CHECK_ENV: &str = "MUXRD_UPDATE_CHECK";
+
 /// The raw on-disk config (all fields optional; missing → use defaults).
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct FileConfig {
@@ -48,6 +59,9 @@ struct FileConfig {
     /// Notification payload verbosity: `"normal"` (default) or `"generic"`.
     /// File-only (no env var) — invalid values are rejected at resolve time.
     notify_verbosity: Option<String>,
+    /// Daily check of github.com for a newer muxrd release. `None` falls back
+    /// to [`DEFAULT_UPDATE_CHECK`]; [`UPDATE_CHECK_ENV`] overrides the file.
+    update_check: Option<bool>,
 }
 
 /// The fully-resolved effective configuration.
@@ -71,6 +85,9 @@ pub struct EffectiveConfig {
     pub notify_relay_url: Option<String>,
     /// Resolved notification payload verbosity: `"normal"` or `"generic"`.
     pub notify_verbosity: String,
+    /// Whether the daemon asks github.com once a day for a newer muxrd
+    /// release. `false` means it makes no such request at all.
+    pub update_check: bool,
 }
 
 impl EffectiveConfig {
@@ -82,13 +99,15 @@ impl EffectiveConfig {
              log_path         = {}\n\
              config_file      = {}\n\
              notify_relay_url = {}\n\
-             notify_verbosity = {}",
+             notify_verbosity = {}\n\
+             update_check     = {}",
             self.bind_addr,
             self.cert_dir.display(),
             self.log_path.display(),
             self.config_file.display(),
             self.notify_relay_url.as_deref().unwrap_or("(disabled)"),
             self.notify_verbosity,
+            self.update_check,
         )
     }
 }
@@ -401,6 +420,17 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
     // notify_verbosity: config file > default. File-only — no env override.
     let notify_verbosity = resolve_notify_verbosity(file_cfg.notify_verbosity.as_deref())?;
 
+    // update_check: MUXRD_UPDATE_CHECK env > config file > default.
+    let update_check_env = match std::env::var(UPDATE_CHECK_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        // Not silently ignored: a value we cannot read is not "unset".
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{UPDATE_CHECK_ENV} is not valid UTF-8")
+        }
+    };
+    let update_check = resolve_update_check(update_check_env.as_deref(), file_cfg.update_check)?;
+
     Ok(EffectiveConfig {
         bind_addr,
         cert_dir,
@@ -408,7 +438,29 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
         config_file,
         notify_relay_url,
         notify_verbosity,
+        update_check,
     })
+}
+
+/// Resolve `update_check` from the raw environment value and the file value.
+///
+/// The environment value is case-insensitive: `0`, `false`, `off`, `no`
+/// disable; `1`, `true`, `on`, `yes` enable. An empty (or all-whitespace)
+/// value counts as unset. Any other value is an error rather than a silent
+/// fallback, so a typo cannot leave the check running against the operator's
+/// intent.
+fn resolve_update_check(env: Option<&str>, file: Option<bool>) -> Result<bool> {
+    let env = env.map(str::trim).filter(|v| !v.is_empty());
+    if let Some(raw) = env {
+        return match raw.to_ascii_lowercase().as_str() {
+            "0" | "false" | "off" | "no" => Ok(false),
+            "1" | "true" | "on" | "yes" => Ok(true),
+            _ => anyhow::bail!(
+                "{UPDATE_CHECK_ENV} must be one of 0/false/off/no or 1/true/on/yes, got '{raw}'"
+            ),
+        };
+    }
+    Ok(file.unwrap_or(DEFAULT_UPDATE_CHECK))
 }
 
 /// Normalize + validate a raw `notify_relay_url` value.
@@ -542,7 +594,10 @@ pub fn ensure_config_file() -> Result<PathBuf> {
              # Push-notification relay. Set to \"\" to disable push notifications\n\
              # entirely (no outbound traffic to any relay).\n\
              # notify_relay_url = \"{DEFAULT_NOTIFY_RELAY_URL}\"\n\
-             # notify_verbosity = \"{DEFAULT_NOTIFY_VERBOSITY}\" # \"normal\" | \"generic\"\n",
+             # notify_verbosity = \"{DEFAULT_NOTIFY_VERBOSITY}\" # \"normal\" | \"generic\"\n\
+             #\n\
+             # Daily check of github.com for a newer muxrd release; set false to disable.\n\
+             # update_check = {DEFAULT_UPDATE_CHECK}\n",
             data_dir.display(),
             data_dir.join("muxrd.log").display(),
         );
@@ -714,6 +769,62 @@ mod tests {
             err.to_string().contains("'normal' or 'generic'"),
             "unexpected error: {err}"
         );
+    }
+
+    // ── update_check: pure-function precedence ───────────────────────────────
+
+    #[test]
+    fn update_check_defaults_to_enabled() {
+        assert!(resolve_update_check(None, None).unwrap());
+    }
+
+    #[test]
+    fn update_check_file_value_wins_over_default() {
+        assert!(!resolve_update_check(None, Some(false)).unwrap());
+        assert!(resolve_update_check(None, Some(true)).unwrap());
+    }
+
+    #[test]
+    fn update_check_env_wins_over_file_both_ways() {
+        assert!(!resolve_update_check(Some("0"), Some(true)).unwrap());
+        assert!(resolve_update_check(Some("1"), Some(false)).unwrap());
+    }
+
+    #[test]
+    fn update_check_env_spellings_are_case_insensitive() {
+        for off in ["0", "false", "OFF", "No", " false "] {
+            assert!(!resolve_update_check(Some(off), None).unwrap(), "{off:?}");
+        }
+        for on in ["1", "TRUE", "on", "Yes"] {
+            assert!(
+                resolve_update_check(Some(on), Some(false)).unwrap(),
+                "{on:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_check_empty_env_counts_as_unset() {
+        assert!(!resolve_update_check(Some(""), Some(false)).unwrap());
+        assert!(resolve_update_check(Some("  "), None).unwrap());
+    }
+
+    #[test]
+    fn update_check_rejects_an_unknown_env_value() {
+        let err = resolve_update_check(Some("maybe"), None).unwrap_err();
+        assert!(
+            err.to_string().contains("MUXRD_UPDATE_CHECK"),
+            "unexpected error: {err}"
+        );
+    }
+
+    /// The file key parses as a TOML boolean and reaches `FileConfig`.
+    #[test]
+    fn update_check_parses_from_the_config_file() {
+        let cfg: FileConfig = toml::from_str("update_check = false\n").unwrap();
+        assert_eq!(cfg.update_check, Some(false));
+        let cfg: FileConfig = toml::from_str("bind_addr = \"127.0.0.1:50051\"\n").unwrap();
+        assert_eq!(cfg.update_check, None);
     }
 
     // ── notify_relay_url / notify_verbosity: `resolve()` precedence ──────────

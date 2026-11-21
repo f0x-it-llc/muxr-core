@@ -435,6 +435,49 @@ mod tests {
         }
     }
 
+    /// A running daemon's status, for the Daemon section tests.
+    fn running(latest_version: Option<&str>) -> crate::app::state::ServerInfo {
+        crate::app::state::ServerInfo {
+            version: "0.5.4".into(),
+            bind_addr: "0.0.0.0:50051".into(),
+            pid: 1,
+            uptime_secs: 1,
+            client_count: 0,
+            notify_relay_url: None,
+            push_device_count: 0,
+            latest_version: latest_version.map(str::to_owned),
+        }
+    }
+
+    #[test]
+    fn version_row_names_a_newer_release_when_the_daemon_reports_one() {
+        let mut harness = Harness::new();
+        harness.state.server.status = Some(running(Some("9.9.9")));
+        harness.draw();
+        let screen = harness.screen();
+        let version_line = screen
+            .lines()
+            .find(|line| line.contains("Version"))
+            .unwrap_or_else(|| panic!("no Version row in:\n{screen}"));
+        assert!(
+            version_line.contains("0.5.4  (9.9.9 available)"),
+            "unexpected Version row: {version_line:?}"
+        );
+    }
+
+    #[test]
+    fn version_row_says_nothing_when_the_daemon_is_current() {
+        let mut harness = Harness::new();
+        harness.state.server.status = Some(running(None));
+        harness.draw();
+        let screen = harness.screen();
+        assert!(screen.contains("0.5.4"), "no version in:\n{screen}");
+        assert!(
+            !screen.contains("available"),
+            "an update was announced without one:\n{screen}"
+        );
+    }
+
     #[test]
     fn c_opens_the_config_dialog_and_esc_closes_it() {
         let mut harness = Harness::new();
@@ -682,6 +725,7 @@ mod tests {
             client_count: 0,
             notify_relay_url: None,
             push_device_count: 0,
+            latest_version: None,
         });
         harness.draw();
         harness.key(KeyCode::Char('s'));

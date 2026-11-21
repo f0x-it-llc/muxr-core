@@ -23,4 +23,8 @@ message VersionInfo {
   repeated string capabilities = 5;
   // Push device relay; empty = push unsupported. See proto/README.md#capabilities.
   string notification_relay_url = 6;
+  // Newest released muxrd version (MAJOR.MINOR.PATCH, no leading v) when it is
+  // newer than server_version; empty when the server is current, has not
+  // checked yet, or has the check disabled. See proto/README.md#capabilities.
+  string latest_version = 7;
 }

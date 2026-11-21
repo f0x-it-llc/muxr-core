@@ -195,7 +195,7 @@ fn daemon_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
 fn running_lines(info: &ServerInfo, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         field("Status", "● Running", theme.primary, theme),
-        field("Version", info.version.clone(), theme.foreground, theme),
+        version_field(info, theme),
         field("Bind", info.bind_addr.clone(), theme.accent, theme),
         field("PID", info.pid.to_string(), theme.foreground, theme),
         field(
@@ -313,6 +313,19 @@ fn field(
         ),
         Span::styled(value.into(), Style::default().fg(value_color)),
     ])
+}
+
+/// The Version row: the running version, followed by `(<latest> available)`
+/// in the warning colour when the daemon knows of a newer release.
+fn version_field(info: &ServerInfo, theme: &Theme) -> Line<'static> {
+    let mut line = field("Version", info.version.clone(), theme.foreground, theme);
+    if let Some(latest) = &info.latest_version {
+        line.spans.push(Span::styled(
+            format!("  ({latest} available)"),
+            Style::default().fg(theme.warning),
+        ));
+    }
+    line
 }
 
 /// `"…"` while a first load is in flight, `fallback` otherwise.

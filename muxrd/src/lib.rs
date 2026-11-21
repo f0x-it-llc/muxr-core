@@ -13,6 +13,7 @@
 //! - `cli`     — E1 clap CLI definitions (subcommand structs)
 //! - `config`  — E1 config file + precedence resolution
 //! - `control` — E2 control socket (status/stop IPC contract)
+//! - `update`  — daily check for a newer muxrd release (opt-out via `update_check`)
 //! - `proto`   — generated protobuf / gRPC types (via tonic-prost-build)
 
 pub mod actions;
@@ -30,6 +31,7 @@ pub mod ratelimit;
 pub mod relay;
 pub mod tls;
 pub mod token_expiry;
+pub mod update;
 
 /// Generated protobuf + tonic types for `muxr.v1`.
 ///

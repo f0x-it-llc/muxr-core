@@ -635,6 +635,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         herdr_backend,
         cfg.notify_relay_url.clone(),
         cfg.notify_verbosity.clone(),
+        cfg.update_check,
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -700,6 +701,8 @@ fn cert_identity(
 /// (`MuxrService::with_notify_relay_url`) and reported over the control
 /// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
 /// `"generic"`) drives the outbound notifier's payload text (task 05).
+/// `update_check` decides whether the daily check for a newer release is
+/// spawned (`config::EffectiveConfig::update_check`).
 #[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
 async fn serve(
     addr: std::net::SocketAddr,
@@ -711,6 +714,7 @@ async fn serve(
     herdr_backend: Option<Arc<HerdrBackend>>,
     notify_relay_url: Option<String>,
     notify_verbosity: String,
+    update_check: bool,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -770,10 +774,15 @@ async fn serve(
         });
     let event_bus = herdr_events.as_ref().map(|(_, bus)| bus.clone());
 
+    // One update state, shared by GetVersion, the control socket and the
+    // check task that writes it (spawned below, when enabled).
+    let update_state = muxrd::update::UpdateState::default();
+
     let service = MuxrService::with_backends(backends)
         .with_notify_relay_url(notify_relay_url.clone())
         .with_push_device_store(push_devices.clone())
-        .with_event_bus(event_bus);
+        .with_event_bus(event_bus)
+        .with_update_state(update_state.clone());
 
     // Retained inputs for the task-05 outbound notifier, spawned in the herdr
     // branch below AFTER `spawn_listener` consumes the originals. Built only when
@@ -807,8 +816,23 @@ async fn serve(
         cert_mode,
         notify_relay_url,
         push_devices,
+        update_state.clone(),
     )
     .context("failed to start control socket")?;
+
+    // ── Daily update check ───────────────────────────────────────────────────
+    // Independent of the backend: a zellij-only server checks too. The task
+    // makes its first request 30 s after start, so it never delays serving,
+    // and it stops on the same watch signal as the herdr tasks below. A client
+    // build failure is logged and non-fatal.
+    if update_check {
+        match muxrd::update::spawn_update_check(update_state, kernel_shutdown_tx.subscribe()) {
+            Ok(()) => log::info!("update check: enabled (daily, github.com)"),
+            Err(e) => log::warn!("update check: failed to start: {e:#}"),
+        }
+    } else {
+        log::info!("update check: disabled");
+    }
 
     // ── herdr event kernel (task 01) ─────────────────────────────────────────
     // When a herdr backend is present, spawn the persistent `events.subscribe`

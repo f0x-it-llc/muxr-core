@@ -35,6 +35,7 @@ fn server_info_from(info: StatusInfo) -> ServerInfo {
         client_count: info.client_count,
         notify_relay_url: info.notify_relay_url,
         push_device_count: info.push_device_count,
+        latest_version: info.latest_version,
     }
 }
 

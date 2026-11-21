@@ -116,6 +116,14 @@ with. Empty means the server has no relay configured, and the client must
 treat push notifications as unsupported. `RegisterPushTarget` fails with
 `FAILED_PRECONDITION` on such a server.
 
+`VersionInfo.latest_version` is the newest released muxrd version, as plain
+`MAJOR.MINOR.PATCH`, and is set only when that release is newer than
+`server_version`. The server does the comparison; a client shows the value
+and compares nothing. Empty means there is nothing to report: the server is
+current, has not completed a check yet, or has its daily check disabled. The
+field is additive and has no capability flag: an older client ignores it, and
+an older server leaves it empty.
+
 ## Attach
 
 `AttachTerminal` is one bidirectional stream per terminal view: the client
