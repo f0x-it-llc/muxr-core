@@ -321,6 +321,7 @@ mod tests {
             client_count,
             notify_relay_url: None,
             push_device_count: 0,
+            latest_version: None,
         }
     }
 

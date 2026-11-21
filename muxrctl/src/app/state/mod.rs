@@ -86,6 +86,10 @@ pub struct ServerInfo {
     /// straight mirror of `StatusInfo` for parity / future use.
     #[allow(dead_code)]
     pub push_device_count: usize,
+    /// The newest released muxrd version when the daemon knows of one newer
+    /// than itself; `None` when it is current, has not checked yet, or has
+    /// its update check disabled.
+    pub latest_version: Option<String>,
 }
 
 // ── Dialog identity ───────────────────────────────────────────────────────────
