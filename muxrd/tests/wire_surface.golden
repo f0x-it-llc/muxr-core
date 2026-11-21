@@ -196,6 +196,7 @@ field muxr.v1.TokenList.tokens = 1 repeated message muxr.v1.TokenInfo
 field muxr.v1.VersionInfo.available_backends = 4 repeated enum muxr.v1.Backend
 field muxr.v1.VersionInfo.backends = 3 repeated message muxr.v1.BackendVersion
 field muxr.v1.VersionInfo.capabilities = 5 repeated string
+field muxr.v1.VersionInfo.latest_version = 7 optional string
 field muxr.v1.VersionInfo.notification_relay_url = 6 optional string
 field muxr.v1.VersionInfo.server_version = 1 optional string
 field muxr.v1.VersionInfo.zellij_version = 2 optional string

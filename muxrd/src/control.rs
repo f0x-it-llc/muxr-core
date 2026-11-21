@@ -106,6 +106,15 @@ pub struct StatusInfo {
     /// deserialises fine.
     #[serde(default)]
     pub push_device_count: usize,
+    /// The newest released muxrd version when it is newer than `version`, or
+    /// `None` when the server is current, has not checked yet, or has the
+    /// daily check disabled (`config::EffectiveConfig::update_check`).
+    ///
+    /// A fresh read of `update::UpdateState` taken at query time — see
+    /// [`spawn_listener`]. `#[serde(default)]` so a message from an older
+    /// server (pre-dating this field) still deserialises fine.
+    #[serde(default)]
+    pub latest_version: Option<String>,
 }
 
 /// Path to the control socket: `data_dir()/control.sock`.
@@ -209,9 +218,12 @@ type ShutdownTrigger = Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
 /// taken at listener-spawn time), so it stays accurate as devices are
 /// registered/removed while the server runs. A read failure (e.g. a corrupt
 /// sidecar) degrades to `0` rather than failing the whole `Status` response.
+/// `update` is the state the daily update check writes; `latest_version` is
+/// likewise read from it on every `Status` request.
 ///
 /// The socket is bound up-front (so a `status`/`stop` race right after start
 /// still finds it) and removed by the caller on exit (see [`cleanup`]).
+#[allow(clippy::too_many_arguments)] // each argument is one independent Status input; see doc above
 pub fn spawn_listener(
     bind_addr: String,
     started_at: Instant,
@@ -220,6 +232,7 @@ pub fn spawn_listener(
     cert_mode: CertMode,
     notify_relay_url: Option<String>,
     push_devices: crate::notify::devices::PushDeviceStore,
+    update: crate::update::UpdateState,
 ) -> Result<()> {
     let path = socket_path()?;
 
@@ -267,6 +280,7 @@ pub fn spawn_listener(
                             log::warn!("control: failed to read push device count: {e:#}");
                             0
                         }),
+                        latest_version: update.latest(),
                     }),
                     ControlRequest::Shutdown => {
                         log::info!("control: shutdown requested");
@@ -388,6 +402,30 @@ mod tests {
             info.push_device_count, 0,
             "missing push_device_count defaults to 0"
         );
+        assert_eq!(
+            info.latest_version, None,
+            "missing latest_version defaults to None"
+        );
+    }
+
+    /// A payload from a server one release back — everything except
+    /// `latest_version` — still deserializes, and reports no update.
+    #[test]
+    fn status_info_deserializes_from_pre_update_check_payload() {
+        let previous_json = serde_json::json!({
+            "version": "0.5.4",
+            "bind_addr": "127.0.0.1:50051",
+            "pid": 1234,
+            "uptime_secs": 42,
+            "client_count": 1,
+            "cert_mode": "self_signed",
+            "notify_relay_url": "https://noti.muxr.app",
+            "push_device_count": 2,
+        });
+        let info: StatusInfo =
+            serde_json::from_value(previous_json).expect("0.5.4 StatusInfo must deserialize");
+        assert_eq!(info.push_device_count, 2);
+        assert_eq!(info.latest_version, None);
     }
 
     /// A full modern payload (including the new fields) round-trips.
@@ -402,11 +440,13 @@ mod tests {
             cert_mode: CertMode::SelfSigned,
             notify_relay_url: Some("https://noti.muxr.app".to_owned()),
             push_device_count: 3,
+            latest_version: Some("0.2.6".to_owned()),
         };
         let json = serde_json::to_string(&info).expect("serialize");
         let round_tripped: StatusInfo = serde_json::from_str(&json).expect("deserialize");
 
         assert_eq!(round_tripped.notify_relay_url, info.notify_relay_url);
         assert_eq!(round_tripped.push_device_count, info.push_device_count);
+        assert_eq!(round_tripped.latest_version, Some("0.2.6".to_owned()));
     }
 }

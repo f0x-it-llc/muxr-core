@@ -286,7 +286,8 @@ learns the IP walks around it.
 **Egress block — optional, and only worth it when someone untrusted can type.**
 With the shipped defaults nobody can: the public token is read-only, so no
 visitor can run a command, and nothing in the image initiates outbound
-connections on its own. The rule only buys something once a read-write token is
+connections on its own (the image sets `MUXRD_UPDATE_CHECK=0`, which turns
+off muxrd's daily update check for that reason). The rule only buys something once a read-write token is
 held by someone you would not want probing the proxy's network. When that
 applies, drop every connection the demo *initiates* — internet, its neighbours
 on that network, the proxy itself — while inbound from the proxy still works,

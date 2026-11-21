@@ -27,6 +27,9 @@ async fn main() -> Result<()> {
     println!("GetVersion response:");
     println!("  server_version : {}", info.server_version);
     println!("  zellij_version : {}", info.zellij_version);
+    if !info.latest_version.is_empty() {
+        println!("  latest_version : {}", info.latest_version);
+    }
 
     Ok(())
 }

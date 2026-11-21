@@ -98,6 +98,12 @@ pub struct MuxrService {
     /// `"agents-stream"` only when it is set. `None` by default; set via
     /// [`MuxrService::with_event_bus`], the same builder seam as the relay URL.
     event_bus: Option<crate::multiplexer::events::EventBus>,
+    /// What the daily update check last learned (`update::UpdateState`).
+    /// `GetVersion` reports it as `latest_version`. Empty by default, which is
+    /// also what a server with the check disabled reports; `bin/muxrd.rs`
+    /// shares one state with the check task via
+    /// [`MuxrService::with_update_state`].
+    update: crate::update::UpdateState,
 }
 
 impl Default for MuxrService {
@@ -127,6 +133,7 @@ impl MuxrService {
             notify_relay_url: None,
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
+            update: crate::update::UpdateState::default(),
         }
     }
 
@@ -155,6 +162,7 @@ impl MuxrService {
             notify_relay_url: None,
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
+            update: crate::update::UpdateState::default(),
         }
     }
 
@@ -192,6 +200,16 @@ impl MuxrService {
         event_bus: Option<crate::multiplexer::events::EventBus>,
     ) -> Self {
         self.event_bus = event_bus;
+        self
+    }
+
+    /// Share the update-check state with this service (see the `update` field
+    /// doc). Builder-style, chainable like [`MuxrService::with_event_bus`];
+    /// `bin/muxrd.rs` hands the same state to the check task and the control
+    /// socket.
+    #[must_use]
+    pub fn with_update_state(mut self, update: crate::update::UpdateState) -> Self {
+        self.update = update;
         self
     }
 

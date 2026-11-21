@@ -411,7 +411,8 @@ ENV HOME=/run/demo \
     XDG_RUNTIME_DIR=/run/demo/xdg \
     DEMO_BIND=0.0.0.0:50051 \
     DEMO_SESSION=demo \
-    DEMO_READ_ONLY=1
+    DEMO_READ_ONLY=1 \
+    MUXRD_UPDATE_CHECK=0
 
 USER demo
 WORKDIR /opt/demo/muxr-core

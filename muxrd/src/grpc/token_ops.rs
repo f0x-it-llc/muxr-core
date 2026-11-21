@@ -95,6 +95,9 @@ impl MuxrService {
             } else {
                 String::new()
             },
+            // Empty unless the daily check found a release newer than this
+            // binary; the comparison is already done in `update`.
+            latest_version: self.update.latest().unwrap_or_default(),
         };
         log::debug!(
             "GetVersion → server={} zellij={:?} backends={} available={:?} notify={}",
@@ -376,6 +379,43 @@ mod tests {
             info.notification_relay_url, "",
             "notification_relay_url must stay empty without a herdr backend"
         );
+    }
+
+    // ── latest_version ───────────────────────────────────────────────────────
+
+    /// No update state handed in (the default, and what a server with the
+    /// check disabled has) → `latest_version` stays empty.
+    #[tokio::test]
+    async fn get_version_reports_no_latest_version_by_default() {
+        let info = MuxrService::new()
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+        assert_eq!(info.latest_version, "");
+    }
+
+    /// The shared update state is read on every call, so a value the check
+    /// task stores after the service was built is reported.
+    #[tokio::test]
+    async fn get_version_reports_the_shared_update_state() {
+        let update = crate::update::UpdateState::default();
+        let service = MuxrService::new().with_update_state(update.clone());
+        update.set_latest(Some("9.9.9".to_owned()));
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+        assert_eq!(info.latest_version, "9.9.9");
+
+        update.set_latest(None);
+        let info = service
+            .get_version_impl(Request::new(Empty {}))
+            .await
+            .expect("GetVersion must not error")
+            .into_inner();
+        assert_eq!(info.latest_version, "");
     }
 
     // ── "agents" capability ──────────────────────────────────────────────────
