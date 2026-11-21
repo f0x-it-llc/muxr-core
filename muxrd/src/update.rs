@@ -81,11 +81,12 @@ fn parse_version_triple(version: &str) -> Option<(u32, u32, u32)> {
 /// Read the release tag out of a redirect `Location` value.
 ///
 /// The tag is the single path segment after `/releases/tag/`, in an absolute
-/// or a relative URL; a query string or fragment is dropped. Anything else
-/// yields `None`.
+/// or a relative URL. A query string or fragment is dropped first, so a
+/// marker that only appears inside one (a login redirect's `return_to`) is
+/// not a tag. Anything else yields `None`.
 fn tag_from_location(location: &str) -> Option<&str> {
-    let (_, after) = location.trim().split_once(TAG_PATH_MARKER)?;
-    let tag = after.split(['?', '#']).next()?;
+    let path = location.trim().split(['?', '#']).next()?;
+    let (_, tag) = path.split_once(TAG_PATH_MARKER)?;
     let tag = tag.strip_suffix('/').unwrap_or(tag);
     if tag.is_empty() || tag.contains('/') {
         return None;
@@ -338,6 +339,8 @@ mod tests {
             "https://github.com/f0x-it-llc/muxr-core/releases/tag/",
             "https://github.com/f0x-it-llc/muxr-core/releases/tag/v0.5.5/assets",
             "https://github.com/login?return_to=x",
+            "https://github.com/login?return_to=/releases/tag/v9.9.9",
+            "https://github.com/login#/releases/tag/v9.9.9",
         ] {
             assert_eq!(tag_from_location(location), None, "{location:?}");
         }
@@ -538,10 +541,13 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn a_dropped_shutdown_sender_ends_the_task() {
         let source = ScriptedSource::new(&[Ok("v0.5.5")]);
-        let (_state, tx, task) = start(source);
+        let (_state, tx, task) = start(source.clone());
+        settle().await;
+        tokio::time::advance(FIRST / 2).await;
         settle().await;
         drop(tx);
         task.await.unwrap();
+        assert_eq!(source.calls(), 0, "the drop interrupted the first wait");
     }
 
     #[tokio::test(start_paused = true)]

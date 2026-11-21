@@ -421,10 +421,15 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
     let notify_verbosity = resolve_notify_verbosity(file_cfg.notify_verbosity.as_deref())?;
 
     // update_check: MUXRD_UPDATE_CHECK env > config file > default.
-    let update_check = resolve_update_check(
-        std::env::var(UPDATE_CHECK_ENV).ok().as_deref(),
-        file_cfg.update_check,
-    )?;
+    let update_check_env = match std::env::var(UPDATE_CHECK_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        // Not silently ignored: a value we cannot read is not "unset".
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{UPDATE_CHECK_ENV} is not valid UTF-8")
+        }
+    };
+    let update_check = resolve_update_check(update_check_env.as_deref(), file_cfg.update_check)?;
 
     Ok(EffectiveConfig {
         bind_addr,
