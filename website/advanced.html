@@ -79,6 +79,7 @@
         <ol class="doc-nav-list">
           <li><a class="doc-nav-link" href="#dashboard">The dashboard</a></li>
           <li><a class="doc-nav-link" href="#tokens">The CLI route</a></li>
+          <li><a class="doc-nav-link" href="#update-check">Update check</a></li>
           <li><a class="doc-nav-link" href="#lan">LAN instead of a tailnet</a></li>
           <li><a class="doc-nav-link" href="#public">Public domain</a></li>
           <li><a class="doc-nav-link" href="#docker">Docker dev rig</a></li>
@@ -128,6 +129,21 @@ muxrd stop</code></pre></div>
           <div class="callout callout-warn">
             <div class="callout-title">Secret shown once</div>
             <p>A token's secret is printed only at creation and stored only as a hash, so neither it nor its pairing QR can be shown again; if you lose it, revoke the token and mint a new one. Pair a CLI-minted token by hand: enter the host and paste the secret on the app's Connect screen.</p>
+          </div>
+        </section>
+
+        <section id="update-check">
+          <h2>Does muxrd check for updates?</h2>
+          <p>From version 0.5.5, yes. <code>muxrd</code> asks whether a newer muxr-core release exists 30 seconds after each start, then every 24 hours while it runs, so a restart adds a request. Nothing is downloaded or installed, and the result is kept in memory only.</p>
+          <p>The request is one HTTPS GET to the project's release page on GitHub, <code>https://github.com/f0x-it-llc/muxr-core/releases/latest</code>. It does not follow the redirect and reads the release tag from the redirect's <code>Location</code> header. The only thing it carries is a <code>muxrd/&lt;version&gt;</code> user agent: no body, no token, no identifier. It goes from your server to the code host, not to muxr.app, and it honours the <code>HTTP_PROXY</code>, <code>HTTPS_PROXY</code> and <code>NO_PROXY</code> environment variables.</p>
+          <p>When a newer release exists, the <code>muxrctl</code> dashboard's Version row reads <code>&lt;running&gt;  (&lt;latest&gt; available)</code>. The app shows the same news in server settings and in a short app-bar notice; see <a href="/guide.html#settings">the usage guide</a>. When the release is not newer, no check has succeeded yet, or the check is off, nothing shows.</p>
+          <p>The check is on by default. To turn it off, set this in the config file:</p>
+          <div class="code-block"><pre><code>update_check = false</code></pre></div>
+          <p>Or set the environment variable, which overrides the file. It accepts <code>0</code>, <code>false</code>, <code>off</code> or <code>no</code> to disable and <code>1</code>, <code>true</code>, <code>on</code> or <code>yes</code> to enable, in any letter case:</p>
+          <div class="code-block"><pre><code>MUXRD_UPDATE_CHECK=off muxrd start --bind 100.x.y.z:50051 --daemonize</code></pre></div>
+          <div class="callout callout-note">
+            <div class="callout-title">No command-line flag</div>
+            <p>An empty <code>MUXRD_UPDATE_CHECK</code> counts as unset, and any other value is an error. With the check disabled, no request is made.</p>
           </div>
         </section>
 

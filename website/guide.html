@@ -99,7 +99,7 @@
             <li><strong>Connect</strong> — authenticate with credentials or a QR code.</li>
             <li><strong>Sessions</strong> — list, create, rename, and kill sessions. On a herdr backend this is the single herdr session, whose workspaces appear as switchable spaces in the Terminal screen.</li>
             <li><strong>Terminal</strong> — the live terminal with tab bar, pane strip, and command center.</li>
-            <li><strong>Settings</strong> — manage tokens, saved servers, appearance, and preferences.</li>
+            <li><strong>Settings</strong> — three screens: app settings, server settings and auth tokens. See <a href="#settings">Settings</a>.</li>
           </ul>
         </section>
 
@@ -148,6 +148,7 @@
                   <tr><td>Tap</td><td>The <strong>focused</strong> pane</td><td>Opens the soft keyboard for input</td></tr>
                   <tr><td>Double-tap</td><td>Any pane</td><td>Toggles server-side pane fullscreen (<code>TogglePaneFullscreen</code> RPC)</td></tr>
                   <tr><td>Long-press</td><td>Terminal text</td><td>Starts text selection — see <a href="#copy-text">Copy text</a> below</td></tr>
+                  <tr><td>Long-press</td><td>A blank cell</td><td>Offers <strong>Paste</strong> — see <a href="#copy-text">Copy text</a> below</td></tr>
                   <tr><td>Back gesture</td><td>—</td><td>Exits client-side immersive mode first; if not immersive, prompts to detach from the session</td></tr>
                 </tbody>
               </table>
@@ -155,6 +156,7 @@
               <h3 id="copy-text">Copy text</h3>
               <p>Long-press text to select the word under your finger, then drag to extend the selection word by word. A <strong>magnifier loupe</strong> floats above your finger while selecting. Release to show a floating <strong>Copy</strong> chip; tap it to copy to the system clipboard, or tap elsewhere to dismiss.</p>
               <p>Selection reads the rendered terminal buffer on the client, so it works on every backend.</p>
+              <p>To paste, long-press a blank cell and tap <strong>Paste</strong>; a selection offers <strong>Copy</strong> and <strong>Paste</strong>. Pasted text has control characters removed (tab and newline are kept) and is wrapped for bracketed paste.</p>
             </div>
             <figure class="shot shot-sm"><div class="shot-frame"><img src="assets/img/screenshots/terminal-htop.webp" width="640" height="1391" alt="A pane split showing a shell above htop, running in the Terminal screen" loading="lazy" decoding="async"></div><figcaption class="shot-caption">a pane split: a shell above htop</figcaption></figure>
           </div>
@@ -221,27 +223,26 @@
           <ul>
             <li>The pane rail replaces the phone's FAB and bottom sheet, and collapses to a <strong>56&nbsp;px icon mini-rail</strong> in immersive mode.</li>
             <li><strong>Connect</strong> uses two columns.</li>
-            <li><strong>Sessions</strong> and <strong>Settings</strong> use master-detail layouts.</li>
+            <li><strong>Sessions</strong> uses a master-detail layout.</li>
           </ul>
         </section>
 
         <!-- 9 · Settings -->
         <section id="settings">
           <h2>Settings</h2>
+          <p>Settings is three screens, not one.</p>
           <div class="device-figure">
             <div class="device-figure-body">
               <ul>
-                <li><strong>Connection info</strong> — server endpoint, TLS trust label, and server/backend versions.</li>
-                <li><strong>Tokens</strong> — create and revoke auth tokens on the server.</li>
-                <li><strong>Saved servers</strong> — manage saved profiles and their biometric-protected credentials.</li>
-                <li><strong>Muxr Pro</strong> — shows your plan (Free or Pro) and opens the upgrade.</li>
-                <li><strong>Appearance</strong> — font family (downloadable from the server's font catalog), font size, cursor style, and the mac-option-as-meta toggle for Option key behavior on iOS/macOS.</li>
-                <li><strong>Bell notification</strong> — toggle terminal bell notifications.</li>
-                <li><strong>In-app log viewer</strong> — read the talker log stream for diagnostics.</li>
-                <li><strong>Disconnect</strong> — detach and return to the Connect screen.</li>
+                <li><strong>App settings</strong> — opens without a server, from the gear on the Connect screen. It holds terminal appearance, layout refresh, the bell, Muxr Pro, your saved servers and an About section.</li>
+                <li><strong>Server settings</strong> — covers the connected server only: its endpoint, TLS, latency, backend versions and the <code>muxrd</code> version, an auth tokens row, the saved credential, forget server, lock and disconnect.</li>
+                <li><strong>Auth tokens</strong> — its own page, opened from the auth tokens row in server settings. It has a filter and all, read-write and read-only segments, and lets you copy a token's name, revoke it or create a new one. The token this device signed in with is pinned and marked.</li>
               </ul>
+              <h3 id="update-notice">Server version and update notice</h3>
+              <p>Server settings shows the <code>muxrd</code> version. When the server reports a newer release, a chip next to it reads <code>&lt;version&gt; available</code>. After you connect or switch servers, the app bar also shows <code>muxrd &lt;version&gt; is available</code> for six seconds, once per connect.</p>
+              <p>The app does not update the server; it only shows what the server reports. The server learns about new releases from a daily check you can turn off, described in <a href="/advanced.html#update-check">Advanced setup</a>.</p>
             </div>
-            <figure class="shot shot-sm"><div class="shot-frame"><img src="assets/img/screenshots/settings.webp" width="640" height="1391" alt="Server settings: connection, auth tokens, saved servers, Muxr Pro, terminal appearance" loading="lazy" decoding="async"></div><figcaption class="shot-caption">server settings: connection, auth tokens, saved servers, Muxr Pro, terminal appearance</figcaption></figure>
+            <figure class="shot shot-sm"><div class="shot-frame"><img src="assets/img/screenshots/settings.webp" width="640" height="1391" alt="Server settings: endpoint, TLS, auth tokens" loading="lazy" decoding="async"></div><figcaption class="shot-caption">server settings: endpoint, TLS, auth tokens</figcaption></figure>
           </div>
         </section>
 
