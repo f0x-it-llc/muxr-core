@@ -143,7 +143,7 @@ muxrd stop</code></pre></div>
           <div class="code-block"><pre><code>MUXRD_UPDATE_CHECK=off muxrd start --bind 100.x.y.z:50051 --daemonize</code></pre></div>
           <div class="callout callout-note">
             <div class="callout-title">No command-line flag</div>
-            <p>An empty <code>MUXRD_UPDATE_CHECK</code> counts as unset, and any other value is an error. With the check disabled, no request is made.</p>
+            <p>There is no command-line flag for the update check, only the config key and the environment variable. An empty <code>MUXRD_UPDATE_CHECK</code> counts as unset, and any other value is an error. With the check disabled, no request is made.</p>
           </div>
         </section>
 
