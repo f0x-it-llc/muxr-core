@@ -150,12 +150,12 @@ Verified against this repository, the muxr-app repository and the store listings
   switch the app bar shows `muxrd <version> is available` for six seconds, once
   per connect. The app does not update the server; it only shows what the
   server reports. (muxr-app CHANGELOG.md, 1.0.3)
-- Daily update check (muxrd 0.5.5 and later): once a day muxrd asks whether a
-  newer muxr-core release exists. It sends one HTTPS GET to
+- Daily update check (muxrd 0.5.5 and later): muxrd asks whether a newer
+  muxr-core release exists once 30 seconds after each start, then every 24
+  hours while it runs, so a restart adds a request. It sends one HTTPS GET to
   `https://github.com/f0x-it-llc/muxr-core/releases/latest` without following
   the redirect, and reads the release tag from the redirect's `Location`
-  header. The first check runs 30 seconds after the daemon starts, then every
-  24 hours. The request carries a `muxrd/<version>` user agent and nothing
+  header. The request carries a `muxrd/<version>` user agent and nothing
   else: no body, no token, no identifier. It honours the `HTTP_PROXY`,
   `HTTPS_PROXY` and `NO_PROXY` environment variables. Nothing is downloaded or
   installed, and the result is kept in memory only. (muxrd/src/update.rs, module
@@ -171,8 +171,10 @@ Verified against this repository, the muxr-app repository and the store listings
   `GetVersion`'s `VersionInfo` (plain `MAJOR.MINOR.PATCH`, set only when the
   release is newer than the running muxrd; empty when current, when no check
   has succeeded yet, or when the check is off), and the Version row of
-  muxrctl's dashboard, which reads `<running>  (<latest> available)`.
-  (muxrd/proto/README.md "Capabilities"; muxrd/src/grpc/token_ops.rs;
+  muxrctl's dashboard, which reads `<running>  (<latest> available)`; muxrctl
+  gets the value over the control socket, where the status reply carries
+  `latest_version`. (muxrd/proto/README.md "Capabilities";
+  muxrd/src/grpc/token_ops.rs; muxrd/src/control.rs;
   muxrctl/src/tui/views/dashboard.rs)
 
 ### Coming soon (not available today; never give a date)

@@ -117,19 +117,20 @@ no fingerprint) for external/h2c. The Certificate dialog (`e` on the dashboard) 
 
 ## Network access: the daily update check
 
-By default `muxrd` makes one outbound request a day to find out whether a newer
-release exists. It sends a single HTTPS `GET` to
+By default `muxrd` makes an outbound request to find out whether a newer
+release exists: once 30 seconds after each start, then every 24 hours while it
+runs, so a restart adds a request. It sends a single HTTPS `GET` to
 `https://github.com/f0x-it-llc/muxr-core/releases/latest`, does not follow the
-redirect, and reads the release tag from it. The first check runs 30 seconds
-after start-up. The request carries a `muxrd/<version>` user agent and nothing
-else: no body, no token, no identifier. `HTTP_PROXY`, `HTTPS_PROXY` and
-`NO_PROXY` are honoured. Nothing is downloaded or installed; a newer version is
+redirect, and reads the release tag from it. The request carries a
+`muxrd/<version>` user agent and nothing else: no body, no token, no identifier. `HTTP_PROXY`,
+`HTTPS_PROXY` and `NO_PROXY` are honoured. Nothing is downloaded or installed; a newer version is
 only reported, to clients through `GetVersion` and on the `muxrctl` dashboard's
 Version row.
 
 Turn it off with either of:
 
-- `update_check = false` in `config.toml` (default `true`);
+- `update_check = false` in the config file, `config.toml` in the muxrd data
+  directory (`$DATA_DIR/muxrd/config.toml`; default `true`);
 - `MUXRD_UPDATE_CHECK=0`, which overrides the file. Accepted values, in any
   letter case: `0`, `false`, `off`, `no` to disable; `1`, `true`, `on`, `yes` to
   enable. Any other value is an error.
