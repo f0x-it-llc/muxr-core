@@ -128,6 +128,52 @@ Verified against this repository, the muxr-app repository and the store listings
 - Saved credentials are kept in the iOS Keychain or Android Keystore, gated
   behind device biometrics. (privacy.html; guide.html)
 - No account. No analytics, no ads, no crash reporting. (privacy.html)
+- Settings is three screens. App settings: terminal appearance, layout
+  refresh, bell, Muxr Pro, saved servers, about; it opens without a server from
+  a gear on the Connect screen. Server settings: the connected server only
+  (endpoint, TLS, latency, backend versions, the muxrd version, an auth tokens
+  row, the saved credential, forget server, lock and disconnect). Auth tokens:
+  its own page with a filter, all / read-write / read-only segments, copy name,
+  revoke and create; the token this device signed in with is pinned and marked.
+  (muxr-app CHANGELOG.md, 1.0.3)
+- Paste in the terminal: a long press on a blank cell offers Paste; a selection
+  offers Copy and Paste. Pasted text has control characters removed (tab and
+  newline kept) and is wrapped for bracketed paste. (muxr-app CHANGELOG.md,
+  1.0.3)
+- On herdr, panes, tabs and spaces created from the phone are created in the
+  space the phone is viewing (muxrd 0.5.4 or later). (muxr-app CHANGELOG.md,
+  1.0.3)
+- When the attached pane exits, the terminal shows "No pane open" and offers
+  the pane list. (muxr-app CHANGELOG.md, 1.0.3)
+- Server settings shows the muxrd version. When the server reports a newer
+  release, a chip reads `<version> available`, and after a connect or a server
+  switch the app bar shows `muxrd <version> is available` for six seconds, once
+  per connect. The app does not update the server; it only shows what the
+  server reports. (muxr-app CHANGELOG.md, 1.0.3)
+- Daily update check (muxrd 0.5.5 and later): once a day muxrd asks whether a
+  newer muxr-core release exists. It sends one HTTPS GET to
+  `https://github.com/f0x-it-llc/muxr-core/releases/latest` without following
+  the redirect, and reads the release tag from the redirect's `Location`
+  header. The first check runs 30 seconds after the daemon starts, then every
+  24 hours. The request carries a `muxrd/<version>` user agent and nothing
+  else: no body, no token, no identifier. It honours the `HTTP_PROXY`,
+  `HTTPS_PROXY` and `NO_PROXY` environment variables. Nothing is downloaded or
+  installed, and the result is kept in memory only. (muxrd/src/update.rs, module
+  documentation and `GithubReleases`; `FIRST_CHECK_DELAY`; `CHECK_INTERVAL`)
+- The update check is on by default and has two switches: `update_check = false`
+  in the config file, or the environment variable `MUXRD_UPDATE_CHECK`, which
+  overrides the file. The variable accepts `0`, `false`, `off`, `no` (disable)
+  and `1`, `true`, `on`, `yes` (enable), in any letter case; an empty value
+  counts as unset and any other value is an error. When disabled no request is
+  made. There is no command-line flag. (muxrd/src/config.rs
+  `resolve_update_check`; muxrd/src/bin/muxrd.rs)
+- The result reaches clients two ways: the `latest_version` field of
+  `GetVersion`'s `VersionInfo` (plain `MAJOR.MINOR.PATCH`, set only when the
+  release is newer than the running muxrd; empty when current, when no check
+  has succeeded yet, or when the check is off), and the Version row of
+  muxrctl's dashboard, which reads `<running>  (<latest> available)`.
+  (muxrd/proto/README.md "Capabilities"; muxrd/src/grpc/token_ops.rs;
+  muxrctl/src/tui/views/dashboard.rs)
 
 ### Coming soon (not available today; never give a date)
 
