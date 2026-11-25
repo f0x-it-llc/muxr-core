@@ -32,7 +32,7 @@
         "headline": "Muxr FAQ: zellij and herdr on your phone",
         "description": "Short answers about Muxr: zellij and herdr on iPhone, iPad and Android, coding agents, setup, price, licence, privacy and how it compares with other apps.",
         "datePublished": "2026-11-15",
-        "dateModified": "2026-11-15",
+        "dateModified": "2026-11-24",
         "author": {
           "@id": "https://muxr.app/#organization"
         },
@@ -298,6 +298,22 @@
           },
           {
             "@type": "Question",
+            "name": "How does the app tell me a newer muxrd exists?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "When the server reports a newer release, server settings in the app shows the muxrd version with a chip that reads \"<version> available\". After you connect or switch servers, the app bar also shows \"muxrd <version> is available\" for six seconds, once per connect. The app does not update the server; it only shows what the server reports."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Does muxrd contact any outside service by itself?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "From version 0.5.5, muxrd asks the project's release page on GitHub once a day whether a newer version exists. The request comes from your own server, goes to the code host and not to muxr.app, and carries only a muxrd/<version> user agent. Nothing is downloaded or installed. To turn it off, set update_check = false in the config file or set the environment variable MUXRD_UPDATE_CHECK to off."
+            }
+          },
+          {
+            "@type": "Question",
             "name": "Do I need an account?",
             "acceptedAnswer": {
               "@type": "Answer",
@@ -439,7 +455,7 @@
     </nav>
 
     <h1>Muxr FAQ: zellij and herdr on your phone</h1>
-    <p class="updated">Last updated: 15 November 2026</p>
+    <p class="updated">Last updated: 24 November 2026</p>
 
     <p class="article-lead">Muxr is a mobile app that attaches to zellij and herdr sessions on your own machine, with a daemon called muxrd on that machine. These short answers cover what it works with, how it connects, what it costs and how it differs from other apps.</p>
 
@@ -598,6 +614,16 @@
     <div class="faq-item">
       <h3 id="traffic">Does my traffic go through your servers?</h3>
       <p>No. Terminal traffic goes from the phone to your own server and does not pass through any server run by F0X IT LLC. <a href="/privacy.html">Privacy</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="update-notice">How does the app tell me a newer muxrd exists?</h3>
+      <p>When the server reports a newer release, server settings in the app shows the muxrd version with a chip that reads <code>&lt;version&gt; available</code>. After you connect or switch servers, the app bar also shows <code>muxrd &lt;version&gt; is available</code> for six seconds, once per connect. The app does not update the server; it only shows what the server reports. <a href="/guide.html#settings">Usage guide</a></p>
+    </div>
+
+    <div class="faq-item">
+      <h3 id="outside-contact">Does muxrd contact any outside service by itself?</h3>
+      <p>From version 0.5.5, <code>muxrd</code> asks the project's release page on GitHub once a day whether a newer version exists. The request comes from your own server, goes to the code host and not to muxr.app, and carries only a <code>muxrd/&lt;version&gt;</code> user agent. Nothing is downloaded or installed. To turn it off, set <code>update_check = false</code> in the config file or set the environment variable <code>MUXRD_UPDATE_CHECK</code> to <code>off</code>. <a href="/advanced.html#update-check">Advanced setup</a></p>
     </div>
 
     <div class="faq-item">
