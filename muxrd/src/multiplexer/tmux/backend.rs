@@ -1,24 +1,64 @@
-//! The tmux [`MuxBackend`]: construction, identity and the not-yet-implemented
-//! operation surface that later work fills in.
+//! The tmux [`MuxBackend`]: every trait operation over the command runner, the
+//! layout functions and the pty attach.
+//!
+//! # Addressing
+//!
+//! tmux pane (`%N`) and window (`@N`) ids are unique across the whole server,
+//! so an id alone would reach a pane of any session. Every pane and tab
+//! operation therefore first reads the named session's panes or windows and
+//! refuses an id that session does not hold, matching the session-scoped ids of
+//! the other backends. The routed controls of an attach check their ids the
+//! same way against the attached session. A read that fails because the
+//! session is gone answers a typed [`UnknownSession`].
+//!
+//! # Names
+//!
+//! tmux expands formats in window names and pane titles it is given, so every
+//! client-supplied tab or pane name is passed with `#` doubled and reaches
+//! tmux as literal text.
+//!
+//! # Focus and zoom
+//!
+//! tmux focus (current window, active pane) and zoom belong to the session, so
+//! a focus change or zoom toggle moves every client attached to it.
+//!
+//! # Agents
+//!
+//! The watcher writes per-pane agent rows into the [`AgentState`] this backend
+//! owns; [`MuxBackend::query_layout`] stamps them onto panes as marks and
+//! [`MuxBackend::list_agents`] joins them against the live pane list.
+//!
+//! Every operation is blocking and runs on the caller's thread.
 
-use std::sync::Arc;
-use std::time::Duration;
+use std::collections::HashSet;
+use std::sync::{Arc, Mutex, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, anyhow, bail};
 
 use super::agent_state::AgentState;
+use super::attach::{self, AttachControl};
+use super::commands::{PaneRow, Tmux, WindowRow};
+use super::layout::{self, PaneIn, WindowIn};
 use super::paths::{TmuxSocket, TmuxVersion, tmux_bin, tmux_version};
 use crate::multiplexer::types::{
-    ActionAck, LayoutSnapshot, PaneRef, ResizeDir, ResizeKind, ScrollDir,
+    ActionAck, AgentSnapshot, LayoutSnapshot, PaneFullscreenContext, PaneRef, ResizeDir,
+    ResizeKind, ScrollDir, UnknownSession, sort_agents,
 };
 use crate::multiplexer::{DualHandle, MuxBackend};
+
+/// `info` of a create that was given a layout.
+const LAYOUT_IGNORED: &str = "layout ignored: tmux has no layout files";
+/// Distinct unaddressable session names remembered for log de-duplication.
+const UNADDRESSABLE_LOG_CAP: usize = 256;
 
 /// The tmux-backed [`MuxBackend`].
 #[derive(Debug)]
 pub struct TmuxBackend {
-    socket: TmuxSocket,
-    version: TmuxVersion,
+    tmux: Tmux,
     agents: Arc<AgentState>,
+    /// Session names already logged as unaddressable.
+    unaddressable_logged: Mutex<HashSet<String>>,
 }
 
 impl TmuxBackend {
@@ -39,11 +79,16 @@ impl TmuxBackend {
                 bin.to_string_lossy()
             );
         }
-        Ok(Self {
-            socket,
-            version,
+        Ok(Self::with_runner(Tmux::new(socket, version)))
+    }
+
+    /// A backend over an already-built runner, with empty agent state.
+    fn with_runner(tmux: Tmux) -> Self {
+        Self {
+            tmux,
             agents: Arc::new(AgentState::new()),
-        })
+            unaddressable_logged: Mutex::new(HashSet::new()),
+        }
     }
 
     /// The shared per-pane agent state.
@@ -53,144 +98,608 @@ impl TmuxBackend {
 
     /// The tmux server socket this backend drives.
     pub fn socket(&self) -> &TmuxSocket {
-        &self.socket
+        self.tmux.socket()
+    }
+
+    /// The tmux version this backend was built for.
+    pub fn version(&self) -> &TmuxVersion {
+        self.tmux.version()
+    }
+
+    /// Whether `name` can be addressed by the routing layer; logs a rejected
+    /// name once.
+    fn addressable(&self, name: &str) -> bool {
+        let Err(why) = crate::ipc::validate_session_name(name) else {
+            return true;
+        };
+        let mut logged = self
+            .unaddressable_logged
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if !logged.contains(name) {
+            if logged.len() >= UNADDRESSABLE_LOG_CAP {
+                logged.clear();
+            }
+            logged.insert(name.to_owned());
+            log::debug!("tmux: omitting session {name:?} from listings: {why}");
+        }
+        false
+    }
+
+    /// The row of terminal `pane` in `session`, or the refusal to answer with.
+    fn pane_row(
+        &self,
+        session: &str,
+        pane: PaneRef,
+    ) -> Result<std::result::Result<(PaneRow, Vec<PaneRow>), ActionAck>> {
+        if pane.is_plugin {
+            return Ok(Err(refused(format!(
+                "tmux has no plugin panes (pane {})",
+                pane.id
+            ))));
+        }
+        let panes = read_session(&self.tmux, session, |t| t.list_panes(session))?;
+        match panes.iter().find(|p| p.id == pane.id).cloned() {
+            Some(row) => Ok(Ok((row, panes))),
+            None => Ok(Err(refused(format!(
+                "pane {} is not in session '{session}'",
+                pane.id
+            )))),
+        }
+    }
+
+    /// The window id `tab_id` names in `session`, or the refusal to answer with.
+    fn window_id(&self, session: &str, tab_id: u64) -> Result<std::result::Result<u32, ActionAck>> {
+        let not_here = || refused(format!("tab {tab_id} is not in session '{session}'"));
+        let Ok(id) = u32::try_from(tab_id) else {
+            return Ok(Err(not_here()));
+        };
+        let windows = read_session(&self.tmux, session, |t| t.list_windows(session))?;
+        Ok(if windows.iter().any(|w| w.id == id) {
+            Ok(id)
+        } else {
+            Err(not_here())
+        })
     }
 }
 
-fn not_implemented(op: &str) -> ActionAck {
+/// Unwrap a lookup, returning its refusal from the enclosing operation.
+macro_rules! found {
+    ($lookup:expr) => {
+        match $lookup? {
+            Ok(v) => v,
+            Err(ack) => return Ok(ack),
+        }
+    };
+}
+
+fn refused(error: String) -> ActionAck {
     ActionAck {
         ok: false,
-        error: Some(format!("tmux backend: not yet implemented ({op})")),
+        error: Some(error),
         info: None,
     }
 }
 
+/// Run a session-scoped read; when it fails and the session does not exist,
+/// answer a typed [`UnknownSession`] instead of the raw tmux error.
+fn read_session<T>(tmux: &Tmux, session: &str, read: impl FnOnce(&Tmux) -> Result<T>) -> Result<T> {
+    match read(tmux) {
+        Ok(v) => Ok(v),
+        Err(e) => match tmux.has_session(session) {
+            Ok(ack) if !ack.ok => Err(anyhow::Error::new(UnknownSession::new(session))),
+            _ => Err(e),
+        },
+    }
+}
+
+fn window_in(w: &WindowRow) -> WindowIn {
+    WindowIn {
+        id: w.id,
+        index: w.index,
+        name: w.name.clone(),
+        active: w.active,
+        bell: w.bell,
+        zoomed: w.zoomed,
+        width: w.width,
+        height: w.height,
+    }
+}
+
+fn pane_in(p: &PaneRow) -> PaneIn {
+    PaneIn {
+        id: p.id,
+        window_id: p.window_id,
+        active: p.active,
+        title: p.title.clone(),
+        current_command: p.current_command.clone(),
+        current_path: p.current_path.clone(),
+        dead: p.dead,
+        left: p.left,
+        top: p.top,
+        width: p.width,
+        height: p.height,
+        floating: p.floating,
+        z: p.z,
+    }
+}
+
+/// Windows and panes of `session` in the layout module's input form.
+fn read_layout_rows(tmux: &Tmux, session: &str) -> Result<(Vec<WindowIn>, Vec<PaneIn>)> {
+    let (windows, panes) = read_session(tmux, session, |t| {
+        Ok((t.list_windows(session)?, t.list_panes(session)?))
+    })?;
+    Ok((
+        windows.iter().map(window_in).collect(),
+        panes.iter().map(pane_in).collect(),
+    ))
+}
+
+/// The neutral layout of `session` with every pane's agent mark stamped.
+fn layout_of(tmux: &Tmux, agents: &AgentState, session: &str) -> Result<LayoutSnapshot> {
+    let (windows, panes) = read_layout_rows(tmux, session)?;
+    let mut snapshot = layout::snapshot(&windows, &panes);
+    for pane in snapshot.tabs.iter_mut().flat_map(|t| t.panes.iter_mut()) {
+        pane.agent = agents.mark(pane.id);
+    }
+    Ok(snapshot)
+}
+
+/// Seconds since the Unix epoch.
+fn now_unix() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
+/// Escape a client-supplied name for a tmux argument that tmux expands as a
+/// format (`rename-window`, `new-window -n`, `select-pane -T`): `##` is a
+/// literal `#`, so nothing in the name is interpreted.
+fn literal(name: &str) -> String {
+    name.replace('#', "##")
+}
+
+/// Every pane id on the server, or `None` when that cannot be read reliably.
+fn server_pane_ids(tmux: &Tmux) -> Option<HashSet<u32>> {
+    let out = tmux
+        .run(&["list-panes", "-a", "-F", "#{pane_id}"])
+        .ok()
+        .filter(|o| o.status.success())?;
+    let ids: HashSet<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('%')?.parse().ok())
+        .collect();
+    // A live server holding the session being read has at least one pane.
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The routed attach controls of one session's attach, over the runner.
+///
+/// Pane and window ids are server-wide, so every control first checks that
+/// the id belongs to this session and refuses one that does not.
+struct Control {
+    tmux: Tmux,
+    agents: Arc<AgentState>,
+    session: String,
+}
+
+/// An `Ok` ack or its error.
+fn ack_result(op: &str, ack: ActionAck) -> Result<()> {
+    if ack.ok {
+        Ok(())
+    } else {
+        bail!(
+            "tmux {op}: {}",
+            ack.error.as_deref().unwrap_or("command failed")
+        )
+    }
+}
+
+impl Control {
+    /// The window holding `pane` in this session, and the pane's row.
+    fn pane_and_window(&self, pane: u32) -> Result<(PaneRow, WindowRow)> {
+        let session = self.session.as_str();
+        let (windows, panes) = read_session(&self.tmux, session, |t| {
+            Ok((t.list_windows(session)?, t.list_panes(session)?))
+        })?;
+        let row = panes
+            .into_iter()
+            .find(|p| p.id == pane)
+            .ok_or_else(|| anyhow!("pane {pane} is not in session '{session}'"))?;
+        let window = windows
+            .into_iter()
+            .find(|w| w.id == row.window_id)
+            .ok_or_else(|| anyhow!("pane {pane} has no window in session '{session}'"))?;
+        Ok((row, window))
+    }
+}
+
+impl AttachControl for Control {
+    fn select_window(&self, window: u32) -> Result<()> {
+        let session = self.session.as_str();
+        let windows = read_session(&self.tmux, session, |t| t.list_windows(session))?;
+        if !windows.iter().any(|w| w.id == window) {
+            bail!("tab {window} is not in session '{session}'");
+        }
+        ack_result("select-window", self.tmux.select_window(window)?)
+    }
+
+    fn select_pane(&self, pane: u32) -> Result<()> {
+        // `select-pane` alone does not change the current window, so a pane in
+        // another window is reached by selecting that window first.
+        let (row, window) = self.pane_and_window(pane)?;
+        if !window.active {
+            ack_result("select-window", self.tmux.select_window(window.id)?)?;
+        }
+        ack_result("select-pane", self.tmux.select_pane(row.id)?)
+    }
+
+    fn zoom_toggle(&self, pane: u32) -> Result<()> {
+        // Zooming a pane makes it its window's active pane but leaves the
+        // current window alone; entering zoom on a pane of another window
+        // selects that window first, so the client lands on the zoomed pane.
+        // Leaving zoom moves nothing.
+        let (row, window) = self.pane_and_window(pane)?;
+        if !window.zoomed && !window.active {
+            ack_result("select-window", self.tmux.select_window(window.id)?)?;
+        }
+        ack_result("resize-pane -Z", self.tmux.zoom_toggle(row.id)?)
+    }
+
+    fn layout(&self, session: &str) -> Result<LayoutSnapshot> {
+        if session != self.session {
+            bail!(
+                "tmux attach of '{}' cannot read session '{session}'",
+                self.session
+            );
+        }
+        layout_of(&self.tmux, &self.agents, session)
+    }
+}
+
 impl MuxBackend for TmuxBackend {
+    // ── Session lifecycle ───────────────────────────────────────────────────
+
     fn list_sessions(&self) -> Result<Vec<(String, Duration)>> {
-        Ok(Vec::new())
+        let now = now_unix();
+        Ok(self
+            .tmux
+            .list_sessions()?
+            .into_iter()
+            .filter(|s| self.addressable(&s.name))
+            .map(|s| {
+                let age = Duration::from_secs(now.saturating_sub(s.created_unix));
+                (s.name, age)
+            })
+            .collect())
     }
 
     fn list_sessions_with_resurrectables(&self) -> Result<Vec<(String, u64, bool)>> {
-        Ok(Vec::new())
+        // tmux keeps no record of exited sessions.
+        Ok(self
+            .list_sessions()?
+            .into_iter()
+            .map(|(name, age)| (name, age.as_secs(), false))
+            .collect())
     }
 
     fn validate_session_name(&self, name: &str) -> std::result::Result<(), String> {
         crate::ipc::validate_session_name(name)
     }
 
-    fn create_session(&self, _name: &str, _layout: Option<String>) -> Result<ActionAck> {
-        Ok(not_implemented("create_session"))
+    fn create_session(&self, name: &str, layout: Option<String>) -> Result<ActionAck> {
+        crate::ipc::validate_session_name(name).map_err(|e| anyhow!(e))?;
+        let mut ack = self.tmux.new_session(name)?;
+        if ack.ok && layout.is_some_and(|l| !l.is_empty()) {
+            ack.info = Some(LAYOUT_IGNORED.to_owned());
+        }
+        Ok(ack)
     }
 
-    fn kill_session(&self, _session: &str) -> Result<ActionAck> {
-        Ok(not_implemented("kill_session"))
+    fn kill_session(&self, session: &str) -> Result<ActionAck> {
+        let ack = self.tmux.kill_session(session)?;
+        if ack.ok {
+            self.agents.remove_session(session);
+        }
+        Ok(ack)
     }
 
-    fn rename_session(&self, _session: &str, _new_name: String) -> Result<ActionAck> {
-        Ok(not_implemented("rename_session"))
+    fn rename_session(&self, session: &str, new_name: String) -> Result<ActionAck> {
+        if let Err(why) = crate::ipc::validate_session_name(&new_name) {
+            return Ok(refused(why));
+        }
+        self.tmux.rename_session(session, &new_name)
     }
 
-    fn write_to_pane(&self, _session: &str, _pane: PaneRef, _bytes: Vec<u8>) -> Result<ActionAck> {
-        Ok(not_implemented("write_to_pane"))
+    // ── Ephemeral control actions ───────────────────────────────────────────
+
+    fn write_to_pane(&self, session: &str, pane: PaneRef, bytes: Vec<u8>) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        self.tmux.send_keys_hex(row.id, &bytes)
     }
 
-    fn focus_pane(&self, _session: &str, _pane: PaneRef) -> Result<ActionAck> {
-        Ok(not_implemented("focus_pane"))
+    fn focus_pane(&self, session: &str, pane: PaneRef) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        let ack = self.tmux.select_window(row.window_id)?;
+        if !ack.ok {
+            return Ok(ack);
+        }
+        self.tmux.select_pane(row.id)
     }
 
-    fn close_pane(&self, _session: &str, _pane: PaneRef) -> Result<ActionAck> {
-        Ok(not_implemented("close_pane"))
+    fn close_pane(&self, session: &str, pane: PaneRef) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        let ack = self.tmux.kill_pane(row.id)?;
+        if ack.ok {
+            self.agents.remove_pane(row.id);
+        }
+        Ok(ack)
     }
 
-    fn new_pane(
-        &self,
-        _session: &str,
-        _floating: bool,
-        _name: Option<String>,
-    ) -> Result<ActionAck> {
-        Ok(not_implemented("new_pane"))
+    fn new_pane(&self, session: &str, floating: bool, name: Option<String>) -> Result<ActionAck> {
+        let ack = if floating {
+            self.tmux.new_floating_pane(session)?
+        } else {
+            self.tmux.split_window(session)?
+        };
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return Ok(ack);
+        };
+        if !ack.ok {
+            return Ok(ack);
+        }
+        let Some(id) = ack.info.as_deref().and_then(|i| i.parse::<u32>().ok()) else {
+            return Ok(ActionAck {
+                ok: false,
+                error: Some(format!(
+                    "created a pane but tmux reported no pane id, so it was not named {name:?}"
+                )),
+                info: ack.info,
+            });
+        };
+        let titled = self.tmux.set_pane_title(id, &literal(&name))?;
+        if titled.ok {
+            return Ok(ack);
+        }
+        Ok(ActionAck {
+            ok: false,
+            error: Some(format!(
+                "created pane {id} but could not name it: {}",
+                titled.error.as_deref().unwrap_or("select-pane -T failed")
+            )),
+            info: ack.info,
+        })
     }
 
-    fn rename_pane(&self, _session: &str, _pane: PaneRef, _name: String) -> Result<ActionAck> {
-        Ok(not_implemented("rename_pane"))
+    fn rename_pane(&self, session: &str, pane: PaneRef, name: String) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        self.tmux.set_pane_title(row.id, &literal(&name))
     }
 
     fn resize_pane(
         &self,
-        _session: &str,
-        _pane: PaneRef,
-        _kind: ResizeKind,
-        _dir: Option<ResizeDir>,
+        session: &str,
+        pane: PaneRef,
+        kind: ResizeKind,
+        dir: Option<ResizeDir>,
     ) -> Result<ActionAck> {
-        Ok(not_implemented("resize_pane"))
+        let (row, _) = found!(self.pane_row(session, pane));
+        self.tmux.resize_pane(row.id, kind, dir)
     }
 
-    fn toggle_pane_floating(&self, _session: &str, _pane: PaneRef) -> Result<ActionAck> {
-        Ok(not_implemented("toggle_pane_floating"))
+    fn toggle_pane_floating(&self, session: &str, pane: PaneRef) -> Result<ActionAck> {
+        let (row, panes) = found!(self.pane_row(session, pane));
+        if !row.floating {
+            return self.tmux.float_pane(row.id);
+        }
+        let onto = panes
+            .iter()
+            .filter(|p| p.window_id == row.window_id && !p.floating && p.id != row.id)
+            .min_by_key(|p| (p.index, p.id));
+        match onto {
+            Some(tiled) => self.tmux.tile_pane(row.id, tiled.id),
+            None => Ok(refused(format!(
+                "pane {} has no tiled pane in its window to join",
+                row.id
+            ))),
+        }
     }
 
-    fn toggle_pane_fullscreen(&self, _session: &str, _pane: PaneRef) -> Result<ActionAck> {
-        Ok(not_implemented("toggle_pane_fullscreen"))
+    fn toggle_pane_fullscreen(&self, session: &str, pane: PaneRef) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        self.tmux.zoom_toggle(row.id)
     }
 
-    fn scroll_pane(&self, _session: &str, _pane: PaneRef, _dir: ScrollDir) -> Result<ActionAck> {
-        Ok(not_implemented("scroll_pane"))
+    fn scroll_pane(&self, session: &str, pane: PaneRef, dir: ScrollDir) -> Result<ActionAck> {
+        let (row, _) = found!(self.pane_row(session, pane));
+        self.tmux.scroll(row.id, dir)
     }
 
-    fn new_tab(&self, _session: &str, _name: Option<String>) -> Result<ActionAck> {
-        Ok(not_implemented("new_tab"))
+    fn new_tab(&self, session: &str, name: Option<String>) -> Result<ActionAck> {
+        let name = name.map(|n| literal(&n));
+        self.tmux.new_window(session, name.as_deref())
     }
 
-    fn close_tab(&self, _session: &str, _tab_id: u64) -> Result<ActionAck> {
-        Ok(not_implemented("close_tab"))
+    fn close_tab(&self, session: &str, tab_id: u64) -> Result<ActionAck> {
+        let window = found!(self.window_id(session, tab_id));
+        self.tmux.kill_window(window)
     }
 
-    fn go_to_tab(&self, _session: &str, _tab_id: u64) -> Result<ActionAck> {
-        Ok(not_implemented("go_to_tab"))
+    fn go_to_tab(&self, session: &str, tab_id: u64) -> Result<ActionAck> {
+        let window = found!(self.window_id(session, tab_id));
+        self.tmux.select_window(window)
     }
 
-    fn rename_tab(&self, _session: &str, _tab_id: u64, _name: String) -> Result<ActionAck> {
-        Ok(not_implemented("rename_tab"))
+    fn rename_tab(&self, session: &str, tab_id: u64, name: String) -> Result<ActionAck> {
+        let window = found!(self.window_id(session, tab_id));
+        self.tmux.rename_window(window, &literal(&name))
     }
 
-    fn query_layout(&self, _session: &str) -> Result<LayoutSnapshot> {
-        Ok(LayoutSnapshot::default())
+    // ── Agents ──────────────────────────────────────────────────────────────
+
+    fn supports_agents(&self) -> bool {
+        true
     }
 
-    fn query_session_size(&self, _session: &str) -> Result<(u16, u16)> {
-        bail!("tmux backend: not yet implemented (query_session_size)")
+    fn list_agents(&self, session: &str) -> Result<Vec<AgentSnapshot>> {
+        // Rows first, panes second: a row's pane existed before the row was
+        // written, so a pane missing from the later read has really gone.
+        let rows = self.agents.rows_for_session(session);
+        let (windows, panes) = read_session(&self.tmux, session, |t| {
+            Ok((t.list_windows(session)?, t.list_panes(session)?))
+        })?;
+        // A row whose pane is not in this session is skipped. It is dropped
+        // only when its pane is gone from the whole server: after a rename the
+        // pane lives on under another session name until the watcher re-keys
+        // its row. When the server-wide read fails, nothing is dropped.
+        let missing: Vec<u32> = rows
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !panes.iter().any(|p| p.id == *id))
+            .collect();
+        if !missing.is_empty()
+            && let Some(alive) = server_pane_ids(&self.tmux)
+        {
+            for id in missing.iter().filter(|id| !alive.contains(id)) {
+                self.agents.remove_pane(*id);
+            }
+        }
+        let mut agents = Vec::with_capacity(rows.len());
+        for (id, row) in rows {
+            let Some(pane) = panes.iter().find(|p| p.id == id) else {
+                continue;
+            };
+            let window = windows.iter().find(|w| w.id == pane.window_id);
+            agents.push(AgentSnapshot {
+                pane: id,
+                tab_id: u64::from(pane.window_id),
+                space_id: String::new(),
+                space_name: String::new(),
+                tab_name: window.map_or(row.tab_name, |w| w.name.clone()),
+                kind: row.kind,
+                name: None,
+                display_kind: row.display_kind,
+                status: row.status,
+                title: row.title.or_else(|| non_empty(&pane.title)),
+                summary: row.summary,
+                cwd: non_empty(&pane.current_path),
+                focused: pane.active && window.is_some_and(|w| w.active),
+                change_seq: row.change_seq,
+                completion_seq: row.completion_seq,
+            });
+        }
+        sort_agents(&mut agents);
+        Ok(agents)
+    }
+
+    // ── Read-only queries ───────────────────────────────────────────────────
+
+    fn query_layout(&self, session: &str) -> Result<LayoutSnapshot> {
+        layout_of(&self.tmux, &self.agents, session)
+    }
+
+    fn query_session_size(&self, session: &str) -> Result<(u16, u16)> {
+        let windows = read_session(&self.tmux, session, |t| t.list_windows(session))?;
+        let windows: Vec<WindowIn> = windows.iter().map(window_in).collect();
+        layout::session_size(&windows)
+            .ok_or_else(|| anyhow!("tmux session '{session}' has no windows"))
     }
 
     fn pane_is_floating_with_visibility(
         &self,
-        _session: &str,
-        _pane: PaneRef,
+        session: &str,
+        pane: PaneRef,
     ) -> Result<(bool, bool, Option<PaneRef>)> {
-        Ok((false, false, None))
+        if pane.is_plugin {
+            return Ok((false, false, None));
+        }
+        let panes = read_session(&self.tmux, session, |t| t.list_panes(session))?;
+        let panes: Vec<PaneIn> = panes.iter().map(pane_in).collect();
+        Ok(layout::floating_visibility(&panes, pane.id))
     }
+
+    fn pane_fullscreen_context(
+        &self,
+        session: &str,
+        pane: PaneRef,
+        relay_focus: Option<PaneRef>,
+    ) -> Result<PaneFullscreenContext> {
+        // One windows + panes read places both the target and the relay's
+        // tracked focus in their windows (tabs), so the relay's tab gate can
+        // refuse an exit whose target window is not the one its focus is in
+        // instead of zooming the window its stale focus points at.
+        if pane.is_plugin {
+            return Ok(PaneFullscreenContext::not_found());
+        }
+        let (windows, panes) = read_layout_rows(&self.tmux, session)?;
+        let window_of = |p: PaneRef| {
+            (!p.is_plugin)
+                .then(|| layout::window_of(&panes, p.id))
+                .flatten()
+                .and_then(|id| windows.iter().find(|w| w.id == id))
+        };
+        let Some(window) = window_of(pane) else {
+            return Ok(PaneFullscreenContext::not_found());
+        };
+        let relay_focus_tab_id = relay_focus.and_then(window_of).map(|w| u64::from(w.id));
+        let (is_floating, floating_visible, focused_floating) =
+            layout::floating_visibility(&panes, pane.id);
+        Ok(PaneFullscreenContext {
+            exists: true,
+            is_floating,
+            floating_visible,
+            focused_floating,
+            tab_fullscreen: window.zoomed,
+            tab_id: Some(u64::from(window.id)),
+            tab_active: window.active,
+            relay_focus_tab_id,
+        })
+    }
+
+    // ── Attach (the relay seam) ─────────────────────────────────────────────
 
     fn open_attach(
         &self,
-        _session: &str,
-        _rows: u16,
-        _cols: u16,
-        _read_only: bool,
+        session: &str,
+        rows: u16,
+        cols: u16,
+        read_only: bool,
     ) -> Result<DualHandle> {
-        bail!("tmux backend: not yet implemented (open_attach)")
+        crate::ipc::validate_session_name(session).map_err(|e| anyhow!(e))?;
+        if !self.tmux.has_session(session)?.ok {
+            return Err(anyhow::Error::new(UnknownSession::new(session)));
+        }
+        let ctl: Arc<dyn AttachControl> = Arc::new(Control {
+            tmux: self.tmux.clone(),
+            agents: Arc::clone(&self.agents),
+            session: session.to_owned(),
+        });
+        attach::open(self.tmux.socket(), session, rows, cols, read_only, ctl)
     }
 
+    // ── Backend identity ────────────────────────────────────────────────────
+
     fn backend_version(&self) -> String {
-        format!("tmux {}", self.version)
+        format!("tmux {}", self.tmux.version())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
     use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
+    use crate::multiplexer::tmux::agent_state::AgentRow;
     use crate::multiplexer::tmux::paths::TMUX_BIN_ENV;
+    use crate::multiplexer::types::{AgentMark, AgentStatus};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
@@ -208,7 +717,7 @@ mod tests {
         out
     }
 
-    fn fake_tmux(tag: &str, printed: &str) -> std::path::PathBuf {
+    fn fake_tmux(tag: &str, printed: &str) -> PathBuf {
         let dir =
             std::env::temp_dir().join(format!("muxrd-tmux-fake-{}-{tag}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -216,16 +725,6 @@ mod tests {
         std::fs::write(&path, format!("#!/bin/sh\necho '{printed}'\n")).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
-    }
-
-    fn backend() -> TmuxBackend {
-        TmuxBackend {
-            socket: TmuxSocket {
-                path: "/nonexistent/tmux.sock".into(),
-            },
-            version: TmuxVersion::parse("tmux 3.7c").unwrap(),
-            agents: Arc::new(AgentState::new()),
-        }
     }
 
     #[test]
@@ -255,30 +754,959 @@ mod tests {
             with_bin(fake.as_os_str(), TmuxBackend::from_env).expect("tmux 3.5a meets the floor");
         let _ = std::fs::remove_dir_all(fake.parent().unwrap());
         assert_eq!(backend.backend_version(), "tmux 3.5a");
+        assert_eq!(backend.version().to_string(), "3.5a");
+    }
+
+    // ── Hermetic fake tmux ──────────────────────────────────────────────────
+
+    static CASE: AtomicUsize = AtomicUsize::new(0);
+
+    /// A fake `tmux` that records each argv (after `-S <socket>`) and answers
+    /// per subcommand from `out.<cmd>`, `err.<cmd>` and `code.<cmd>` in its
+    /// own directory, which it finds from the socket path.
+    struct Fake {
+        dir: PathBuf,
+        backend: TmuxBackend,
+    }
+
+    const FAKE_SCRIPT: &str = "#!/bin/sh\n\
+        d=$(dirname \"$2\")\n\
+        [ \"$3\" = __warm ] && exit 0\n\
+        shift 2\n\
+        k=\"$1\"; [ \"$2\" = -a ] && k=\"$1-a\"\n\
+        printf '%s\\n' \"$@\" >> \"$d/log\"\n\
+        printf '==\\n' >> \"$d/log\"\n\
+        [ -f \"$d/out.$k\" ] && cat \"$d/out.$k\"\n\
+        [ -f \"$d/err.$k\" ] && cat \"$d/err.$k\" >&2\n\
+        if [ -f \"$d/code.$k\" ]; then exit \"$(cat \"$d/code.$k\")\"; fi\n\
+        exit 0\n";
+
+    /// Run the fresh script once until exec stops failing with ETXTBSY: a
+    /// process forked elsewhere while it was being written may still hold it
+    /// open for writing.
+    fn warm_up(script: &Path, socket: &Path) {
+        for _ in 0..200 {
+            match std::process::Command::new(script)
+                .arg("-S")
+                .arg(socket)
+                .arg("__warm")
+                .status()
+            {
+                Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                _ => return,
+            }
+        }
+    }
+
+    impl Fake {
+        fn new(version: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!(
+                "muxrd-tmux-backend-{}-{}",
+                std::process::id(),
+                CASE.fetch_add(1, Ordering::Relaxed)
+            ));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            let script = dir.join("tmux");
+            std::fs::write(&script, FAKE_SCRIPT).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let socket = dir.join("sock");
+            warm_up(&script, &socket);
+            let tmux = Tmux::with_bin(
+                TmuxSocket { path: socket },
+                TmuxVersion::parse(&format!("tmux {version}")).unwrap(),
+                script.into_os_string(),
+            );
+            Self {
+                dir,
+                backend: TmuxBackend::with_runner(tmux),
+            }
+        }
+
+        /// Answer subcommand `cmd` with `stdout`.
+        fn out(&self, cmd: &str, stdout: &str) {
+            std::fs::write(self.dir.join(format!("out.{cmd}")), stdout).unwrap();
+        }
+
+        /// Fail subcommand `cmd` with `stderr` and exit code 1.
+        fn fail(&self, cmd: &str, stderr: &str) {
+            std::fs::write(self.dir.join(format!("err.{cmd}")), stderr).unwrap();
+            std::fs::write(self.dir.join(format!("code.{cmd}")), "1").unwrap();
+        }
+
+        fn calls(&self) -> Vec<Vec<String>> {
+            let log = std::fs::read_to_string(self.dir.join("log")).unwrap_or_default();
+            let mut calls = Vec::new();
+            let mut cur = Vec::new();
+            for line in log.lines() {
+                if line == "==" {
+                    calls.push(std::mem::take(&mut cur));
+                } else {
+                    cur.push(line.to_owned());
+                }
+            }
+            calls
+        }
+
+        /// Recorded subcommand names, in order.
+        fn commands(&self) -> Vec<String> {
+            self.calls().into_iter().map(|c| c[0].clone()).collect()
+        }
+
+        /// The recorded calls of subcommand `cmd`.
+        fn calls_of(&self, cmd: &str) -> Vec<Vec<String>> {
+            self.calls().into_iter().filter(|c| c[0] == cmd).collect()
+        }
+    }
+
+    impl Drop for Fake {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    fn v(parts: &[&str]) -> Vec<String> {
+        parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    fn session_rec(id: u32, created: u64, name: &str) -> String {
+        format!("@@\nid=${id}\ncreated={created}\nattached=0\nwindows=1\nname={name}\n")
+    }
+
+    fn window_rec(id: u32, index: u32, active: bool, zoomed: bool, name: &str) -> String {
+        format!(
+            "@@\nid=@{id}\nindex={index}\nactive={}\nbell=0\nzoomed={}\nwidth=80\nheight=24\n\
+             panes=1\nname={name}\n",
+            u8::from(active),
+            u8::from(zoomed)
+        )
+    }
+
+    fn pane_rec(id: u32, window: u32, index: u32, active: bool, floating: bool) -> String {
+        format!(
+            "@@\nid=%{id}\nwindow=@{window}\nindex={index}\nactive={}\ndead=0\nleft=0\ntop=0\n\
+             width=80\nheight=24\nfloating={}\nz=0\nrunning=\npid=100\ncommand=bash\n\
+             path=/home/p{id}\ntitle=t{id}\n",
+            u8::from(active),
+            u8::from(floating)
+        )
+    }
+
+    fn agent_row(session: &str, tab_name: &str) -> AgentRow {
+        AgentRow {
+            status: AgentStatus::Working,
+            kind: "claude".into(),
+            display_kind: Some("Claude".into()),
+            title: None,
+            summary: Some("thinking".into()),
+            tab_id: 999,
+            tab_name: tab_name.into(),
+            change_seq: 0,
+            completion_seq: None,
+            last_output: None,
+            session: session.into(),
+        }
+    }
+
+    // ── Sessions ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn no_server_lists_no_sessions() {
+        let f = Fake::new("3.7c");
+        f.fail("list-sessions", "no server running on /tmp/tmux-1000/x\n");
+        assert!(f.backend.list_sessions().unwrap().is_empty());
+        assert!(
+            f.backend
+                .list_sessions_with_resurrectables()
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
-    fn reads_are_empty_and_mutations_are_not_implemented() {
-        let b = backend();
-        assert!(b.list_sessions().unwrap().is_empty());
-        assert!(b.list_sessions_with_resurrectables().unwrap().is_empty());
-        assert_eq!(b.query_layout("s").unwrap(), LayoutSnapshot::default());
-        assert_eq!(
-            b.pane_is_floating_with_visibility("s", PaneRef::terminal(1))
-                .unwrap(),
-            (false, false, None)
+    fn unaddressable_session_names_are_omitted() {
+        let f = Fake::new("3.7c");
+        let created = now_unix() - 30;
+        f.out(
+            "list-sessions",
+            &[
+                session_rec(1, created, "work"),
+                session_rec(2, created, "has.dot"),
+                session_rec(3, created, "a b"),
+                session_rec(4, created, "ok-2"),
+            ]
+            .concat(),
         );
-        let ack = b.kill_session("s").unwrap();
+        let listed = f.backend.list_sessions().unwrap();
+        let names: Vec<&str> = listed.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["work", "ok-2"]);
+        assert!(listed[0].1 >= Duration::from_secs(30));
+        assert!(listed[0].1 < Duration::from_secs(300));
+        let with = f.backend.list_sessions_with_resurrectables().unwrap();
+        assert_eq!(with.len(), 2);
+        assert_eq!(with[0].0, "work");
+        assert!(!with[0].2 && !with[1].2);
+        // Each rejected name is remembered once.
+        let logged = f.backend.unaddressable_logged.lock().unwrap();
+        assert_eq!(logged.len(), 2);
+        assert!(logged.contains("has.dot") && logged.contains("a b"));
+    }
+
+    #[test]
+    fn create_kill_and_rename_argv() {
+        let f = Fake::new("3.7c");
+        let plain = f.backend.create_session("s", None).unwrap();
+        assert!(plain.ok && plain.info.is_none());
+        let with_layout = f
+            .backend
+            .create_session("s", Some("dev.kdl".into()))
+            .unwrap();
+        assert_eq!(with_layout.info.as_deref(), Some(LAYOUT_IGNORED));
+        assert!(f.backend.create_session("../bad", None).is_err());
+        f.backend.kill_session("s").unwrap();
+        f.backend.rename_session("s", "t".into()).unwrap();
+        let bad = f.backend.rename_session("s", "no/slash".into()).unwrap();
+        assert!(!bad.ok);
+        let calls = f.calls();
+        assert_eq!(calls.len(), 4, "{calls:?}");
+        let new = v(&["new-session", "-d", "-s", "s", "-x", "80", "-y", "24"]);
+        assert_eq!(calls[0], new);
+        assert_eq!(calls[1], new);
+        assert_eq!(calls[2], v(&["kill-session", "-t", "=s"]));
+        assert_eq!(calls[3], v(&["rename-session", "-t", "=s", "--", "t"]));
+    }
+
+    #[test]
+    fn kill_session_drops_its_agent_rows() {
+        let f = Fake::new("3.7c");
+        let state = f.backend.agent_state();
+        state.set_pane(1, agent_row("s", "w"));
+        state.set_pane(2, agent_row("o", "w"));
+        assert!(f.backend.kill_session("s").unwrap().ok);
+        assert!(state.rows_for_session("s").is_empty());
+        assert_eq!(state.rows_for_session("o").len(), 1);
+    }
+
+    // ── Panes and tabs ──────────────────────────────────────────────────────
+
+    #[test]
+    fn new_pane_reports_the_id_and_names_it() {
+        let f = Fake::new("3.7c");
+        f.out("split-window", "%7\n");
+        let ack = f.backend.new_pane("s", false, Some("logs".into())).unwrap();
+        assert!(ack.ok, "{ack:?}");
+        assert_eq!(ack.info.as_deref(), Some("7"));
+        f.out("new-pane", "%8\n");
+        let ack = f.backend.new_pane("s", true, None).unwrap();
+        assert_eq!(ack.info.as_deref(), Some("8"));
+        let calls = f.calls();
+        assert_eq!(
+            calls,
+            vec![
+                v(&["split-window", "-t", "=s:", "-P", "-F", "#{pane_id}"]),
+                v(&["select-pane", "-t", "%7", "-T", "logs"]),
+                v(&["new-pane", "-t", "=s:", "-P", "-F", "#{pane_id}"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn floating_new_pane_below_3_7_fails_honestly() {
+        let f = Fake::new("3.5a");
+        let ack = f.backend.new_pane("s", true, Some("x".into())).unwrap();
         assert!(!ack.ok);
+        assert!(ack.error.unwrap().contains("3.7"));
+        assert!(f.calls().is_empty());
+    }
+
+    #[test]
+    fn new_tab_reports_the_window_id() {
+        let f = Fake::new("3.7c");
+        f.out("new-window", "@4\n");
+        let ack = f.backend.new_tab("s", Some("logs".into())).unwrap();
+        assert_eq!(ack.info.as_deref(), Some("4"));
         assert_eq!(
-            ack.error.as_deref(),
-            Some("tmux backend: not yet implemented (kill_session)")
+            f.calls()[0],
+            v(&[
+                "new-window",
+                "-t",
+                "=s:",
+                "-n",
+                "logs",
+                "-P",
+                "-F",
+                "#{window_id}"
+            ])
         );
-        assert!(ack.info.is_none());
-        assert!(b.query_session_size("s").is_err());
-        assert!(b.open_attach("s", 24, 80, false).is_err());
-        assert_eq!(b.backend_version(), "tmux 3.7c");
-        assert!(b.validate_session_name("good_name").is_ok());
-        assert!(b.validate_session_name("../bad").is_err());
+    }
+
+    #[test]
+    fn pane_ops_resolve_the_pane_in_the_session_first() {
+        let f = Fake::new("3.7c");
+        f.out("list-panes", &[pane_rec(3, 2, 0, true, false)].concat());
+        assert!(f.backend.focus_pane("s", PaneRef::terminal(3)).unwrap().ok);
+        assert!(
+            f.backend
+                .write_to_pane("s", PaneRef::terminal(3), b"hi".to_vec())
+                .unwrap()
+                .ok
+        );
+        assert!(
+            f.backend
+                .toggle_pane_fullscreen("s", PaneRef::terminal(3))
+                .unwrap()
+                .ok
+        );
+        let calls = f.calls();
+        assert_eq!(calls[0][..4], v(&["list-panes", "-s", "-t", "=s"])[..]);
+        assert_eq!(calls[1], v(&["select-window", "-t", "@2"]));
+        assert_eq!(calls[2], v(&["select-pane", "-t", "%3"]));
+        assert_eq!(calls[4], v(&["send-keys", "-t", "%3", "-H", "68", "69"]));
+        assert_eq!(calls[6], v(&["resize-pane", "-Z", "-t", "%3"]));
+
+        // A pane of another session, or a plugin pane, is refused untouched.
+        let before = f.calls().len();
+        let other = f.backend.close_pane("s", PaneRef::terminal(9)).unwrap();
+        assert!(!other.ok);
+        assert!(other.error.unwrap().contains("not in session 's'"));
+        let plugin = f.backend.focus_pane("s", PaneRef::plugin(3)).unwrap();
+        assert!(!plugin.ok);
+        assert_eq!(f.commands()[before..], ["list-panes"]);
+    }
+
+    #[test]
+    fn tab_ops_resolve_the_window_in_the_session_first() {
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(5, 0, true, false, "main"));
+        assert!(f.backend.go_to_tab("s", 5).unwrap().ok);
+        assert!(f.backend.rename_tab("s", 5, "x".into()).unwrap().ok);
+        assert!(f.backend.close_tab("s", 5).unwrap().ok);
+        assert!(!f.backend.close_tab("s", 6).unwrap().ok);
+        assert!(!f.backend.close_tab("s", u64::MAX).unwrap().ok);
+        let calls: Vec<Vec<String>> = f
+            .calls()
+            .into_iter()
+            .filter(|c| c[0] != "list-windows")
+            .collect();
+        assert_eq!(
+            calls,
+            vec![
+                v(&["select-window", "-t", "@5"]),
+                v(&["rename-window", "-t", "@5", "--", "x"]),
+                v(&["kill-window", "-t", "@5"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_missing_session_is_a_typed_unknown_session() {
+        let f = Fake::new("3.7c");
+        f.fail("list-panes", "can't find session: gone\n");
+        f.fail("has-session", "can't find session: gone\n");
+        let err = f
+            .backend
+            .focus_pane("gone", PaneRef::terminal(1))
+            .expect_err("missing session");
+        assert!(UnknownSession::in_chain(&err), "{err:#}");
+    }
+
+    fn toggle_floating_fake(version: &str) -> Fake {
+        let f = Fake::new(version);
+        // Window 1: tiled panes 2 (index 1) and 1 (index 0), floating pane 3.
+        // Window 4: one floating pane 6 with no tiled neighbour.
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(2, 1, 1, false, false),
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(3, 1, 2, false, true),
+                pane_rec(6, 4, 0, true, true),
+            ]
+            .concat(),
+        );
+        f
+    }
+
+    #[test]
+    fn toggle_floating_on_3_8_floats_or_tiles_onto_the_first_tiled_pane() {
+        let f = toggle_floating_fake("3.8");
+        assert!(
+            f.backend
+                .toggle_pane_floating("s", PaneRef::terminal(3))
+                .unwrap()
+                .ok
+        );
+        assert!(
+            f.backend
+                .toggle_pane_floating("s", PaneRef::terminal(2))
+                .unwrap()
+                .ok
+        );
+        let lonely = f
+            .backend
+            .toggle_pane_floating("s", PaneRef::terminal(6))
+            .unwrap();
+        assert!(!lonely.ok);
+        assert_eq!(
+            f.calls_of("join-pane"),
+            [v(&["join-pane", "-s", "%3", "-t", "%1"])]
+        );
+        assert_eq!(
+            f.calls_of("break-pane"),
+            [v(&["break-pane", "-W", "-s", "%2"])]
+        );
+    }
+
+    #[test]
+    fn toggle_floating_below_3_8_fails_honestly() {
+        for version in ["3.5a", "3.7c"] {
+            let f = toggle_floating_fake(version);
+            for pane in [3, 2] {
+                let ack = f
+                    .backend
+                    .toggle_pane_floating("s", PaneRef::terminal(pane))
+                    .unwrap();
+                assert!(!ack.ok, "{version} pane {pane}");
+                assert!(ack.error.unwrap().contains("3.8"), "{version}");
+            }
+            assert_eq!(f.commands(), ["list-panes", "list-panes"], "{version}");
+        }
+    }
+
+    // ── Layout, agents, fullscreen context ──────────────────────────────────
+
+    #[test]
+    fn query_layout_stamps_agent_marks() {
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(1, 0, true, false, "main"));
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(2, 1, 1, false, false),
+            ]
+            .concat(),
+        );
+        f.backend.agent_state().set_pane(2, agent_row("s", "main"));
+        let layout = f.backend.query_layout("s").unwrap();
+        let panes = &layout.tabs[0].panes;
+        assert_eq!(panes.len(), 2);
+        assert_eq!(panes[0].agent, None);
+        assert_eq!(
+            panes[1].agent,
+            Some(AgentMark {
+                kind: "claude".into(),
+                name: Some("Claude".into()),
+                status: AgentStatus::Working,
+            })
+        );
+        assert_eq!(layout.tabs[0].name, "main");
+        assert_eq!(f.backend.query_session_size("s").unwrap(), (24, 80));
+    }
+
+    #[test]
+    fn list_agents_filters_prunes_and_leaves_space_empty() {
+        let f = Fake::new("3.7c");
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, false, "main"),
+                window_rec(2, 1, false, false, "side"),
+            ]
+            .concat(),
+        );
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(3, 2, 0, true, false),
+            ]
+            .concat(),
+        );
+        let state = f.backend.agent_state();
+        state.set_pane(1, agent_row("s", "stale"));
+        state.set_pane(3, agent_row("s", "side"));
+        state.set_pane(5, agent_row("s", "main"));
+        state.set_pane(7, agent_row("other", "main"));
+        f.out("list-panes-a", "%1\n%3\n%7\n");
+        let agents = f.backend.list_agents("s").unwrap();
+        let ids: Vec<u32> = agents.iter().map(|a| a.pane).collect();
+        // Same status: the later change sorts first.
+        assert_eq!(ids, [3, 1]);
+        let a1 = agents.iter().find(|a| a.pane == 1).unwrap();
+        assert!(a1.space_id.is_empty() && a1.space_name.is_empty());
+        assert_eq!(a1.name, None);
+        assert_eq!(a1.tab_id, 1);
+        assert_eq!(a1.tab_name, "main");
+        assert_eq!(a1.cwd.as_deref(), Some("/home/p1"));
+        assert_eq!(a1.title.as_deref(), Some("t1"));
+        assert_eq!(a1.summary.as_deref(), Some("thinking"));
+        assert!(a1.focused);
+        // Pane 3 is active but in an inactive window.
+        assert!(!agents.iter().find(|a| a.pane == 3).unwrap().focused);
+        // The vanished pane's row is gone; the other session's row stays.
+        assert!(state.mark(5).is_none());
+        assert!(state.mark(7).is_some());
+        assert!(f.backend.supports_agents());
+        assert_eq!(
+            f.calls_of("list-panes").last().unwrap(),
+            &v(&["list-panes", "-a", "-F", "#{pane_id}"])
+        );
+    }
+
+    #[test]
+    fn list_agents_keeps_rows_whose_pane_lives_in_another_session() {
+        // Session `s` was renamed to `t` (its rows still say `s`) and a new
+        // session `s` holds only pane 8.
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(4, 0, true, false, "main"));
+        f.out("list-panes", &pane_rec(8, 4, 0, true, false));
+        let state = f.backend.agent_state();
+        state.set_pane(2, agent_row("s", "w"));
+        state.set_pane(5, agent_row("s", "w"));
+        state.set_pane(8, agent_row("s", "main"));
+        f.out("list-panes-a", "%2\n%8\n");
+        let agents = f.backend.list_agents("s").unwrap();
+        assert_eq!(agents.iter().map(|a| a.pane).collect::<Vec<_>>(), [8]);
+        // Pane 2 still exists (under `t`): skipped, not dropped. Pane 5 is gone.
+        assert!(state.mark(2).is_some());
+        assert!(state.mark(5).is_none());
+
+        // When the server-wide read fails, nothing is dropped.
+        state.set_pane(5, agent_row("s", "w"));
+        f.fail("list-panes-a", "server exited\n");
+        assert_eq!(f.backend.list_agents("s").unwrap().len(), 1);
+        assert!(state.mark(2).is_some() && state.mark(5).is_some());
+
+        // With every row in the session, no server-wide read happens at all.
+        state.remove_pane(2);
+        state.remove_pane(5);
+        let before = f.calls_of("list-panes").len();
+        f.backend.list_agents("s").unwrap();
+        assert_eq!(f.calls_of("list-panes").len(), before + 1);
+    }
+
+    #[test]
+    fn fullscreen_context_reads_the_holding_window() {
+        let f = Fake::new("3.7c");
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, true, "zoomed"),
+                window_rec(2, 1, false, false, "plain"),
+            ]
+            .concat(),
+        );
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(2, 2, 0, true, false),
+                pane_rec(4, 2, 1, false, true),
+            ]
+            .concat(),
+        );
+        let zoomed = f
+            .backend
+            .pane_fullscreen_context("s", PaneRef::terminal(1), Some(PaneRef::terminal(2)))
+            .unwrap();
+        assert!(zoomed.exists && zoomed.tab_fullscreen && zoomed.tab_active);
+        assert!(!zoomed.is_floating);
+        assert_eq!(zoomed.tab_id, Some(1));
+        assert_eq!(zoomed.relay_focus_tab_id, Some(2));
+
+        let plain = f
+            .backend
+            .pane_fullscreen_context("s", PaneRef::terminal(2), None)
+            .unwrap();
+        assert!(plain.exists && !plain.tab_fullscreen && !plain.tab_active);
+        assert_eq!((plain.tab_id, plain.relay_focus_tab_id), (Some(2), None));
+
+        // A relay focus that is gone, or a plugin ref, places no tab.
+        for focus in [PaneRef::terminal(99), PaneRef::plugin(1)] {
+            let ctx = f
+                .backend
+                .pane_fullscreen_context("s", PaneRef::terminal(1), Some(focus))
+                .unwrap();
+            assert_eq!((ctx.tab_id, ctx.relay_focus_tab_id), (Some(1), None));
+        }
+
+        let floating = f
+            .backend
+            .pane_fullscreen_context("s", PaneRef::terminal(4), None)
+            .unwrap();
+        assert!(floating.is_floating && floating.floating_visible);
+        assert_eq!(floating.focused_floating, None);
+
+        let gone = f
+            .backend
+            .pane_fullscreen_context("s", PaneRef::terminal(99), None)
+            .unwrap();
+        assert!(!gone.exists);
+        assert_eq!(
+            f.backend
+                .pane_is_floating_with_visibility("s", PaneRef::terminal(4))
+                .unwrap(),
+            (true, true, None)
+        );
+    }
+
+    #[test]
+    fn client_names_reach_tmux_as_literal_text() {
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(5, 0, true, false, "main"));
+        f.out("list-panes", &pane_rec(3, 5, 0, true, false));
+        f.out("split-window", "%7\n");
+        f.out("new-window", "@6\n");
+        f.backend.rename_tab("s", 5, "fix #S".into()).unwrap();
+        f.backend
+            .rename_pane("s", PaneRef::terminal(3), "#(touch /tmp/x)".into())
+            .unwrap();
+        f.backend.new_tab("s", Some("a ## b".into())).unwrap();
+        f.backend
+            .new_pane("s", false, Some("#{pane_id}".into()))
+            .unwrap();
+        assert_eq!(
+            f.calls_of("rename-window"),
+            [v(&["rename-window", "-t", "@5", "--", "fix ##S"])]
+        );
+        assert_eq!(
+            f.calls_of("select-pane"),
+            [
+                v(&["select-pane", "-t", "%3", "-T", "##(touch /tmp/x)"]),
+                v(&["select-pane", "-t", "%7", "-T", "##{pane_id}"]),
+            ]
+        );
+        assert_eq!(
+            f.calls_of("new-window")[0][3..5],
+            v(&["-n", "a #### b"])[..]
+        );
+        assert_eq!(literal("plain"), "plain");
+    }
+
+    fn control(f: &Fake, session: &str) -> Control {
+        Control {
+            tmux: f.backend.tmux.clone(),
+            agents: f.backend.agent_state(),
+            session: session.to_owned(),
+        }
+    }
+
+    /// The calls that act (everything but the `list-*` reads).
+    fn acting(calls: &[Vec<String>]) -> Vec<Vec<String>> {
+        calls
+            .iter()
+            .filter(|c| !c[0].starts_with("list-"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn attach_controls_refuse_ids_of_other_sessions() {
+        let f = Fake::new("3.7c");
+        // Session `s`: active window 1 (pane 1), inactive window 2 (pane 3).
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, false, "main"),
+                window_rec(2, 1, false, false, "side"),
+            ]
+            .concat(),
+        );
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(3, 2, 0, true, false),
+            ]
+            .concat(),
+        );
+        let ctl = control(&f, "s");
+        for err in [
+            ctl.select_pane(9).unwrap_err(),
+            ctl.zoom_toggle(9).unwrap_err(),
+            ctl.select_window(7).unwrap_err(),
+            ctl.layout("other").unwrap_err(),
+        ] {
+            assert!(format!("{err:#}").contains("'s'"), "{err:#}");
+        }
+        assert!(acting(&f.calls()).is_empty());
+
+        ctl.select_window(2).unwrap();
+        ctl.select_pane(1).unwrap();
+        ctl.select_pane(3).unwrap();
+        ctl.zoom_toggle(1).unwrap();
+        ctl.zoom_toggle(3).unwrap();
+        assert_eq!(
+            acting(&f.calls()),
+            vec![
+                v(&["select-window", "-t", "@2"]),
+                v(&["select-pane", "-t", "%1"]),
+                // A pane of another window: that window first.
+                v(&["select-window", "-t", "@2"]),
+                v(&["select-pane", "-t", "%3"]),
+                v(&["resize-pane", "-Z", "-t", "%1"]),
+                v(&["select-window", "-t", "@2"]),
+                v(&["resize-pane", "-Z", "-t", "%3"]),
+            ]
+        );
+        assert_eq!(ctl.layout("s").unwrap().tabs.len(), 2);
+    }
+
+    #[test]
+    fn leaving_zoom_moves_no_focus() {
+        let f = Fake::new("3.7c");
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, false, "main"),
+                window_rec(2, 1, false, true, "zoomed"),
+            ]
+            .concat(),
+        );
+        f.out("list-panes", &pane_rec(3, 2, 0, true, false));
+        control(&f, "s").zoom_toggle(3).unwrap();
+        assert_eq!(acting(&f.calls()), [v(&["resize-pane", "-Z", "-t", "%3"])]);
+    }
+
+    #[test]
+    fn open_attach_on_a_missing_session_is_unknown_session() {
+        let f = Fake::new("3.7c");
+        f.fail("has-session", "can't find session: nope\n");
+        let err = f
+            .backend
+            .open_attach("nope", 24, 80, false)
+            .err()
+            .expect("missing session");
+        let unknown = err.downcast_ref::<UnknownSession>().expect("typed error");
+        assert_eq!(unknown.session, "nope");
+        assert_eq!(f.calls(), [v(&["has-session", "-t", "=nope"])]);
+        assert!(f.backend.open_attach("../x", 24, 80, false).is_err());
+        assert_eq!(f.calls().len(), 1);
+    }
+
+    #[test]
+    fn accessors_expose_the_runner_identity() {
+        let f = Fake::new("3.8");
+        assert_eq!(f.backend.socket().path, f.dir.join("sock"));
+        assert_eq!(f.backend.version().to_string(), "3.8");
+        assert_eq!(f.backend.backend_version(), "tmux 3.8");
+        assert!(f.backend.validate_session_name("good_name").is_ok());
+        assert!(f.backend.validate_session_name("../bad").is_err());
+    }
+
+    // ── Live ────────────────────────────────────────────────────────────────
+
+    /// A private tmux server (`-L <unique>`, no config), killed on drop.
+    struct PrivateServer {
+        bin: PathBuf,
+        name: String,
+        socket: PathBuf,
+    }
+
+    impl PrivateServer {
+        fn start() -> Option<Self> {
+            let Ok(bin) = which::which("tmux") else {
+                eprintln!("skipping: tmux not on PATH");
+                return None;
+            };
+            let nanos = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos();
+            let mut server = Self {
+                bin,
+                name: format!("muxr-backend-test-{}-{nanos}", std::process::id()),
+                socket: PathBuf::new(),
+            };
+            server.tmux(&[
+                "-f",
+                "/dev/null",
+                "new-session",
+                "-d",
+                "-s",
+                "base",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "sh",
+            ]);
+            server.socket =
+                PathBuf::from(server.tmux(&["display-message", "-p", "#{socket_path}"]));
+            Some(server)
+        }
+
+        fn tmux(&self, args: &[&str]) -> String {
+            let out = std::process::Command::new(&self.bin)
+                .arg("-L")
+                .arg(&self.name)
+                .args(args)
+                .env_remove("TMUX")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .expect("run tmux");
+            assert!(
+                out.status.success(),
+                "tmux {args:?}: {}",
+                String::from_utf8_lossy(&out.stderr)
+            );
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        }
+
+        fn backend(&self) -> TmuxBackend {
+            let version = TmuxVersion::parse(&self.tmux(&["-V"])).unwrap();
+            TmuxBackend::with_runner(Tmux::with_bin(
+                TmuxSocket {
+                    path: self.socket.clone(),
+                },
+                version,
+                self.bin.clone().into_os_string(),
+            ))
+        }
+    }
+
+    impl Drop for PrivateServer {
+        fn drop(&mut self) {
+            let _ = std::process::Command::new(&self.bin)
+                .arg("-L")
+                .arg(&self.name)
+                .arg("kill-server")
+                .env_remove("TMUX")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            if self.socket.file_name().is_some() {
+                let _ = std::fs::remove_file(&self.socket);
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "needs tmux on PATH; runs a private tmux server"]
+    fn live_create_layout_new_pane_zoom_kill() {
+        let Some(server) = PrivateServer::start() else {
+            return;
+        };
+        let b = server.backend();
+        assert!(b.create_session("e2e", None).unwrap().ok);
+        let names: Vec<String> = b
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.0)
+            .collect();
+        assert!(names.contains(&"e2e".to_owned()), "{names:?}");
+
+        let layout = b.query_layout("e2e").unwrap();
+        assert_eq!(layout.tabs.len(), 1);
+        assert_eq!(layout.tabs[0].panes.len(), 1);
+
+        let ack = b.new_pane("e2e", false, Some("named".into())).unwrap();
+        assert!(ack.ok, "{ack:?}");
+        let id: u32 = ack.info.as_deref().unwrap().parse().unwrap();
+        let layout = b.query_layout("e2e").unwrap();
+        let panes = &layout.tabs[0].panes;
+        assert_eq!(panes.len(), 2);
+        let new = panes.iter().find(|p| p.id == id).expect("new pane listed");
+        assert_eq!(new.title, "named");
+
+        assert!(
+            b.toggle_pane_fullscreen("e2e", PaneRef::terminal(id))
+                .unwrap()
+                .ok
+        );
+        let layout = b.query_layout("e2e").unwrap();
+        assert!(layout.tabs[0].fullscreen_active);
+        let ctx = b
+            .pane_fullscreen_context("e2e", PaneRef::terminal(id), None)
+            .unwrap();
+        assert!(ctx.exists && ctx.tab_fullscreen && ctx.tab_active);
+        assert!(
+            b.toggle_pane_fullscreen("e2e", PaneRef::terminal(id))
+                .unwrap()
+                .ok
+        );
+        assert!(!b.query_layout("e2e").unwrap().tabs[0].fullscreen_active);
+
+        if b.version().at_least(3, 7) {
+            let ack = b.new_pane("e2e", true, None).unwrap();
+            assert!(ack.ok, "{ack:?}");
+            let fid: u32 = ack.info.as_deref().unwrap().parse().unwrap();
+            let layout = b.query_layout("e2e").unwrap();
+            let floating = layout.tabs[0].panes.iter().find(|p| p.id == fid).unwrap();
+            assert!(floating.is_floating);
+            let toggled = b
+                .toggle_pane_floating("e2e", PaneRef::terminal(fid))
+                .unwrap();
+            assert_eq!(toggled.ok, b.version().at_least(3, 8), "{toggled:?}");
+        }
+
+        let tab = b.new_tab("e2e", Some("second".into())).unwrap();
+        assert!(tab.ok, "{tab:?}");
+        let layout = b.query_layout("e2e").unwrap();
+        assert_eq!(layout.tabs.len(), 2);
+        assert_eq!(layout.tabs[1].name, "second");
+
+        // Names are literal text: no format or command is expanded.
+        let marker = std::env::temp_dir().join(format!("{}-expanded", server.name));
+        let run = format!("#(touch {})", marker.display());
+        let renamed = b.rename_pane("e2e", PaneRef::terminal(id), "a ## b".into());
+        assert!(renamed.unwrap().ok);
+        let tab_id = layout.tabs[1].tab_id;
+        assert!(b.rename_tab("e2e", tab_id, run.clone()).unwrap().ok);
+        let layout = b.query_layout("e2e").unwrap();
+        let titled = layout.tabs[0].panes.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(titled.title, "a ## b");
+        assert_eq!(layout.tabs[1].name, run);
+        assert!(b.rename_tab("e2e", tab_id, "fix #S".into()).unwrap().ok);
+        assert_eq!(b.query_layout("e2e").unwrap().tabs[1].name, "fix #S");
+        std::thread::sleep(Duration::from_millis(200));
+        let expanded = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(!expanded, "a #() in a name ran");
+
+        // A pane or window of another session is refused, ephemeral and routed.
+        let base = b.query_layout("base").unwrap();
+        let base_pane = base.tabs[0].panes[0].id;
+        let base_window = u32::try_from(base.tabs[0].tab_id).unwrap();
+        assert!(
+            !b.focus_pane("e2e", PaneRef::terminal(base_pane))
+                .unwrap()
+                .ok
+        );
+        let ctl = Control {
+            tmux: b.tmux.clone(),
+            agents: b.agent_state(),
+            session: "e2e".into(),
+        };
+        assert!(ctl.select_pane(base_pane).is_err());
+        assert!(ctl.zoom_toggle(base_pane).is_err());
+        assert!(ctl.select_window(base_window).is_err());
+        assert!(!b.query_layout("base").unwrap().tabs[0].fullscreen_active);
+        assert!(ctl.select_pane(id).is_ok());
+
+        // The fullscreen context places the target and the relay focus.
+        let target = PaneRef::terminal(id);
+        let ctx = b
+            .pane_fullscreen_context("e2e", target, Some(target))
+            .unwrap();
+        assert_eq!(ctx.tab_id, Some(layout.tabs[0].tab_id));
+        assert_eq!(ctx.relay_focus_tab_id, ctx.tab_id);
+        assert!(ctx.tab_active);
+
+        assert!(b.kill_session("e2e").unwrap().ok);
+        let names: Vec<String> = b
+            .list_sessions()
+            .unwrap()
+            .into_iter()
+            .map(|s| s.0)
+            .collect();
+        assert!(!names.contains(&"e2e".to_owned()), "{names:?}");
+        let err = b.query_layout("e2e").expect_err("killed session");
+        assert!(UnknownSession::in_chain(&err), "{err:#}");
     }
 }
