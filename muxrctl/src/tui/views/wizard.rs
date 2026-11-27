@@ -49,6 +49,7 @@ use ratcn::text_width::wrap_to_width;
 use ratcn::{Button, Checkbox, Cycle, ListItem, ProgressWidget, Select, Theme};
 
 use crate::app::UiMsg;
+use crate::app::message::CopyTarget;
 use crate::app::state::cert::{
     CertMsg, REGEN_EXPLAIN, SAN_EXPLAIN, resolved_trust_label, tls_mode_label,
 };
@@ -227,12 +228,35 @@ fn buttons(ctx: &mut DeclareCtx<'_, AppState, UiMsg>, step: WizardStep, area: Re
     );
     ctx.paint_widget(
         Paragraph::new(Line::from(Span::styled(
-            "Esc cancels · Tab moves · Enter presses",
+            if step == WizardStep::Pair {
+                PAIR_HINT
+            } else {
+                "Esc cancels · Tab moves · Enter presses"
+            },
             Style::default().fg(theme.muted_foreground),
         )))
         .alignment(ratatui::layout::Alignment::Right),
         cells[2],
     );
+}
+
+/// The Pair step's key hint: the only step with something to copy. The row
+/// leaves 50 cells beside Back and Done, so "Tab moves" makes room for the
+/// copy key here; every other step still shows it.
+pub(crate) const PAIR_HINT: &str = "c copies link · Esc cancels · Enter presses";
+
+/// Whether `c` copies the pairing link right now: on the Pair step, while the
+/// code is showing.
+fn can_copy_link(state: &AppState) -> bool {
+    state.wizard.step == WizardStep::Pair
+        && matches!(
+            state
+                .tokens
+                .qr_overlay
+                .as_ref()
+                .map(|overlay| &overlay.phase),
+            Some(QrOverlayPhase::Showing { .. })
+        )
 }
 
 /// What Next promises on this step, so the button never overstates it.
@@ -937,7 +961,8 @@ fn truncate(text: &str, width: u16) -> String {
 
 // ── Esc ───────────────────────────────────────────────────────────────────────
 
-/// A control that also answers Esc with [`WizardMsg::Close`].
+/// A control that also answers Esc with [`WizardMsg::Close`], and `c` with a
+/// copy of the pairing link while the Pair step shows a code.
 ///
 /// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`; a `modal_scope` has
 /// none, and an open modal absorbs every key nothing inside it handled rather
@@ -947,7 +972,7 @@ fn truncate(text: &str, width: u16) -> String {
 ///
 /// The inner control is asked first and only an Esc it *ignored* closes the
 /// wizard, so a control that wants Esc for itself — an open [`Select`] panel,
-/// for one — keeps it.
+/// for one — keeps it. The same holds for `c`: a focused text field types it.
 struct EscCloses<C> {
     inner: C,
 }
@@ -986,10 +1011,15 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for EscCloses<C> 
             return result;
         }
         if let Event::Key(key) = event
-            && key.code == KeyCode::Esc
             && !key.modifiers.any()
         {
-            return EventResult::Emit(close());
+            match key.code {
+                KeyCode::Esc => return EventResult::Emit(close()),
+                KeyCode::Char('c') if can_copy_link(state) => {
+                    return EventResult::Emit(UiMsg::Copy(CopyTarget::PairingLink));
+                }
+                _ => {}
+            }
         }
         result
     }

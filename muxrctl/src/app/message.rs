@@ -40,8 +40,6 @@ pub struct ConfigSnapshot {
 }
 
 /// What a copy request puts on the terminal clipboard.
-// Constructed by the copy key and button that land after this plumbing.
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CopyTarget {
     /// The secret of the token minted most recently.
@@ -90,7 +88,6 @@ pub enum UiMsg {
     /// Setup wizard.
     Wizard(WizardMsg),
     /// Put a value on the terminal clipboard.
-    #[allow(dead_code)]
     Copy(CopyTarget),
 }
 

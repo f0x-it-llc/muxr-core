@@ -14,7 +14,7 @@
 //! Each row mirrors the `.disabled(…)` predicate of the button it stands for:
 //! a letter never does what its button cannot.
 
-use super::message::UiMsg;
+use super::message::{CopyTarget, UiMsg};
 use super::state::cert::CertMsg;
 use super::state::devices::DevicesMsg;
 use super::state::server::ServerMsg;
@@ -54,9 +54,12 @@ static TOKENS: [Shortcut; 4] = [
     }),
 ];
 
-static TOKEN_MINTED: [Shortcut; 2] = [
+static TOKEN_MINTED: [Shortcut; 3] = [
     row('s', "show QR", |_| {
         Some(UiMsg::Tokens(TokensMsg::MintedShowQr))
+    }),
+    row('c', "copy token", |_| {
+        Some(UiMsg::Copy(CopyTarget::MintedToken))
     }),
     row('d', "done", |_| Some(UiMsg::Tokens(TokensMsg::MintedDone))),
 ];
@@ -65,12 +68,20 @@ static TOKEN_REVOKE: [Shortcut; 1] = [row('y', "revoke", |_| {
     Some(UiMsg::Tokens(TokensMsg::RevokeConfirmed))
 })];
 
-static CERT: [Shortcut; 3] = [
+static CERT: [Shortcut; 4] = [
     row('h', "help", |_| Some(UiMsg::Cert(CertMsg::OpenHelp))),
     row('g', "regenerate", |s| {
         (!s.cert.loading).then_some(UiMsg::Cert(CertMsg::RegenerateRequested))
     }),
     row('r', "refresh", |_| Some(UiMsg::Cert(CertMsg::Refresh))),
+    // "copy", not "copy fingerprint": the footer is cut at 80 columns, and
+    // the longer label is what would be cut. The button names the fingerprint.
+    row('c', "copy", |s| {
+        s.cert
+            .fingerprint
+            .is_some()
+            .then_some(UiMsg::Copy(CopyTarget::CertFingerprint))
+    }),
 ];
 
 static CERT_REGEN: [Shortcut; 1] = [row('y', "regenerate", |_| {
@@ -250,6 +261,33 @@ mod tests {
         state.cert.loading = true;
         assert!(message(DialogId::Cert, 'g', &state).is_none());
         assert!(message(DialogId::Cert, 'h', &state).is_some());
+    }
+
+    #[test]
+    fn c_copies_the_minted_token_and_the_fingerprint_only_when_there_is_one() {
+        let mut state = AppState::new();
+        assert!(matches!(
+            message(DialogId::TokenMinted, 'c', &state),
+            Some(UiMsg::Copy(CopyTarget::MintedToken))
+        ));
+        // No certificate on disk: the Copy button is disabled, so is the letter.
+        assert!(message(DialogId::Cert, 'c', &state).is_none());
+        state.cert.fingerprint = Some("ab".repeat(32));
+        assert!(matches!(
+            message(DialogId::Cert, 'c', &state),
+            Some(UiMsg::Copy(CopyTarget::CertFingerprint))
+        ));
+        // Copying is read-only, so a load in flight does not disable it.
+        state.cert.loading = true;
+        assert!(message(DialogId::Cert, 'c', &state).is_some());
+    }
+
+    #[test]
+    fn the_minted_and_certificate_hints_name_the_copy_letter() {
+        assert!(hint(Some(DialogId::TokenMinted)).contains(&("c", "copy token")));
+        assert!(hint(Some(DialogId::Cert)).contains(&("c", "copy")));
+        assert_eq!(shortcuts(DialogId::TokenMinted).len(), 3);
+        assert_eq!(shortcuts(DialogId::Cert).len(), 4);
     }
 
     #[test]

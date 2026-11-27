@@ -20,6 +20,7 @@ use ratcn::text_width::wrap_to_width;
 use ratcn::{Button, Cycle, Dialog, ScrollArea, Theme};
 
 use crate::app::UiMsg;
+use crate::app::message::CopyTarget;
 use crate::app::state::cert::{
     CERT_EXPLAIN, CertMsg, REGEN_EXPLAIN, SAN_EXPLAIN, TRUST_EXPLAIN, dns_advisory,
     resolved_trust_label, tls_mode_label,
@@ -87,6 +88,7 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
     // Regenerating while a read is in flight would race it, and the button is
     // the one action here that cannot be undone.
     let busy = state.cert.loading;
+    let has_cert = state.cert.fingerprint.is_some();
 
     let dialog = Dialog::new()
         .title("Certificate & pairing trust")
@@ -115,6 +117,14 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
                 Button::new("Refresh")
                     .ghost()
                     .on_press(|| UiMsg::Cert(CertMsg::Refresh)),
+            ),
+        )
+        .action(
+            "cert_copy",
+            action(
+                Button::new("Copy fingerprint")
+                    .disabled(!has_cert)
+                    .on_press(|| UiMsg::Copy(CopyTarget::CertFingerprint)),
             ),
         )
         .action("cert_close", action(Button::new("Close").on_press(close)))

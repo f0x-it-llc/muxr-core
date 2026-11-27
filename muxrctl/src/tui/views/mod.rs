@@ -140,7 +140,8 @@ mod tests {
     use super::*;
     use crate::app::state::DialogId;
     use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
-    use crate::app::{Message, update};
+    use crate::app::state::wizard::WizardStep;
+    use crate::app::{Message, UpdateAction, update};
     use crate::tui::runner::{EventSource, InputPump, build_ratcn, route_event};
     use crossterm::event::Event as CtEvent;
     use ratatui::Terminal;
@@ -172,6 +173,9 @@ mod tests {
         ratcn: Ratcn<AppState, UiMsg>,
         theme: Theme,
         state: AppState,
+        /// What the reducer returned for the last [`Self::key`] or
+        /// [`Self::click`].
+        actions: Vec<UpdateAction>,
     }
 
     impl Harness {
@@ -185,6 +189,7 @@ mod tests {
                 ratcn: build_ratcn(),
                 theme: crate::tui::theme::muxr(),
                 state: AppState::new(),
+                actions: Vec::new(),
             };
             harness.draw();
             harness
@@ -196,6 +201,7 @@ mod tests {
                 ratcn,
                 theme,
                 state,
+                ..
             } = self;
             terminal
                 .draw(|frame| render(frame, ratcn, state, theme))
@@ -211,8 +217,20 @@ mod tests {
                 EventResult::Consumed => Message::Tick,
                 EventResult::Ignored => Message::Key(key),
             };
-            let _ = update(&mut self.state, message);
+            self.actions = update(&mut self.state, message);
             self.draw();
+        }
+
+        /// The clipboard writes the last [`Self::key`] or [`Self::click`]
+        /// queued, as the text each one carries.
+        fn copied(&self) -> Vec<String> {
+            self.actions
+                .iter()
+                .filter_map(|action| match action {
+                    UpdateAction::CopyToClipboard(text) => Some(text.as_str().to_string()),
+                    _ => None,
+                })
+                .collect()
         }
 
         /// Feed `events` as one terminal burst, iterating exactly as `run()`
@@ -249,15 +267,17 @@ mod tests {
                 EventResult::Emit(msg) => Message::Ui(msg),
                 EventResult::Consumed | EventResult::Ignored => Message::Tick,
             };
-            let _ = update(&mut self.state, message);
+            self.actions = update(&mut self.state, message);
             self.draw();
         }
 
         /// A left click: ratcn synthesises the `Click` on the `Up`, as in its
-        /// own pointer tests.
+        /// own pointer tests. [`Self::actions`] holds both halves' results.
         fn click(&mut self, column: u16, row: u16) {
             self.mouse(MouseKind::Down(MouseButton::Left), column, row);
+            let down = std::mem::take(&mut self.actions);
             self.mouse(MouseKind::Up(MouseButton::Left), column, row);
+            self.actions.splice(0..0, down);
         }
 
         /// The cell of the first character of `label` on `row_marker`'s row
@@ -273,7 +293,9 @@ mod tests {
                     return (x as u16, y as u16);
                 }
             }
-            panic!("{label:?} not found on a row with {row_marker:?}:\n{screen}");
+            // Name only the label and the marker: this can run while the
+            // plaintext token is on screen, so the frame must not be printed.
+            panic!("{label:?} not found on a row with {row_marker:?}");
         }
 
         /// Apply a message the way the runner would after an async task answered.
@@ -370,7 +392,75 @@ mod tests {
                 tick_counter: 0,
             });
         }
+
+        /// Open the New token dialog the way a finished create does.
+        fn minted_dialog(&mut self) {
+            self.feed(Message::TokenCreated {
+                token: SECRET.to_string(),
+                name: "pixel".to_string(),
+                read_only: false,
+            });
+            assert_eq!(self.state.top_dialog(), Some(DialogId::TokenMinted));
+        }
+
+        /// Open the Certificate dialog from the dashboard and land its read.
+        fn cert_dialog(&mut self, fingerprint: Option<&str>) {
+            self.key(KeyCode::Char('e'));
+            assert_eq!(self.state.top_dialog(), Some(DialogId::Cert));
+            self.feed(Message::CertInfoLoaded {
+                fingerprint: fingerprint.map(str::to_string),
+                sans: vec!["10.0.0.5".to_string()],
+            });
+        }
+
+        /// Open the QR layer from the New token dialog, still generating.
+        fn generating_qr(&mut self) {
+            self.minted_dialog();
+            self.key(KeyCode::Char('s'));
+            assert_eq!(self.state.top_dialog(), Some(DialogId::Qr));
+            assert!(matches!(
+                self.state.tokens.qr_overlay.as_ref().map(|o| &o.phase),
+                Some(QrOverlayPhase::Generating)
+            ));
+        }
+
+        /// Answer the open QR layer's build with [`PAIR_URI`].
+        fn qr_ready(&mut self) {
+            let seq = self.state.qr_seq;
+            self.feed(Message::TokenQrReady {
+                uri: PAIR_URI.to_string(),
+                host: "10.0.0.5".to_string(),
+                port: 50051,
+                fingerprint_short: "ab:cd:ef…".to_string(),
+                baseline_clients: 0,
+                seq,
+            });
+        }
+
+        /// The last focused id, if any.
+        fn focused(&self) -> Option<String> {
+            self.state
+                .ui
+                .focus
+                .path()
+                .last()
+                .map(|id| id.as_str().to_string())
+        }
     }
+
+    /// A minted secret, compared by value and never printed.
+    const SECRET: &str = "s3cret-plaintext-token";
+
+    /// A pairing link, compared by value and never printed.
+    const PAIR_URI: &str =
+        "muxr://pair?v=2&h=10.0.0.5&p=50051&t=s3cret-plaintext-token&ro=0&tm=pin";
+
+    /// A full 64-hex certificate fingerprint.
+    const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+
+    /// The Certificate dialog's copy pair as the footer prints it, last and
+    /// whole at 80 columns.
+    const CERT_COPY_HINT: &str = "c copy";
 
     /// The Tokens flow's fullscreen layer keeps the whole frame: `render`'s gate
     /// hands `paint_matrix` the frame area exactly as before the wizard existed.
@@ -388,10 +478,10 @@ mod tests {
             painted.width >= 41 && painted.height >= 19,
             "the fullscreen layer painted a {painted:?} block"
         );
+        // No frame in the message: the QR layer can show the pairing material.
         assert!(
             harness.screen().contains("Scan with the Muxr app"),
-            "the layer lost its caption:\n{}",
-            harness.screen()
+            "the layer lost its caption"
         );
     }
 
@@ -705,6 +795,15 @@ mod tests {
             row.contains("t tokens") && row.contains("q quit"),
             "{row:?}"
         );
+
+        harness.minted_dialog();
+        let row = harness.last_row();
+        assert!(row.contains("c copy token"), "{row:?}");
+
+        harness.key(KeyCode::Esc);
+        harness.cert_dialog(Some(FINGERPRINT));
+        let row = harness.last_row();
+        assert!(row.trim_end().ends_with(CERT_COPY_HINT), "{row:?}");
     }
 
     #[test]
@@ -751,5 +850,228 @@ mod tests {
         harness.key(KeyCode::BackTab);
         assert_ne!(harness.bg_of("Create…"), palette::TEAL);
         assert_ne!(harness.bg_of("Close"), palette::TEAL);
+    }
+
+    // ── Copy: the key and the button ──────────────────────────────────────────
+
+    #[test]
+    fn c_copies_the_minted_token_and_keeps_the_dialog_open() {
+        let mut harness = Harness::new();
+        harness.minted_dialog();
+        harness.key(KeyCode::Char('c'));
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert!(copied[0] == SECRET, "the copied text is not the token");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenMinted));
+    }
+
+    #[test]
+    fn clicking_copy_token_copies_the_minted_token() {
+        let mut harness = Harness::new();
+        harness.minted_dialog();
+        let (x, y) = harness.locate("Copy token", "Copy token");
+        harness.click(x, y);
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert!(copied[0] == SECRET, "the copied text is not the token");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenMinted));
+    }
+
+    #[test]
+    fn show_pairing_qr_keeps_the_minted_dialogs_default_focus() {
+        let mut harness = Harness::new();
+        harness.minted_dialog();
+        harness.key(KeyCode::Enter);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Qr));
+    }
+
+    #[test]
+    fn c_copies_the_full_certificate_fingerprint() {
+        let mut harness = Harness::new();
+        harness.cert_dialog(Some(FINGERPRINT));
+        harness.key(KeyCode::Char('c'));
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert_eq!(copied[0], FINGERPRINT);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Cert));
+
+        let (x, y) = harness.locate("Copy fingerprint", "Copy fingerprint");
+        harness.click(x, y);
+        assert_eq!(harness.copied(), [FINGERPRINT]);
+    }
+
+    #[test]
+    fn without_a_fingerprint_c_copies_nothing_and_the_button_is_disabled() {
+        let mut harness = Harness::new();
+        harness.cert_dialog(None);
+        harness.key(KeyCode::Char('c'));
+        assert!(harness.copied().is_empty(), "nothing to copy yet");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Cert));
+
+        let (x, y) = harness.locate("Copy fingerprint", "Copy fingerprint");
+        harness.click(x, y);
+        assert!(harness.copied().is_empty(), "a disabled button copied");
+        // Tab walks every enabled control and never lands on it.
+        for _ in 0..8 {
+            harness.key(KeyCode::Tab);
+            assert_ne!(harness.focused().as_deref(), Some("cert_copy"));
+        }
+    }
+
+    #[test]
+    fn c_copies_the_pairing_link_only_once_the_qr_is_showing() {
+        let mut harness = Harness::new();
+        harness.generating_qr();
+        harness.key(KeyCode::Char('c'));
+        assert!(harness.copied().is_empty(), "no link while generating");
+        assert!(
+            !harness.screen().contains("Copy link"),
+            "a Copy link button while generating"
+        );
+
+        harness.qr_ready();
+        harness.key(KeyCode::Char('c'));
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert!(copied[0] == PAIR_URI, "the copied text is not the link");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Qr));
+
+        harness.key(KeyCode::Esc);
+        assert!(harness.state.tokens.qr_overlay.is_none());
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::TokenMinted));
+    }
+
+    #[test]
+    fn the_qr_strip_shows_copy_link_and_close_with_close_focused() {
+        let mut harness = Harness::new();
+        harness.generating_qr();
+        harness.qr_ready();
+        let strip = harness.last_row();
+        assert!(strip.contains("c copy link"), "{strip:?}");
+        assert!(strip.contains("Copy link"), "{strip:?}");
+        assert!(strip.contains("Close"), "{strip:?}");
+        // Close keeps the default focus: Enter closes rather than copies.
+        harness.key(KeyCode::Enter);
+        assert!(harness.copied().is_empty());
+        assert!(harness.state.tokens.qr_overlay.is_none());
+    }
+
+    #[test]
+    fn clicking_copy_link_copies_the_pairing_link() {
+        let mut harness = Harness::new();
+        harness.generating_qr();
+        harness.qr_ready();
+        let (x, y) = harness.locate("Copy link", "Copy link");
+        harness.click(x, y);
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert!(copied[0] == PAIR_URI, "the copied text is not the link");
+    }
+
+    /// The wizard on its last step with a showing code, focus parked on Done.
+    fn wizard_pairing(harness: &mut Harness) {
+        harness.key(KeyCode::Char('w'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Wizard));
+        harness.state.wizard.step = WizardStep::Pair;
+        harness.state.ui.focus = FocusState::intent([DialogId::Wizard.id(), "wiz_done"]);
+        harness.showing_overlay();
+        harness.draw();
+    }
+
+    #[test]
+    fn c_copies_the_pairing_link_on_the_wizards_pair_step() {
+        let mut harness = Harness::new();
+        wizard_pairing(&mut harness);
+        let uri = match harness.state.tokens.qr_overlay.as_ref().map(|o| &o.phase) {
+            Some(QrOverlayPhase::Showing { uri, .. }) => uri.clone(),
+            _ => unreachable!("the overlay is showing"),
+        };
+        harness.key(KeyCode::Char('c'));
+        let copied = harness.copied();
+        assert_eq!(copied.len(), 1, "expected one clipboard write");
+        assert!(copied[0] == uri, "the copied text is not the link");
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Wizard));
+        assert!(
+            harness.screen().contains(wizard::PAIR_HINT),
+            "the Pair step hint is cut"
+        );
+    }
+
+    #[test]
+    fn c_on_an_earlier_wizard_step_types_into_the_field_and_copies_nothing() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('w'));
+        harness.key(KeyCode::Enter);
+        assert_eq!(harness.state.wizard.step, WizardStep::Network);
+        // A showing overlay does not make an earlier step copy.
+        harness.showing_overlay();
+        harness.draw();
+        harness.key(KeyCode::Char('c'));
+        assert!(harness.copied().is_empty(), "Next focused: no copy");
+
+        harness.state.ui.focus =
+            FocusState::intent([DialogId::Wizard.id(), WizardStep::Network.id(), "wiz_host"]);
+        harness.draw();
+        let before = harness.state.config.host.clone();
+        harness.key(KeyCode::Char('c'));
+        assert!(harness.copied().is_empty(), "a typed c copied");
+        assert_eq!(harness.state.config.host, format!("{before}c"));
+        assert!(
+            !harness.screen().contains("c copies link"),
+            "the copy hint is for the Pair step only"
+        );
+    }
+
+    #[test]
+    fn c_on_the_dashboard_still_opens_config() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        assert!(harness.copied().is_empty());
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Config));
+    }
+
+    /// Every label of the dialog's action row, whole, on the row that holds
+    /// `marker`.
+    fn assert_action_row(screen: &str, marker: &str, labels: &[&str]) {
+        let row = screen
+            .lines()
+            .find(|line| line.contains(marker))
+            .unwrap_or_else(|| panic!("no row holds {marker:?}"));
+        for label in labels {
+            assert!(row.contains(label), "{label} cut from {row:?}");
+        }
+    }
+
+    #[test]
+    fn the_copy_buttons_fit_an_80x24_terminal() {
+        let mut harness = Harness::new();
+        harness.cert_dialog(Some(FINGERPRINT));
+        assert_action_row(
+            &harness.screen(),
+            "Regenerate…",
+            &[
+                "Help",
+                "Regenerate…",
+                "Refresh",
+                "Copy fingerprint",
+                "Close",
+            ],
+        );
+
+        harness.key(KeyCode::Esc);
+        harness.minted_dialog();
+        assert_action_row(
+            &harness.screen(),
+            "Show pairing QR",
+            &["Show pairing QR", "Copy token", "Done"],
+        );
+
+        harness.key(KeyCode::Char('s'));
+        harness.qr_ready();
+        let strip = harness.last_row();
+        assert!(
+            strip.contains("Copy link") && strip.contains("Close"),
+            "{strip:?}"
+        );
     }
 }
