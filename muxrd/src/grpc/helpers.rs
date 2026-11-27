@@ -1351,28 +1351,33 @@ mod tests {
 
     // ─── Proto ↔ BackendKind conversion tests ────────────────────────────────
 
+    /// Every [`BackendKind`]. The `expected_proto` match below has no wildcard
+    /// arm, so adding a variant stops this test module from compiling until the
+    /// variant is listed in both places.
+    fn all_kinds() -> [BackendKind; 3] {
+        [BackendKind::Zellij, BackendKind::Herdr, BackendKind::Tmux]
+    }
+
+    fn expected_proto(kind: BackendKind) -> crate::proto::Backend {
+        match kind {
+            BackendKind::Zellij => crate::proto::Backend::Zellij,
+            BackendKind::Herdr => crate::proto::Backend::Herdr,
+            BackendKind::Tmux => crate::proto::Backend::Tmux,
+        }
+    }
+
     #[test]
     fn proto_backend_maps_each_kind() {
-        assert_eq!(
-            proto_backend(BackendKind::Zellij),
-            crate::proto::Backend::Zellij
-        );
-        assert_eq!(
-            proto_backend(BackendKind::Herdr),
-            crate::proto::Backend::Herdr
-        );
+        for kind in all_kinds() {
+            assert_eq!(proto_backend(kind), expected_proto(kind), "{kind}");
+        }
     }
 
     #[test]
     fn kind_from_proto_inverts_proto_backend() {
-        assert_eq!(
-            kind_from_proto(crate::proto::Backend::Zellij),
-            Some(BackendKind::Zellij)
-        );
-        assert_eq!(
-            kind_from_proto(crate::proto::Backend::Herdr),
-            Some(BackendKind::Herdr)
-        );
+        for kind in all_kinds() {
+            assert_eq!(kind_from_proto(proto_backend(kind)), Some(kind), "{kind}");
+        }
         assert_eq!(kind_from_proto(crate::proto::Backend::Unspecified), None);
     }
 
