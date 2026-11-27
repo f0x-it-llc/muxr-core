@@ -27,6 +27,10 @@ pub fn update(state: &mut AppState, msg: CertMsg) -> Vec<UpdateAction> {
             super::open_hook(state, DialogId::CertHelp)
         }
         CertMsg::HelpScrolled(offset) => {
+            // Stored as sent: every sender is already clamped to the last row
+            // the viewport can show (`ScrollArea` for its wheel and page keys,
+            // the line-scroll wrapper in `tui/views/cert_dialog.rs` for the
+            // arrows), and the viewport's height is not known here.
             state.cert.help_scroll = offset;
             Vec::new()
         }

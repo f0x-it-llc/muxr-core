@@ -11,11 +11,13 @@
 //! constants measured against a 78-column box (`Dialog` cannot measure a
 //! closure, so the constants and the layout below must agree).
 
-use ratatui::layout::{Constraint, Direction, Layout};
+use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
-use ratcn::runtime::DeclareCtx;
+use ratcn::runtime::{
+    Component, DeclareCtx, Event, EventCtx, EventResult, KeyCode, PaintCtx, ScopeOptions,
+};
 use ratcn::text_width::wrap_to_width;
 use ratcn::{Button, Cycle, Dialog, ScrollArea, Theme};
 
@@ -27,8 +29,8 @@ use crate::app::state::cert::{
 };
 use crate::app::state::{AppState, DialogId};
 use crate::app::update::cert::{current_sans, planned_sans};
-use crate::tui::components::DialogShortcuts;
 use crate::tui::components::action::{action, destructive};
+use crate::tui::components::{DialogShortcuts, LettersPass};
 
 /// Outer width of all three dialogs, border and padding included.
 const OUTER_WIDTH: u16 = 78;
@@ -227,7 +229,9 @@ fn content(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         columns[1],
     );
 
-    // Advertised trust — the one setting on this screen.
+    // Advertised trust — the one setting on this screen. It holds the default
+    // focus, and ratcn's linear navigation would read `h`/`l` as previous/next:
+    // `LettersPass` sends every letter on to the dialog's shortcuts instead.
     let trust_row = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Length(18), Constraint::Min(0)])
@@ -238,10 +242,10 @@ fn content(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
     );
     ctx.component(
         "cert_trust",
-        Cycle::new(["Auto", "CA", "Pin"]).selection(
+        LettersPass::new(Cycle::new(["Auto", "CA", "Pin"]).selection(
             |state: &AppState| state.cert.advertise_trust.index(),
             |index| UiMsg::Cert(CertMsg::TrustChanged(index)),
-        ),
+        )),
         trust_row[1],
     );
 
@@ -340,17 +344,20 @@ pub fn declare_help(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
             let area = ctx.area();
             ctx.component(
                 "cert_help_scroll",
-                ScrollArea::new(content_height)
-                    .scroll(
-                        |state: &AppState| {
-                            u16::try_from(state.cert.help_scroll).unwrap_or(u16::MAX)
-                        },
-                        |offset| UiMsg::Cert(CertMsg::HelpScrolled(usize::from(offset))),
-                    )
-                    .content(move |ctx| {
-                        let content_area = ctx.area();
-                        ctx.paint_widget(Paragraph::new(lines), content_area);
-                    }),
+                LineScroll::new(
+                    content_height,
+                    ScrollArea::new(content_height)
+                        .scroll(
+                            |state: &AppState| {
+                                u16::try_from(state.cert.help_scroll).unwrap_or(u16::MAX)
+                            },
+                            |offset| UiMsg::Cert(CertMsg::HelpScrolled(usize::from(offset))),
+                        )
+                        .content(move |ctx| {
+                            let content_area = ctx.area();
+                            ctx.paint_widget(Paragraph::new(lines), content_area);
+                        }),
+                ),
                 area,
             );
         })
@@ -364,6 +371,94 @@ pub fn declare_help(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         DialogShortcuts::new(DialogId::CertHelp, dialog),
         area,
     );
+}
+
+/// The explainer's scroll area, plus line scrolling from the keyboard.
+///
+/// ratcn's `ScrollArea` answers PageUp, PageDown, Home and End and leaves Up,
+/// Down, `j` and `k` alone, so without this a line at a time needs the wheel.
+/// The area is asked first; an unmodified Up or `k` it ignored scrolls one row
+/// up, Down or `j` one row down.
+///
+/// The step is clamped here, where the area is known, to the same last offset
+/// `ScrollArea` clamps its view to (content rows minus viewport rows; the
+/// scrollbar gutter is a column, not a row). Without that a held Down would
+/// grow `help_scroll` far past the end while the view sat still, and as many
+/// Ups would be needed before the text moved again. At an edge the key is
+/// ignored, the way `ScrollArea` treats its own keys there.
+struct LineScroll<C> {
+    content_height: u16,
+    inner: C,
+}
+
+impl<C> LineScroll<C> {
+    const fn new(content_height: u16, inner: C) -> Self {
+        Self {
+            content_height,
+            inner,
+        }
+    }
+
+    /// The last first-visible row an `area` this tall can show.
+    fn max_offset(&self, area: Rect) -> usize {
+        usize::from(self.content_height.saturating_sub(area.height))
+    }
+}
+
+impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for LineScroll<C> {
+    fn scope_options(&self, state: &AppState) -> ScopeOptions {
+        self.inner.scope_options(state)
+    }
+
+    fn interaction_area(&self, area: Rect, state: &AppState) -> Rect {
+        self.inner.interaction_area(area, state)
+    }
+
+    fn declare(&mut self, ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
+        self.inner.declare(ctx);
+    }
+
+    fn paint(&mut self, ctx: &mut PaintCtx<'_, AppState>) {
+        self.inner.paint(ctx);
+    }
+
+    fn handle_event(
+        &mut self,
+        event: &Event,
+        state: &AppState,
+        ctx: &mut EventCtx<'_>,
+    ) -> EventResult<UiMsg> {
+        let result = self.inner.handle_event(event, state, ctx);
+        if !matches!(result, EventResult::Ignored) {
+            return result;
+        }
+        let Event::Key(key) = event else {
+            return result;
+        };
+        if key.modifiers.any() {
+            return result;
+        }
+        let max = self.max_offset(ctx.area());
+        let current = state.cert.help_scroll.min(max);
+        let target = match key.code {
+            KeyCode::Up | KeyCode::Char('k') => current.saturating_sub(1),
+            KeyCode::Down | KeyCode::Char('j') => (current + 1).min(max),
+            _ => return result,
+        };
+        if target == current {
+            return result;
+        }
+        EventResult::Emit(UiMsg::Cert(CertMsg::HelpScrolled(target)))
+    }
+
+    fn reveal_in_viewport(
+        &mut self,
+        target: Rect,
+        state: &AppState,
+        ctx: &mut EventCtx<'_>,
+    ) -> bool {
+        self.inner.reveal_in_viewport(target, state, ctx)
+    }
 }
 
 /// The four explanation blocks, wrapped to `width`, headings included.

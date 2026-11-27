@@ -52,12 +52,18 @@ pub fn on_devices_loaded(
     relay_url: Option<String>,
 ) -> Vec<UpdateAction> {
     state.devices.devices = devices;
-    if let Some(name) = state.devices.focused.as_deref()
-        && !state.devices.devices.iter().any(|d| d.device_name == name)
-    {
-        // The focused device is gone (removed, or dropped off a reload) —
-        // clamp rather than point the cursor at nothing that exists.
-        state.devices.focused = None;
+    // Keep the cursor on the same device when it survived the reload;
+    // otherwise (nothing focused yet, or the focused device was removed or
+    // dropped off) fall to the first row, so `x remove` works without a Down
+    // first, or to nothing at all on an empty list. The Tokens list does the
+    // same on its load.
+    let still_present = state
+        .devices
+        .focused
+        .as_deref()
+        .is_some_and(|name| state.devices.devices.iter().any(|d| d.device_name == name));
+    if !still_present {
+        state.devices.focused = state.devices.devices.first().map(|d| d.device_name.clone());
     }
     state.devices.relay_url = relay_url;
     state.devices.loading = false;
@@ -195,32 +201,57 @@ mod tests {
         assert!(!state.devices.loading);
     }
 
-    #[test]
-    fn devices_loaded_clears_a_focus_that_no_longer_exists() {
-        let mut state = AppState::new();
-        state.devices.focused = Some("gone".to_string());
+    fn load(state: &mut AppState, names: &[&str]) {
         update(
-            &mut state,
+            state,
             Message::DevicesLoaded {
-                devices: vec![device("pixel")],
+                devices: names.iter().map(|name| device(name)).collect(),
                 relay_url: None,
             },
         );
+    }
+
+    #[test]
+    fn devices_loaded_focuses_the_first_device_when_nothing_is_focused() {
+        let mut state = AppState::new();
+        load(&mut state, &["pixel", "ipad"]);
+        assert_eq!(state.devices.focused.as_deref(), Some("pixel"));
+    }
+
+    #[test]
+    fn devices_loaded_moves_a_focus_that_no_longer_exists_to_the_first_device() {
+        let mut state = AppState::new();
+        state.devices.focused = Some("gone".to_string());
+        load(&mut state, &["pixel", "ipad"]);
+        assert_eq!(state.devices.focused.as_deref(), Some("pixel"));
+    }
+
+    #[test]
+    fn devices_loaded_focuses_nothing_on_an_empty_list() {
+        let mut state = AppState::new();
+        load(&mut state, &[]);
         assert_eq!(state.devices.focused, None);
+
+        state.devices.focused = Some("gone".to_string());
+        load(&mut state, &[]);
+        assert_eq!(state.devices.focused, None, "a removed last device");
+    }
+
+    #[test]
+    fn devices_loaded_then_remove_requested_opens_the_confirm() {
+        let mut state = AppState::new();
+        update(&mut state, Message::Ui(UiMsg::Open(DialogId::Devices)));
+        load(&mut state, &["pixel"]);
+        devices(&mut state, DevicesMsg::RemoveRequested);
+        assert_eq!(state.top_dialog(), Some(DialogId::DeviceRemoveConfirm));
     }
 
     #[test]
     fn devices_loaded_keeps_a_focus_still_present() {
         let mut state = AppState::new();
-        state.devices.focused = Some("pixel".to_string());
-        update(
-            &mut state,
-            Message::DevicesLoaded {
-                devices: vec![device("pixel"), device("ipad")],
-                relay_url: None,
-            },
-        );
-        assert_eq!(state.devices.focused.as_deref(), Some("pixel"));
+        state.devices.focused = Some("ipad".to_string());
+        load(&mut state, &["pixel", "ipad"]);
+        assert_eq!(state.devices.focused.as_deref(), Some("ipad"));
     }
 
     #[test]

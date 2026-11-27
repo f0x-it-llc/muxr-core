@@ -29,10 +29,7 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
     match message {
         Message::Key(key) => handle_key(state, key),
         Message::Tick => handle_tick(state),
-        Message::Quit => {
-            state.should_quit = true;
-            vec![UpdateAction::Quit]
-        }
+        Message::Quit => quit(state),
         Message::Ui(msg) => handle_ui(state, msg),
 
         // ── Async task results ────────────────────────────────────────────────
@@ -141,7 +138,15 @@ fn handle_ui(state: &mut AppState, msg: UiMsg) -> Vec<UpdateAction> {
         UiMsg::Devices(msg) => devices::update(state, msg),
         UiMsg::Wizard(msg) => wizard::update(state, msg),
         UiMsg::Copy(target) => copy(state, target),
+        UiMsg::Quit => quit(state),
     }
+}
+
+/// Ask for a clean shutdown: what `q` on the dashboard, Ctrl-C anywhere and
+/// [`Message::Quit`] all do.
+fn quit(state: &mut AppState) -> Vec<UpdateAction> {
+    state.should_quit = true;
+    vec![UpdateAction::Quit]
 }
 
 /// Resolve `target` from state and queue the clipboard write. The toast says
@@ -252,27 +257,25 @@ fn clear_loading(state: &mut AppState) {
 
 /// Translate a key the ratcn runtime left unhandled.
 ///
-/// With a dialog open the modal layer owns the keyboard (Esc is the dialog's
-/// own `on_dismiss`), so only `Ctrl-C` is honoured here. A dialog's single-letter
-/// shortcuts (n/s/x/r/y/h/g/d) are answered by the `DialogShortcuts` wrapper in
-/// `tui/components/shortcuts.rs` from the table in `app::shortcuts`, never by this
-/// reducer, because the modal floor turns every key a dialog ignored into a
-/// consumed one before the runner could deliver it here.
+/// Only the dashboard's keys arrive here. With a modal open (a dialog, the QR
+/// layer, the wizard) the modal floor turns every key nothing inside it handled
+/// into a consumed one before the runner could deliver it, so a modal answers
+/// its own keys from inside: Esc is the dialog's `on_dismiss`, a dialog's
+/// single-letter shortcuts (n/s/x/r/y/h/g/d) come from the `DialogShortcuts`
+/// wrapper in `tui/components/shortcuts.rs` reading the table in
+/// `app::shortcuts`, and Ctrl-C is turned into [`UiMsg::Quit`] by the same
+/// wrapper, the QR layer's buttons and the wizard's controls. Ctrl-C here is
+/// therefore the dashboard's, and quits.
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
-    // Ctrl-C always quits.
     if key.modifiers.ctrl && key.code == KeyCode::Char('c') {
-        state.should_quit = true;
-        return vec![UpdateAction::Quit];
+        return quit(state);
     }
     if state.top_dialog().is_some() {
         return Vec::new();
     }
 
     match key.code {
-        KeyCode::Char('q') => {
-            state.should_quit = true;
-            vec![UpdateAction::Quit]
-        }
+        KeyCode::Char('q') => quit(state),
         KeyCode::Char('c') => open_hook(state, DialogId::Config),
         KeyCode::Char('e') => open_hook(state, DialogId::Cert),
         KeyCode::Char('t') => open_hook(state, DialogId::Tokens),
@@ -449,6 +452,15 @@ mod tests {
     fn quit_message_sets_flag() {
         let mut state = AppState::new();
         let actions = update(&mut state, Message::Quit);
+        assert!(state.should_quit);
+        assert!(matches!(actions.as_slice(), [UpdateAction::Quit]));
+    }
+
+    #[test]
+    fn ui_quit_quits_like_ctrl_c() {
+        let mut state = AppState::new();
+        state.open_dialog(DialogId::Cert);
+        let actions = update(&mut state, Message::Ui(UiMsg::Quit));
         assert!(state.should_quit);
         assert!(matches!(actions.as_slice(), [UpdateAction::Quit]));
     }

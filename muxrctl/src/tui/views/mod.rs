@@ -211,7 +211,11 @@ mod tests {
         /// Feed one key exactly as `runner::next_message` would, then redraw so
         /// the retained surface matches the new state.
         fn key(&mut self, code: KeyCode) {
-            let key = KeyEvent::new(code);
+            self.key_event(KeyEvent::new(code));
+        }
+
+        /// [`Self::key`] for a key with modifiers held.
+        fn key_event(&mut self, key: KeyEvent) {
             let message = match self.ratcn.handle_event(Event::Key(key), &self.state) {
                 EventResult::Emit(msg) => Message::Ui(msg),
                 EventResult::Consumed => Message::Tick,
@@ -1073,5 +1077,247 @@ mod tests {
             strip.contains("Copy link") && strip.contains("Close"),
             "{strip:?}"
         );
+    }
+
+    // ─── Ctrl-C inside a modal ───────────────────────────────────────────────
+
+    /// Ctrl-C, as the terminal reports it.
+    fn ctrl_c() -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: Modifiers {
+                ctrl: true,
+                ..Modifiers::NONE
+            },
+        }
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_config_dialog_with_the_host_field_focused() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Config));
+        // The host field has the focus: a letter lands in it.
+        harness.type_str("x");
+        assert_eq!(harness.state.config.host, "x");
+        let host = harness.state.config.host.clone();
+        harness.key_event(ctrl_c());
+        assert!(harness.state.should_quit, "Ctrl-C was swallowed");
+        assert!(matches!(harness.actions.as_slice(), [UpdateAction::Quit]));
+        assert_eq!(
+            harness.state.config.host, host,
+            "Ctrl-C typed into the field"
+        );
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_a_confirm_dialog() {
+        let mut harness = Harness::new();
+        harness.state.server.status = Some(running(None));
+        harness.draw();
+        harness.key(KeyCode::Char('s'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::StopServer));
+        harness.key_event(ctrl_c());
+        assert!(harness.state.should_quit, "Ctrl-C was swallowed");
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_qr_overlay() {
+        let mut harness = Harness::new();
+        harness.generating_qr();
+        harness.key_event(ctrl_c());
+        assert!(
+            harness.state.should_quit,
+            "Ctrl-C was swallowed while generating"
+        );
+
+        let mut harness = Harness::new();
+        harness.generating_qr();
+        harness.qr_ready();
+        // Copy link is the other strip control: Ctrl-C quits from it too.
+        harness.key(KeyCode::Tab);
+        assert_eq!(harness.focused().as_deref(), Some("qr_copy"));
+        harness.key_event(ctrl_c());
+        assert!(
+            harness.state.should_quit,
+            "Ctrl-C was swallowed while showing"
+        );
+        assert!(harness.copied().is_empty(), "Ctrl-C copied the link");
+    }
+
+    #[test]
+    fn ctrl_c_quits_from_the_wizard() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('w'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Wizard));
+        harness.key_event(ctrl_c());
+        assert!(harness.state.should_quit, "Ctrl-C was swallowed");
+    }
+
+    #[test]
+    fn ctrl_alt_c_in_a_dialog_is_not_the_quit_chord() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.key_event(KeyEvent {
+            code: KeyCode::Char('c'),
+            modifiers: Modifiers {
+                ctrl: true,
+                alt: true,
+                ..Modifiers::NONE
+            },
+        });
+        assert!(!harness.state.should_quit);
+    }
+
+    // ─── Certificate letters and the trust cycle ─────────────────────────────
+
+    /// The Certificate dialog settled (its loads answered), trust on Auto,
+    /// focus left where it opens: the advertised-trust cycle, its first
+    /// focusable control (`right_still_steps_the_focused_trust_cycle` proves
+    /// the cycle has it).
+    fn settled_cert_dialog() -> Harness {
+        let mut harness = Harness::new();
+        harness.cert_dialog(Some(FINGERPRINT));
+        harness.state.cert.loading = false;
+        harness.draw();
+        assert_eq!(
+            harness.state.cert.advertise_trust,
+            crate::app::state::cert::AdvertiseTrust::Auto
+        );
+        harness
+    }
+
+    fn saves_trust(actions: &[UpdateAction]) -> bool {
+        actions
+            .iter()
+            .any(|action| matches!(action, UpdateAction::SaveAdvertiseTrust(_)))
+    }
+
+    #[test]
+    fn h_in_the_certificate_dialog_opens_help_and_leaves_the_trust_alone() {
+        let mut harness = settled_cert_dialog();
+        harness.key(KeyCode::Char('h'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::CertHelp));
+        assert_eq!(
+            harness.state.cert.advertise_trust,
+            crate::app::state::cert::AdvertiseTrust::Auto,
+            "h stepped the setting"
+        );
+        assert!(!saves_trust(&harness.actions), "h persisted a trust change");
+    }
+
+    #[test]
+    fn l_in_the_certificate_dialog_does_not_step_the_trust() {
+        let mut harness = settled_cert_dialog();
+        harness.key(KeyCode::Char('l'));
+        assert_eq!(
+            harness.state.cert.advertise_trust,
+            crate::app::state::cert::AdvertiseTrust::Auto
+        );
+        assert!(!saves_trust(&harness.actions));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Cert));
+    }
+
+    #[test]
+    fn right_still_steps_the_focused_trust_cycle() {
+        let mut harness = settled_cert_dialog();
+        harness.key(KeyCode::Right);
+        assert_eq!(
+            harness.state.cert.advertise_trust,
+            crate::app::state::cert::AdvertiseTrust::Ca
+        );
+        assert!(saves_trust(&harness.actions));
+        harness.key(KeyCode::Left);
+        assert_eq!(
+            harness.state.cert.advertise_trust,
+            crate::app::state::cert::AdvertiseTrust::Auto
+        );
+    }
+
+    #[test]
+    fn g_and_r_still_reach_their_rows_with_the_trust_cycle_focused() {
+        let mut harness = settled_cert_dialog();
+        harness.key(KeyCode::Char('r'));
+        assert!(
+            harness
+                .actions
+                .iter()
+                .any(|action| matches!(action, UpdateAction::LoadCertInfo)),
+            "r did not refresh"
+        );
+
+        harness.state.cert.loading = false;
+        harness.draw();
+        harness.key(KeyCode::Char('g'));
+        assert_eq!(
+            harness.state.top_dialog(),
+            Some(DialogId::CertRegenConfirm),
+            "g did not ask to regenerate"
+        );
+    }
+
+    // ─── Certificate help, line by line ──────────────────────────────────────
+
+    /// The certificate help at 80x16, where its text overflows the viewport.
+    fn short_help() -> Harness {
+        let mut harness = Harness::sized(80, 16);
+        harness.cert_dialog(Some(FINGERPRINT));
+        harness.key(KeyCode::Char('h'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::CertHelp));
+        assert_eq!(harness.state.cert.help_scroll, 0);
+        harness
+    }
+
+    #[test]
+    fn down_and_up_scroll_the_certificate_help_a_line_at_a_time() {
+        let mut harness = short_help();
+        let top = harness.screen();
+
+        harness.key(KeyCode::Down);
+        assert_eq!(harness.state.cert.help_scroll, 1);
+        assert_ne!(harness.screen(), top, "Down did not move the text");
+
+        harness.key(KeyCode::Up);
+        assert_eq!(harness.state.cert.help_scroll, 0);
+        assert_eq!(harness.screen(), top, "Up did not restore the text");
+
+        harness.key(KeyCode::Char('j'));
+        assert_eq!(harness.state.cert.help_scroll, 1);
+        harness.key(KeyCode::Char('k'));
+        assert_eq!(harness.state.cert.help_scroll, 0);
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::CertHelp));
+    }
+
+    #[test]
+    fn page_down_still_scrolls_the_certificate_help() {
+        let mut harness = short_help();
+        let top = harness.screen();
+        harness.key(KeyCode::PageDown);
+        assert!(
+            harness.state.cert.help_scroll > 1,
+            "PageDown moved a line at most"
+        );
+        assert_ne!(harness.screen(), top, "PageDown did not move the text");
+    }
+
+    #[test]
+    fn holding_down_stops_at_the_end_so_one_up_moves_the_text() {
+        let mut harness = short_help();
+        for _ in 0..200 {
+            harness.key(KeyCode::Down);
+        }
+        let end = harness.state.cert.help_scroll;
+        assert!(end > 0 && end < 200, "the offset ran past the end: {end}");
+        let bottom = harness.screen();
+
+        harness.key(KeyCode::End);
+        assert_eq!(
+            harness.state.cert.help_scroll, end,
+            "Down stopped short of End"
+        );
+
+        harness.key(KeyCode::Up);
+        assert_eq!(harness.state.cert.help_scroll, end - 1);
+        assert_ne!(harness.screen(), bottom, "one Up did not move the text");
     }
 }

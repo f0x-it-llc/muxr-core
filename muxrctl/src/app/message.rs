@@ -89,6 +89,10 @@ pub enum UiMsg {
     Wizard(WizardMsg),
     /// Put a value on the terminal clipboard.
     Copy(CopyTarget),
+    /// Quit muxrctl: Ctrl-C pressed while a modal is open, answered by the
+    /// modal's own wrapper because the modal floor keeps the key from the
+    /// reducer.
+    Quit,
 }
 
 /// Everything that can drive a state change.

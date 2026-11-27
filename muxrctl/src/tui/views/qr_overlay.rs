@@ -30,6 +30,7 @@ use crate::app::message::CopyTarget;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
+use crate::tui::components::quit_on_ctrl_c;
 use crate::tui::theme::{palette, styles};
 use crate::tui::widgets::qr::QrWidget;
 
@@ -295,7 +296,7 @@ fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, are
 // ── The strip controls ────────────────────────────────────────────────────────
 
 /// One of the strip's buttons (Close, or Copy link), which also answers the
-/// layer's keys: Esc and, while a code is showing, `c`.
+/// layer's keys: Esc, Ctrl-C (quit) and, while a code is showing, `c`.
 ///
 /// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`/`dismiss_key`; a
 /// `modal_scope` has neither, and an open modal turns every key nothing inside
@@ -356,7 +357,9 @@ impl Component<AppState, UiMsg> for CloseControl {
                 _ => {}
             }
         }
-        Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx)
+        let result =
+            Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx);
+        quit_on_ctrl_c(event, result)
     }
 
     fn scope_options(&self, state: &AppState) -> ScopeOptions {

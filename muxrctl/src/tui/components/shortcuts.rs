@@ -8,6 +8,10 @@
 //!
 //! The inner dialog is always asked first, so a focused text field keeps the
 //! letters it types, and Tab, Enter, Space and Esc behave exactly as before.
+//!
+//! The modal floor swallows Ctrl-C the same way, so [`quit_on_ctrl_c`] lives
+//! here too: every modal root (this wrapper, the QR layer's buttons, the
+//! wizard's controls) turns a Ctrl-C its control ignored into [`UiMsg::Quit`].
 
 use ratatui::layout::Rect;
 use ratcn::runtime::{
@@ -55,7 +59,7 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for DialogShortcu
         state: &AppState,
         ctx: &mut EventCtx<'_>,
     ) -> EventResult<UiMsg> {
-        let result = self.inner.handle_event(event, state, ctx);
+        let result = quit_on_ctrl_c(event, self.inner.handle_event(event, state, ctx));
         if !matches!(result, EventResult::Ignored) {
             return result;
         }
@@ -76,5 +80,23 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for DialogShortcu
         ctx: &mut EventCtx<'_>,
     ) -> bool {
         self.inner.reveal_in_viewport(target, state, ctx)
+    }
+}
+
+/// `result`, unless the control ignored a bare Ctrl-C: then [`UiMsg::Quit`].
+///
+/// Pass what the wrapped control answered, so a control that wants Ctrl-C for
+/// itself keeps it. Alt or Shift held alongside is not the quit chord.
+pub fn quit_on_ctrl_c(event: &Event, result: EventResult<UiMsg>) -> EventResult<UiMsg> {
+    match (event, result) {
+        (Event::Key(key), EventResult::Ignored)
+            if key.modifiers.ctrl
+                && !key.modifiers.alt
+                && !key.modifiers.shift
+                && key.code == KeyCode::Char('c') =>
+        {
+            EventResult::Emit(UiMsg::Quit)
+        }
+        (_, result) => result,
     }
 }

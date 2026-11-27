@@ -61,7 +61,7 @@ use crate::app::state::tokens::{
 use crate::app::state::wizard::{WELCOME_EXPLAIN, WizardMsg, WizardStep};
 use crate::app::state::{AppState, DialogId};
 use crate::app::update::cert::planned_sans;
-use crate::tui::components::TextInput;
+use crate::tui::components::{TextInput, quit_on_ctrl_c};
 use crate::tui::widgets::qr::{MIN_HEIGHT as QR_MIN_HEIGHT, MIN_WIDTH as QR_MIN_WIDTH, QrWidget};
 
 /// The layer's fixed size. Below this the frame shows the resize hint instead
@@ -961,8 +961,9 @@ fn truncate(text: &str, width: u16) -> String {
 
 // ── Esc ───────────────────────────────────────────────────────────────────────
 
-/// A control that also answers Esc with [`WizardMsg::Close`], and `c` with a
-/// copy of the pairing link while the Pair step shows a code.
+/// A control that also answers Esc with [`WizardMsg::Close`], Ctrl-C with
+/// [`UiMsg::Quit`], and `c` with a copy of the pairing link while the Pair
+/// step shows a code.
 ///
 /// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`; a `modal_scope` has
 /// none, and an open modal absorbs every key nothing inside it handled rather
@@ -972,7 +973,8 @@ fn truncate(text: &str, width: u16) -> String {
 ///
 /// The inner control is asked first and only an Esc it *ignored* closes the
 /// wizard, so a control that wants Esc for itself — an open [`Select`] panel,
-/// for one — keeps it. The same holds for `c`: a focused text field types it.
+/// for one — keeps it. The same holds for `c`: a focused text field types it,
+/// and for Ctrl-C.
 struct EscCloses<C> {
     inner: C,
 }
@@ -1006,7 +1008,7 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for EscCloses<C> 
         state: &AppState,
         ctx: &mut EventCtx<'_>,
     ) -> EventResult<UiMsg> {
-        let result = self.inner.handle_event(event, state, ctx);
+        let result = quit_on_ctrl_c(event, self.inner.handle_event(event, state, ctx));
         if !matches!(result, EventResult::Ignored) {
             return result;
         }
