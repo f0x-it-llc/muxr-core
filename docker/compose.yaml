@@ -23,6 +23,14 @@
 # Or use the helper wrapper:
 #   ./docker/run.sh --host <lan-ip>
 #
+# Opt-in rigs, one profile each (they publish the same ports — run ONE at a time):
+#   --profile herdr → muxrd-herdr  herdr only            (./docker/run.sh --herdr)
+#   --profile both  → muxrd-both   zellij + herdr        (./docker/run.sh --both)
+#   --profile tmux  → muxrd-tmux   tmux only             (./docker/run.sh --tmux)
+#   --profile all   → muxrd-all    zellij + herdr + tmux (./docker/run.sh --all)
+# The tmux rigs carry tmux built from its release tarball, checked against the
+# pinned TMUX_SHA256 before it is unpacked (see the Dockerfile).
+#
 # Then SSH in and drive it with muxrctl (host keys rotate per rebuild — use the
 # known_hosts-free wrapper):
 #   ./docker/ssh.sh <host> 2222    # no password
@@ -155,6 +163,95 @@ services:
     stdin_open: true
     tty: true
 
+  # ── Opt-in rig: tmux backend ────────────────────────────────────────────────
+  # Exercises muxrd's tmux backend (`MUXRD_BACKEND=tmux`) against a tmux built
+  # from source at a pinned, checksum-verified release, replacing the
+  # distribution's older tmux so the image has exactly one. Gated behind the
+  # `tmux` profile:
+  #   docker compose -f docker/compose.yaml --profile tmux up --build muxrd-tmux
+  #   # or:  ./docker/run.sh --tmux
+  # Publishes the same host ports as the zellij rig — run ONE at a time.
+  muxrd-tmux:
+    profiles: ["tmux"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime-tmux
+      args:
+        # 0.46.0 or 0.45.1, the zellij versions muxrd supports
+        ZELLIJ_VERSION: "${ZELLIJ_VERSION:-0.46.0}"
+        # Pinned tmux release and its tarball digest; they move together — see
+        # the Dockerfile.
+        TMUX_VERSION: "${TMUX_VERSION:-3.8}"
+        TMUX_SHA256: "${TMUX_SHA256:-e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e}"
+    image: muxr-tmux-rig
+    container_name: muxr-tmux-rig
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-50051}:50051"
+      - "${BIND_ADDR:-127.0.0.1}:${SSH_PORT:-2222}:22"
+    environment:
+      BACKEND: tmux
+      SESSION: "${SESSION:-backend-dev}"
+      MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
+      # In-container muxr-notify (FCM_MODE=log, e2e push-notification testing —
+      # never published to the host). See docker/entrypoint.sh start_notify().
+      NOTIFY_ENABLED: "${NOTIFY_ENABLED:-1}"
+      NOTIFY_PORT: "${NOTIFY_PORT:-8090}"
+    volumes:
+      # muxrd's token DB + cert live under the XDG share dir; tmux keeps no
+      # state of its own. A dedicated volume, so this rig shares no credential
+      # state with the others.
+      - muxrd-tmux-data:/root/.local/share/zellij
+    stdin_open: true
+    tty: true
+
+  # ── Multi-backend rig: zellij, herdr AND tmux at once ────────────────────────
+  # Uses the runtime-herdr-tmux image (all three binaries) and runs the
+  # entrypoint in BACKEND=all mode: it starts a zellij session, a headless herdr
+  # server and a tmux session, and leaves MUXRD_BACKEND UNSET so the
+  # muxrctl-spawned muxrd auto-detects and serves all three. zellij and tmux both
+  # expose a session named "${SESSION}" (same-name cross-backend routing).
+  # Gated behind the `all` profile; publishes the same host ports — run ONE rig
+  # at a time.
+  #   docker compose -f docker/compose.yaml --profile all up --build muxrd-all
+  #   # or:  ./docker/run.sh --all [--host <lan-ip>]
+  muxrd-all:
+    profiles: ["all"]
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      target: runtime-herdr-tmux
+      args:
+        # 0.46.0 or 0.45.1, the zellij versions muxrd supports
+        ZELLIJ_VERSION: "${ZELLIJ_VERSION:-0.46.0}"
+        # pinned to the last TESTED release (protocol 22); bump with wire.rs — see Dockerfile
+        HERDR_VERSION: "${HERDR_VERSION:-0.9.5}"
+        # Pinned tmux release and its tarball digest; they move together — see
+        # the Dockerfile.
+        TMUX_VERSION: "${TMUX_VERSION:-3.8}"
+        TMUX_SHA256: "${TMUX_SHA256:-e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e}"
+    image: muxr-all-rig
+    container_name: muxr-all-rig
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${GRPC_PORT:-50051}:50051"
+      - "${BIND_ADDR:-127.0.0.1}:${SSH_PORT:-2222}:22"
+    environment:
+      BACKEND: all
+      SESSION: "${SESSION:-backend-dev}"
+      MUXRD_SAN: "${MUXRD_SAN:-${BIND_ADDR:-}}"
+      # In-container muxr-notify (FCM_MODE=log, e2e push-notification testing —
+      # never published to the host). See docker/entrypoint.sh start_notify().
+      NOTIFY_ENABLED: "${NOTIFY_ENABLED:-1}"
+      NOTIFY_PORT: "${NOTIFY_PORT:-8090}"
+    volumes:
+      # Dedicated volumes, as for the multi-backend rig above: muxrd's state,
+      # the managed zellij config and herdr's workspace state.
+      - muxrd-all-data:/root/.local/share/zellij
+      - zellij-all-config:/root/.config/zellij
+      - herdr-all-data:/root/.config/herdr
+    stdin_open: true
+    tty: true
+
 volumes:
   zellij-data:
   zellij-config:
@@ -163,3 +260,7 @@ volumes:
   muxrd-both-data:
   zellij-both-config:
   herdr-both-data:
+  muxrd-tmux-data:
+  muxrd-all-data:
+  zellij-all-config:
+  herdr-all-data:

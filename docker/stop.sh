@@ -4,11 +4,12 @@
 # Usage:
 #   ./docker/stop.sh [OPTIONS]
 #
-# By default this stops ALL rig variants (zellij, herdr, both), removes their
-# containers, deletes the named volumes (token DB, TLS cert, zellij config,
-# herdr workspace state, muxr-notify DB) and removes the rig images
-# (muxr-grpc-rig / muxr-herdr-rig / muxr-both-rig) — so the next
-# ./docker/run.sh re-pairs from a clean slate and rebuilds the image.
+# By default this stops ALL rig variants (zellij, herdr, both, tmux, all),
+# removes their containers, deletes the named volumes (token DB, TLS cert,
+# zellij config, herdr workspace state, muxr-notify DB) and removes the rig
+# images (muxr-grpc-rig / muxr-herdr-rig / muxr-both-rig / muxr-tmux-rig /
+# muxr-all-rig) — so the next ./docker/run.sh re-pairs from a clean slate and
+# rebuilds the image.
 #
 # Options:
 #   --keep-data   Keep the named volumes: tokens, cert, and session state
@@ -71,15 +72,16 @@ if ! docker info >/dev/null 2>&1; then
   DOCKER=(sudo docker)
 fi
 
-# --profile herdr --profile both widens `down` to cover every rig variant, not
+# One --profile per opt-in rig widens `down` to cover every rig variant, not
 # just the default zellij service.
-COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile herdr --profile both)
+COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}"
+  --profile herdr --profile both --profile tmux --profile all)
 
 DOWN_ARGS=(--remove-orphans)
 [[ "${KEEP_DATA}" -eq 0 ]]  && DOWN_ARGS+=(--volumes)
 [[ "${KEEP_IMAGE}" -eq 0 ]] && DOWN_ARGS+=(--rmi all)
 
-echo "[stop.sh] tearing down all rig variants (zellij + herdr + both)…"
+echo "[stop.sh] tearing down all rig variants (zellij + herdr + both + tmux + all)…"
 [[ "${KEEP_DATA}" -eq 0 ]]  && echo "[stop.sh]   removing volumes (token DB, cert, session state — re-pair needed)"
 [[ "${KEEP_DATA}" -eq 1 ]]  && echo "[stop.sh]   keeping volumes (tokens/cert/session state preserved)"
 [[ "${KEEP_IMAGE}" -eq 0 ]] && echo "[stop.sh]   removing rig images (next run.sh rebuilds)"
@@ -91,4 +93,5 @@ if [[ "${PURGE}" -eq 1 ]]; then
   "${DOCKER[@]}" builder prune -f
 fi
 
-echo "[stop.sh] done. Start fresh with:  ./docker/run.sh [--herdr|--both] [--host <ip>]"
+echo "[stop.sh] done. Start fresh with:" \
+  " ./docker/run.sh [--herdr|--both|--tmux|--all] [--host <ip>]"
