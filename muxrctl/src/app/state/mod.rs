@@ -131,6 +131,24 @@ pub enum DialogId {
 }
 
 impl DialogId {
+    /// Every dialog, in declaration order (the tests iterate it).
+    #[cfg(test)]
+    pub const ALL: [DialogId; 13] = [
+        DialogId::Config,
+        DialogId::StopServer,
+        DialogId::Cert,
+        DialogId::CertHelp,
+        DialogId::CertRegenConfirm,
+        DialogId::Tokens,
+        DialogId::TokenCreate,
+        DialogId::TokenMinted,
+        DialogId::TokenRevokeConfirm,
+        DialogId::Qr,
+        DialogId::Devices,
+        DialogId::DeviceRemoveConfirm,
+        DialogId::Wizard,
+    ];
+
     /// The modal id string this dialog is opened and declared under.
     pub const fn id(self) -> &'static str {
         match self {
@@ -266,32 +284,44 @@ impl AppState {
 mod tests {
     use super::*;
 
-    const ALL: [DialogId; 13] = [
-        DialogId::Config,
-        DialogId::StopServer,
-        DialogId::Cert,
-        DialogId::CertHelp,
-        DialogId::CertRegenConfirm,
-        DialogId::Tokens,
-        DialogId::TokenCreate,
-        DialogId::TokenMinted,
-        DialogId::TokenRevokeConfirm,
-        DialogId::Qr,
-        DialogId::Devices,
-        DialogId::DeviceRemoveConfirm,
-        DialogId::Wizard,
-    ];
+    /// A `match` with no wildcard: adding a variant stops compiling here, and
+    /// the test below then fails until [`DialogId::ALL`] lists it too.
+    fn position(id: DialogId) -> usize {
+        match id {
+            DialogId::Config => 0,
+            DialogId::StopServer => 1,
+            DialogId::Cert => 2,
+            DialogId::CertHelp => 3,
+            DialogId::CertRegenConfirm => 4,
+            DialogId::Tokens => 5,
+            DialogId::TokenCreate => 6,
+            DialogId::TokenMinted => 7,
+            DialogId::TokenRevokeConfirm => 8,
+            DialogId::Qr => 9,
+            DialogId::Devices => 10,
+            DialogId::DeviceRemoveConfirm => 11,
+            DialogId::Wizard => 12,
+        }
+    }
+
+    #[test]
+    fn all_lists_every_variant_once_in_order() {
+        for (i, id) in DialogId::ALL.into_iter().enumerate() {
+            assert_eq!(position(id), i, "{id:?}");
+        }
+        assert_eq!(DialogId::ALL.len(), 13);
+    }
 
     #[test]
     fn dialog_ids_round_trip_through_parse() {
-        for id in ALL {
+        for id in DialogId::ALL {
             assert_eq!(DialogId::parse(id.id()), Some(id), "{id:?}");
         }
     }
 
     #[test]
     fn dialog_ids_are_distinct_and_spelled_exactly() {
-        let ids: Vec<&str> = ALL.iter().map(|d| d.id()).collect();
+        let ids: Vec<&str> = DialogId::ALL.iter().map(|d| d.id()).collect();
         assert_eq!(
             ids,
             [

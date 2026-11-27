@@ -12,8 +12,8 @@
 
 use ratcn::runtime::{KeyCode, KeyEvent};
 
-use super::action::UpdateAction;
-use super::message::{Message, UiMsg};
+use super::action::{ClipboardText, UpdateAction};
+use super::message::{CopyTarget, Message, UiMsg};
 use super::state::server::ServerMsg;
 use super::state::{AppState, DialogId};
 
@@ -29,10 +29,7 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
     match message {
         Message::Key(key) => handle_key(state, key),
         Message::Tick => handle_tick(state),
-        Message::Quit => {
-            state.should_quit = true;
-            vec![UpdateAction::Quit]
-        }
+        Message::Quit => quit(state),
         Message::Ui(msg) => handle_ui(state, msg),
 
         // ── Async task results ────────────────────────────────────────────────
@@ -140,6 +137,44 @@ fn handle_ui(state: &mut AppState, msg: UiMsg) -> Vec<UpdateAction> {
         UiMsg::Tokens(msg) => tokens::update(state, msg),
         UiMsg::Devices(msg) => devices::update(state, msg),
         UiMsg::Wizard(msg) => wizard::update(state, msg),
+        UiMsg::Copy(target) => copy(state, target),
+        UiMsg::Quit => quit(state),
+    }
+}
+
+/// Ask for a clean shutdown: what `q` on the dashboard, Ctrl-C anywhere and
+/// [`Message::Quit`] all do.
+fn quit(state: &mut AppState) -> Vec<UpdateAction> {
+    state.should_quit = true;
+    vec![UpdateAction::Quit]
+}
+
+/// Resolve `target` from state and queue the clipboard write. The toast says
+/// "sent", never "copied": OSC 52 has no acknowledgement.
+fn copy(state: &mut AppState, target: CopyTarget) -> Vec<UpdateAction> {
+    use super::state::tokens::QrOverlayPhase;
+
+    let text = match target {
+        CopyTarget::MintedToken => state
+            .tokens
+            .last_minted_secret
+            .as_ref()
+            .map(|(_, secret, _)| secret.clone()),
+        CopyTarget::PairingLink => match state.tokens.qr_overlay.as_ref().map(|o| &o.phase) {
+            Some(QrOverlayPhase::Showing { uri, .. }) => Some(uri.clone()),
+            _ => None,
+        },
+        CopyTarget::CertFingerprint => state.cert.fingerprint.clone(),
+    };
+    match text {
+        Some(text) => {
+            state.toast_ok(format!("{} sent to the terminal clipboard", target.label()));
+            vec![UpdateAction::CopyToClipboard(ClipboardText::new(text))]
+        }
+        None => {
+            state.toast_err(format!("{} is not available to copy", target.label()));
+            Vec::new()
+        }
     }
 }
 
@@ -222,27 +257,25 @@ fn clear_loading(state: &mut AppState) {
 
 /// Translate a key the ratcn runtime left unhandled.
 ///
-/// With a dialog open the modal layer owns the keyboard (Esc is the dialog's
-/// own `on_dismiss`), so only `Ctrl-C` is honoured here. A dialog's single-letter
-/// shortcuts (n/s/x/r/y/h/g/d) are answered by the `DialogShortcuts` wrapper in
-/// `tui/components/shortcuts.rs` from the table in `app::shortcuts`, never by this
-/// reducer, because the modal floor turns every key a dialog ignored into a
-/// consumed one before the runner could deliver it here.
+/// Only the dashboard's keys arrive here. With a modal open (a dialog, the QR
+/// layer, the wizard) the modal floor turns every key nothing inside it handled
+/// into a consumed one before the runner could deliver it, so a modal answers
+/// its own keys from inside: Esc is the dialog's `on_dismiss`, a dialog's
+/// single-letter shortcuts come from the `DialogShortcuts` wrapper in
+/// `tui/components/shortcuts.rs` reading the table in `app::shortcuts` (the
+/// letters are listed only there), and Ctrl-C is turned into [`UiMsg::Quit`] by the same
+/// wrapper, the QR layer's buttons and the wizard's controls. Ctrl-C here is
+/// therefore the dashboard's, and quits.
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
-    // Ctrl-C always quits.
     if key.modifiers.ctrl && key.code == KeyCode::Char('c') {
-        state.should_quit = true;
-        return vec![UpdateAction::Quit];
+        return quit(state);
     }
     if state.top_dialog().is_some() {
         return Vec::new();
     }
 
     match key.code {
-        KeyCode::Char('q') => {
-            state.should_quit = true;
-            vec![UpdateAction::Quit]
-        }
+        KeyCode::Char('q') => quit(state),
         KeyCode::Char('c') => open_hook(state, DialogId::Config),
         KeyCode::Char('e') => open_hook(state, DialogId::Cert),
         KeyCode::Char('t') => open_hook(state, DialogId::Tokens),
@@ -297,6 +330,71 @@ mod tests {
     use crate::app::state::ServerInfo;
     use crate::app::state::config::ConfigMsg;
     use ratcn::runtime::Modifiers;
+
+    fn showing(uri: &str) -> crate::app::state::tokens::QrOverlay {
+        use crate::app::state::tokens::{QrOverlay, QrOverlayPhase};
+        QrOverlay {
+            phase: QrOverlayPhase::Showing {
+                uri: uri.to_string(),
+                host: "h".into(),
+                port: 1,
+                fingerprint_short: "ab".into(),
+            },
+            seq: 1,
+            baseline_clients: 0,
+            token_name: "t".into(),
+            read_only: false,
+            tick_counter: 0,
+        }
+    }
+
+    fn copy_msg(t: CopyTarget) -> Message {
+        Message::Ui(UiMsg::Copy(t))
+    }
+
+    #[test]
+    fn copy_present_values_emit_one_action_and_ok_toast() {
+        let cases = [
+            (CopyTarget::MintedToken, "secret-1"),
+            (CopyTarget::PairingLink, "muxr://pair?x=1"),
+            (CopyTarget::CertFingerprint, "deadbeef"),
+        ];
+        for (target, value) in cases {
+            let mut state = AppState::new();
+            state.tokens.last_minted_secret = Some(("n".into(), "secret-1".into(), false));
+            state.tokens.qr_overlay = Some(showing("muxr://pair?x=1"));
+            state.cert.fingerprint = Some("deadbeef".into());
+            let actions = update(&mut state, copy_msg(target));
+            assert_eq!(actions.len(), 1);
+            match &actions[0] {
+                UpdateAction::CopyToClipboard(t) => assert_eq!(t.as_str(), value),
+                other => panic!("unexpected action {other:?}"),
+            }
+            assert_eq!(state.ui.toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn copy_absent_values_emit_no_action_and_error_toast() {
+        for target in [
+            CopyTarget::MintedToken,
+            CopyTarget::PairingLink,
+            CopyTarget::CertFingerprint,
+        ] {
+            let mut state = AppState::new();
+            let actions = update(&mut state, copy_msg(target));
+            assert!(actions.is_empty());
+            assert_eq!(state.ui.toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn clipboard_action_debug_hides_the_text() {
+        let a = UpdateAction::CopyToClipboard(ClipboardText::new("topsecret".into()));
+        let s = format!("{a:?}");
+        assert!(!s.contains("topsecret"));
+        assert!(s.contains("redacted"));
+    }
 
     pub(crate) fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code)
@@ -354,6 +452,15 @@ mod tests {
     fn quit_message_sets_flag() {
         let mut state = AppState::new();
         let actions = update(&mut state, Message::Quit);
+        assert!(state.should_quit);
+        assert!(matches!(actions.as_slice(), [UpdateAction::Quit]));
+    }
+
+    #[test]
+    fn ui_quit_quits_like_ctrl_c() {
+        let mut state = AppState::new();
+        state.open_dialog(DialogId::Cert);
+        let actions = update(&mut state, Message::Ui(UiMsg::Quit));
         assert!(state.should_quit);
         assert!(matches!(actions.as_slice(), [UpdateAction::Quit]));
     }

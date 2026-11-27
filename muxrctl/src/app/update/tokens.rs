@@ -9,6 +9,7 @@ use crate::app::action::UpdateAction;
 use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokenExpiryChoice, TokensMsg};
 use crate::app::state::{AppState, DialogId};
 use crate::server::tokens::TokenRecord;
+use ratcn::runtime::FocusState;
 
 /// Apply a [`TokensMsg`].
 pub fn update(state: &mut AppState, msg: TokensMsg) -> Vec<UpdateAction> {
@@ -204,12 +205,30 @@ pub fn on_qr_ready(
     Vec::new()
 }
 
+/// Component id of the QR layer's Close control (declared in every phase).
+pub(crate) const QR_CLOSE_ID: &str = "qr_close";
+
+/// Component id of the QR layer's Copy link control (declared only while
+/// showing).
+pub(crate) const QR_COPY_ID: &str = "qr_copy";
+
+/// Move focus to Close if it sits on Copy link, which is about to stop being
+/// declared. A stored focus path that names nothing leaves no control focused,
+/// and the layer's Esc and Ctrl-C answers live on the controls. Focus anywhere
+/// else is left alone.
+fn park_focus_off_copy(state: &mut AppState) {
+    if state.ui.focus.path().last().map(|id| id.as_str()) == Some(QR_COPY_ID) {
+        state.ui.focus = FocusState::intent([DialogId::Qr.id(), QR_CLOSE_ID]);
+    }
+}
+
 /// QR generation failed; same seq guard as [`on_qr_ready`].
 pub fn on_qr_failed(state: &mut AppState, err: String, seq: u64) -> Vec<UpdateAction> {
     if let Some(overlay) = state.tokens.qr_overlay.as_mut()
         && overlay.seq == seq
     {
         overlay.phase = QrOverlayPhase::Failed { err };
+        park_focus_off_copy(state);
     }
     Vec::new()
 }
@@ -235,6 +254,7 @@ pub(crate) fn check_overlay_connection(state: &mut AppState, current_clients: us
         && current_clients > overlay.baseline_clients
     {
         overlay.phase = QrOverlayPhase::Connected;
+        park_focus_off_copy(state);
     }
 }
 
@@ -313,6 +333,37 @@ mod tests {
     }
 
     // ── List ──────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn leaving_showing_moves_focus_from_copy_to_close() {
+        let focus_close = FocusState::intent([DialogId::Qr.id(), QR_CLOSE_ID]);
+        let focus_copy = || FocusState::intent([DialogId::Qr.id(), QR_COPY_ID]);
+
+        let mut state = AppState::default();
+        open_overlay(&mut state, 3, showing());
+        state.ui.focus = focus_copy();
+        check_overlay_connection(&mut state, 1);
+        assert!(matches!(
+            state.tokens.qr_overlay.as_ref().map(|o| &o.phase),
+            Some(QrOverlayPhase::Connected)
+        ));
+        assert_eq!(state.ui.focus, focus_close);
+
+        let mut state = AppState::default();
+        open_overlay(&mut state, 3, showing());
+        state.ui.focus = focus_copy();
+        on_qr_failed(&mut state, "x".to_string(), 3);
+        assert_eq!(state.ui.focus, focus_close);
+
+        // Focus elsewhere is not touched.
+        let mut state = AppState::default();
+        open_overlay(&mut state, 3, showing());
+        state.ui.focus = FocusState::intent([DialogId::Qr.id(), QR_CLOSE_ID]);
+        state.ui.focus = FocusState::intent(["elsewhere"]);
+        let before = state.ui.focus.clone();
+        check_overlay_connection(&mut state, 1);
+        assert_eq!(state.ui.focus, before);
+    }
 
     #[test]
     fn tokens_loaded_keeps_the_focus_on_the_same_token() {

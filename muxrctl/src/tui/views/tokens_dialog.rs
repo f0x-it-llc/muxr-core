@@ -15,6 +15,7 @@ use ratcn::runtime::DeclareCtx;
 use ratcn::{Button, Checkbox, Cycle, Dialog, List, ListItem};
 
 use crate::app::UiMsg;
+use crate::app::message::CopyTarget;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::tokens::{
@@ -281,6 +282,11 @@ pub fn declare_minted(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
         .action(
             "tok_minted_qr",
             action(Button::new("Show pairing QR").on_press(|| tokens(TokensMsg::MintedShowQr))),
+        )
+        // Copying leaves the dialog open: the operator may still want the QR.
+        .action(
+            "tok_minted_copy",
+            action(Button::new("Copy token").on_press(|| UiMsg::Copy(CopyTarget::MintedToken))),
         )
         .action(
             "tok_minted_done",
