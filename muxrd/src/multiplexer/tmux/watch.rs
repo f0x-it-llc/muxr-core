@@ -644,6 +644,22 @@ impl<S: Source> Watcher<S> {
     /// Re-store every pane whose row is gone, then re-run the heuristic for
     /// every pane without a report.
     fn tick(&mut self, now: Instant) {
+        // A row this watcher stored or published has vanished: the backend
+        // removes a row after killing its pane, possibly before tmux's layout
+        // notification is read here. tmux never reuses pane ids, so a listing
+        // taken now cannot hold the dead pane; take it before adopting, so a
+        // dead pane is closed rather than stored and published again. A
+        // failed listing (the session may be gone) skips adoption this tick.
+        if !self.dirty
+            && self.lost_a_row()
+            && let Err(e) = self.relist(now)
+        {
+            log::debug!(
+                "tmux watcher [{}]: pane listing failed: {e:#}",
+                self.session
+            );
+            self.dirty = true;
+        }
         let panes: Vec<u32> = self.panes.keys().copied().collect();
         for pane in panes {
             // With a listing owed, a missing row may belong to a pane that
@@ -653,6 +669,13 @@ impl<S: Source> Watcher<S> {
             }
             self.evaluate(pane, now);
         }
+    }
+
+    /// Whether a pane this watcher stored or published has no row any more.
+    fn lost_a_row(&self) -> bool {
+        self.panes.iter().any(|(pane, track)| {
+            (track.has_row || track.published.is_some()) && self.state.mark(*pane).is_none()
+        })
     }
 
     /// When no session holds the row of `pane` (its owner dropped it, the
@@ -1013,6 +1036,8 @@ mod tests {
         panes: Vec<PaneRow>,
         windows: Vec<WindowRow>,
         pane_reads: usize,
+        /// Pane listings fail (the session is gone).
+        panes_fail: bool,
     }
 
     #[derive(Clone, Default)]
@@ -1032,6 +1057,9 @@ mod tests {
         fn panes(&self, _session: &str) -> Result<Vec<PaneRow>> {
             let mut world = self.world();
             world.pane_reads += 1;
+            if world.panes_fail {
+                return Err(anyhow!("can't find session"));
+            }
             Ok(world.panes.clone())
         }
 
@@ -1945,6 +1973,42 @@ mod tests {
         assert_eq!(r.events(), [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]);
         r.watcher.tick(now + RELIST_GAP);
         assert!(r.events().is_empty());
+    }
+
+    #[test]
+    fn a_tick_lists_before_re_storing_a_row_the_backend_removed() {
+        let mut r = rig(&[(3, "bash"), (5, "bash")]);
+        r.feed(report(3, "state=blocked:app=claude"));
+        r.events();
+        // The pane is killed and its row removed, but the layout change is
+        // still queued behind other output: nothing marked a listing owed.
+        r.state.remove_pane(3);
+        r.source.world().panes.retain(|p| p.id != 3);
+        assert!(!r.watcher.dirty);
+        let reads = r.source.world().pane_reads;
+        r.watcher.tick(Instant::now());
+        assert_eq!(r.source.world().pane_reads, reads + 1, "listed at once");
+        assert_eq!(
+            r.events(),
+            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })],
+            "closed, not re-stored as Blocked"
+        );
+        assert!(r.state.rows_for_session("s").is_empty());
+        assert!(!r.watcher.panes.contains_key(&3));
+    }
+
+    #[test]
+    fn a_failed_listing_skips_adoption_for_the_tick() {
+        let mut r = rig(&[(3, "bash")]);
+        r.feed(report(3, "state=done:app=claude"));
+        r.events();
+        // `kill_session` removed the rows; listing the session now fails.
+        r.state.remove_session("s");
+        r.source.world().panes_fail = true;
+        r.watcher.tick(Instant::now());
+        assert!(r.events().is_empty(), "no Done published again");
+        assert!(r.state.rows_for_session("s").is_empty());
+        assert!(r.watcher.dirty, "the listing stays owed");
     }
 
     #[test]
