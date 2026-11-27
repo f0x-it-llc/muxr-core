@@ -104,6 +104,11 @@ pub struct MuxrService {
     /// shares one state with the check task via
     /// [`MuxrService::with_update_state`].
     update: crate::update::UpdateState,
+    /// The host-monitoring switch and its samples (`monitor::MonitorHandle`).
+    /// `None` until [`MuxrService::with_monitor`] hands one in; `GetVersion`
+    /// advertises `"host-vitals"` only while it reports enabled, read at call
+    /// time so a runtime flip shows on the next call.
+    monitor: Option<crate::monitor::MonitorHandle>,
 }
 
 impl Default for MuxrService {
@@ -134,6 +139,7 @@ impl MuxrService {
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
             update: crate::update::UpdateState::default(),
+            monitor: None,
         }
     }
 
@@ -163,6 +169,7 @@ impl MuxrService {
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
             update: crate::update::UpdateState::default(),
+            monitor: None,
         }
     }
 
@@ -211,6 +218,20 @@ impl MuxrService {
     pub fn with_update_state(mut self, update: crate::update::UpdateState) -> Self {
         self.update = update;
         self
+    }
+
+    /// Hand this service the host-monitoring handle (see the `monitor` field
+    /// doc). Builder-style, chainable like [`MuxrService::with_update_state`];
+    /// `bin/muxrd.rs` shares one handle with the control socket.
+    #[must_use]
+    pub fn with_monitor(mut self, monitor: crate::monitor::MonitorHandle) -> Self {
+        self.monitor = Some(monitor);
+        self
+    }
+
+    /// The host-monitoring handle, when one was supplied.
+    pub fn monitor(&self) -> Option<&crate::monitor::MonitorHandle> {
+        self.monitor.as_ref()
     }
 
     /// Resolve an opaque session `id` (`"<backend>:<bare>"`) to the backend that

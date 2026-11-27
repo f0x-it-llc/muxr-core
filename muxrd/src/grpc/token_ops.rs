@@ -85,6 +85,11 @@ impl MuxrService {
         if self.event_bus.is_some() {
             capabilities.push("agents-stream".to_owned());
         }
+        // Additive capability flag — host monitoring is on. Read at call time:
+        // the control socket can flip it while the server runs.
+        if self.monitor.as_ref().is_some_and(|m| m.is_enabled()) {
+            capabilities.push("host-vitals".to_owned());
+        }
 
         let info = VersionInfo {
             server_version: SERVER_VERSION.to_owned(),
@@ -480,6 +485,26 @@ mod tests {
             .expect("GetVersion must not error")
             .into_inner();
         assert_eq!(info.latest_version, "");
+    }
+
+    // ── "host-vitals" capability ─────────────────────────────────────────────
+
+    /// Absent while the monitor is disabled (or never supplied), present while
+    /// enabled, and it follows the handle through a runtime flip.
+    #[tokio::test]
+    async fn host_vitals_capability_follows_the_monitor_handle() {
+        let (_stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let monitor = crate::monitor::MonitorHandle::new(stop_rx);
+        let service = MuxrService::new().with_monitor(monitor.clone());
+
+        assert!(!has(&version(&service).await, "host-vitals"));
+        assert!(!has(&version(&MuxrService::new()).await, "host-vitals"));
+
+        monitor.set_enabled(true);
+        assert!(has(&version(&service).await, "host-vitals"));
+
+        monitor.set_enabled(false);
+        assert!(!has(&version(&service).await, "host-vitals"));
     }
 
     // ── "agents" capability ──────────────────────────────────────────────────

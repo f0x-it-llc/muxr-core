@@ -127,7 +127,7 @@ fn pane_id_plugin() {
 mod control_msg {
     use std::io::{Cursor, Read, Write};
 
-    use muxrd::control::ControlRequest;
+    use muxrd::control::{ControlRequest, ControlResponse};
 
     // Mirror the wire-format helpers from control.rs (they're private, so we
     // re-implement the framing here for test purposes).
@@ -167,6 +167,29 @@ mod control_msg {
         buf.set_position(0);
         let decoded: ControlRequest = read_msg(&mut buf).unwrap();
         assert!(matches!(decoded, ControlRequest::Shutdown));
+    }
+
+    #[test]
+    fn round_trip_set_monitoring_request() {
+        for enabled in [true, false] {
+            let mut buf = Cursor::new(Vec::<u8>::new());
+            write_msg(&mut buf, &ControlRequest::SetMonitoring { enabled });
+            buf.set_position(0);
+            let decoded: ControlRequest = read_msg(&mut buf).unwrap();
+            assert!(matches!(
+                decoded,
+                ControlRequest::SetMonitoring { enabled: e } if e == enabled
+            ));
+        }
+    }
+
+    #[test]
+    fn round_trip_error_response() {
+        let mut buf = Cursor::new(Vec::<u8>::new());
+        write_msg(&mut buf, &ControlResponse::Error("disk full".to_owned()));
+        buf.set_position(0);
+        let decoded: ControlResponse = read_msg(&mut buf).unwrap();
+        assert!(matches!(decoded, ControlResponse::Error(m) if m == "disk full"));
     }
 
     #[test]
