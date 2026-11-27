@@ -104,8 +104,11 @@ pass `--backend` / `MUXRD_BACKEND` (for example `--backend tmux`) to restrict to
 
 tmux settings, all optional:
 
-- `MUXRD_TMUX_SOCKET`: an absolute socket path, or a `-L` name, for a tmux server
-  that is not on the default `/tmp/tmux-<uid>/default` (or under `$TMUX_TMPDIR`).
+- `MUXRD_TMUX_SOCKET`: a `-L` name, or an absolute socket path, for a tmux server
+  that is not on the default `/tmp/tmux-<uid>/default` (or under `$TMUX_TMPDIR`). A name
+  is passed to tmux as `-L`, so tmux checks its socket directory itself; an absolute path
+  is used only if its directory is owned by muxrd's user and closed to group and others
+  (mode 0700).
 - `MUXRD_TMUX_BIN`: the tmux binary to run, default `tmux`.
 - `MUXRD_TMUX_WATCH_MAX`: how many sessions muxrd watches for agent status, default
   16. `0` turns the watcher off, and with it the agents stream and push
