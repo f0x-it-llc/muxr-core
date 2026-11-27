@@ -1280,6 +1280,72 @@ mod tests {
         assert!(harness.copied().is_empty(), "Ctrl-C copied the link");
     }
 
+    /// Tab to Copy link while showing, so focus sits on the control that is
+    /// about to disappear.
+    fn focus_qr_copy(harness: &mut Harness) {
+        harness.generating_qr();
+        harness.qr_ready();
+        harness.key(KeyCode::Tab);
+        assert_eq!(harness.focused().as_deref(), Some("qr_copy"));
+    }
+
+    fn connect_qr(harness: &mut Harness) {
+        harness.feed(Message::StatusLoaded(Some(crate::app::state::ServerInfo {
+            client_count: 1,
+            ..running(None)
+        })));
+        assert!(matches!(
+            harness.state.tokens.qr_overlay.as_ref().map(|o| &o.phase),
+            Some(QrOverlayPhase::Connected)
+        ));
+    }
+
+    fn fail_qr(harness: &mut Harness) {
+        let seq = harness.state.qr_seq;
+        harness.feed(Message::TokenQrFailed {
+            err: "boom".to_string(),
+            seq,
+        });
+        assert!(matches!(
+            harness.state.tokens.qr_overlay.as_ref().map(|o| &o.phase),
+            Some(QrOverlayPhase::Failed { .. })
+        ));
+    }
+
+    #[test]
+    fn qr_ids_match_the_reducer_constants() {
+        use crate::app::update::tokens::{QR_CLOSE_ID, QR_COPY_ID};
+        assert_eq!(QR_CLOSE_ID, "qr_close");
+        assert_eq!(QR_COPY_ID, "qr_copy");
+    }
+
+    #[test]
+    fn esc_closes_the_qr_layer_after_connect_with_copy_focused() {
+        let mut harness = Harness::new();
+        focus_qr_copy(&mut harness);
+        connect_qr(&mut harness);
+        harness.key(KeyCode::Esc);
+        assert_ne!(harness.state.top_dialog(), Some(DialogId::Qr));
+    }
+
+    #[test]
+    fn ctrl_c_quits_after_connect_with_copy_focused() {
+        let mut harness = Harness::new();
+        focus_qr_copy(&mut harness);
+        connect_qr(&mut harness);
+        harness.key_event(ctrl_c());
+        assert!(harness.state.should_quit, "Ctrl-C was swallowed");
+    }
+
+    #[test]
+    fn esc_closes_the_qr_layer_after_failure_with_copy_focused() {
+        let mut harness = Harness::new();
+        focus_qr_copy(&mut harness);
+        fail_qr(&mut harness);
+        harness.key(KeyCode::Esc);
+        assert_ne!(harness.state.top_dialog(), Some(DialogId::Qr));
+    }
+
     #[test]
     fn ctrl_c_quits_from_the_wizard() {
         let mut harness = Harness::new();

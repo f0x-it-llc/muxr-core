@@ -30,6 +30,7 @@ use crate::app::message::CopyTarget;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
+use crate::app::update::tokens::{QR_CLOSE_ID, QR_COPY_ID};
 use crate::tui::components::quit_on_ctrl_c;
 use crate::tui::theme::{palette, styles};
 use crate::tui::widgets::qr::QrWidget;
@@ -60,11 +61,11 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
             // focusable inside parks focus outside itself, and then no key
             // reaches the layer.
             let (_, copy_area, close_area) = split_strip(split(area).1);
-            ctx.component("qr_close", CloseControl::close(), close_area);
+            ctx.component(QR_CLOSE_ID, CloseControl::close(), close_area);
             // Declared after Close, so Close stays the layer's default focus.
             // Only a showing code has a link to copy.
             if is_showing(ctx.state()) {
-                ctx.component("qr_copy", CloseControl::copy(), copy_area);
+                ctx.component(QR_COPY_ID, CloseControl::copy(), copy_area);
             }
         },
     );
@@ -306,7 +307,9 @@ fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, are
 /// here, beside the Enter/Space the button already answers, is what makes the
 /// strip's "Esc close" true — and both emit [`TokensMsg::QrClose`], which never
 /// revokes the token being shown. Both buttons wear the same keys, so they work
-/// wherever the focus sits.
+/// wherever the focus sits among the declared controls. That holds only while
+/// focus is on a declared control: Copy link disappears when the phase leaves
+/// showing, so the reducer moves focus off it to Close at that moment.
 struct CloseControl {
     button: Button<UiMsg>,
 }
