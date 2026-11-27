@@ -44,21 +44,37 @@
 //! notifications (the `%exit` itself included) can still be drained, after
 //! which [`ControlClient::next_notification`] errors, and [`ControlClient::command`]
 //! errors at once. The client never reconnects; the caller decides whether to
-//! spawn a new one. Dropping it writes `detach-client`, closes stdin, waits up
-//! to one second for tmux to exit and then kills the child.
+//! spawn a new one.
+//!
+//! Writes never block the caller: a writer thread owns tmux's stdin and drains
+//! a bounded outbox ([`MAX_OUTBOX_BYTES`]). A command waits for outbox space
+//! only until its own deadline, and an outbox that stays full (tmux no longer
+//! reading) marks the client dead. Dropping the client queues `detach-client`
+//! if there is room, closes the outbox (the writer then closes stdin), waits up
+//! to one second for tmux to exit and then kills the child; it never waits on
+//! the pipe.
+//!
+//! ## Not for pane-controlled text
+//! The block framing has no escaping: a body line that repeats the block's own
+//! `%end`/`%error` guard closes it early, and the rest of the body is then
+//! parsed as notifications. Never use [`ControlClient::command`] to read text
+//! a pane controls (`capture-pane`, titles, user options over several lines);
+//! run those through the tmux command line instead.
 //!
 //! ## Bounded memory
-//! At most [`DEFAULT_QUEUE_CAP`] notifications are queued; past that the oldest
+//! At most [`DEFAULT_QUEUE_CAP`] notifications and [`MAX_QUEUE_BYTES`] of them
+//! (payload plus per-item overhead) are queued; past either limit the oldest
 //! pane output is dropped first (then the oldest notification of any kind) and
 //! counted in [`ControlClient::dropped_notifications`]. A line longer than
 //! [`MAX_LINE_BYTES`] is discarded whole and counted in
-//! [`ControlClient::oversized_lines`], and a reply body is capped at
-//! [`MAX_REPLY_BYTES`], so a pane that floods output cannot grow muxrd without
-//! limit.
+//! [`ControlClient::oversized_lines`], a reply body is capped at
+//! [`MAX_REPLY_BYTES`] (each line also costs its `String` overhead), and a
+//! command line at [`MAX_COMMAND_BYTES`], so a pane that floods output cannot
+//! grow muxrd without limit.
 
 use std::collections::VecDeque;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -71,17 +87,27 @@ use super::paths::{TmuxSocket, tmux_bin};
 pub const DEFAULT_QUEUE_CAP: usize = 4096;
 /// Longest protocol line kept; longer lines are discarded and counted.
 pub const MAX_LINE_BYTES: usize = 1024 * 1024;
-/// Cap on the total body bytes of one reply; further lines are dropped.
+/// Cap on the total body bytes of one reply, counting [`LINE_OVERHEAD`] per
+/// line; further lines are dropped.
 pub const MAX_REPLY_BYTES: usize = 16 * 1024 * 1024;
+/// Cap on the queued notifications' bytes (payload plus per-item overhead).
+pub const MAX_QUEUE_BYTES: usize = 16 * 1024 * 1024;
+/// Longest command line [`ControlClient::command`] accepts.
+pub const MAX_COMMAND_BYTES: usize = 64 * 1024;
+/// Cap on bytes written but not yet taken by tmux's stdin.
+pub const MAX_OUTBOX_BYTES: usize = 256 * 1024;
+/// What one stored reply line costs beyond its text.
+const LINE_OVERHEAD: usize = std::mem::size_of::<String>();
 /// How long [`ControlClient::spawn`] waits for the attach to be confirmed.
 pub const SPAWN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Timeout used by the convenience wrappers ([`ControlClient::resume_pane`] and
 /// friends).
 pub const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Grace period between `detach-client` and killing the child on drop.
+/// Grace period between closing stdin and killing the child on drop.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(1);
-/// How long a failed write waits for the reader to record why tmux went away.
+/// How long the writer, after a failed write, waits for the reader to record
+/// why tmux went away.
 const DEATH_SETTLE: Duration = Duration::from_millis(250);
 /// Bytes of the child's stderr kept for error messages.
 const STDERR_KEEP: usize = 4096;
@@ -183,6 +209,30 @@ pub enum Notification {
 impl Notification {
     fn is_output(&self) -> bool {
         matches!(self, Self::Output { .. } | Self::ExtendedOutput { .. })
+    }
+
+    /// Bytes this notification holds while queued, overhead included.
+    fn cost(&self) -> usize {
+        let payload = match self {
+            Self::Output { bytes, .. } | Self::ExtendedOutput { bytes, .. } => bytes.len(),
+            Self::WindowRenamed { name, .. }
+            | Self::SessionChanged { name, .. }
+            | Self::SessionRenamed { name } => name.len(),
+            Self::SubscriptionChanged { name, value, .. } => name.len() + value.len(),
+            Self::Exit { reason } => reason.as_ref().map_or(0, String::len),
+            Self::Message(text) | Self::Unknown(text) => text.len(),
+            Self::Pause { .. }
+            | Self::Continue { .. }
+            | Self::LayoutChange { .. }
+            | Self::WindowAdd { .. }
+            | Self::WindowClose { .. }
+            | Self::WindowPaneChanged { .. }
+            | Self::SessionsChanged
+            | Self::SessionWindowChanged { .. }
+            | Self::PaneModeChanged { .. }
+            | Self::ClientDetached => 0,
+        };
+        std::mem::size_of::<Self>() + payload
     }
 }
 
@@ -459,10 +509,11 @@ impl Framer {
                     reply: block.reply,
                 });
             }
-            if open.bytes + line.len() > self.max_reply_bytes {
+            let cost = line.len() + LINE_OVERHEAD;
+            if open.bytes + cost > self.max_reply_bytes {
                 open.truncated += 1;
             } else {
-                open.bytes += line.len();
+                open.bytes += cost;
                 open.reply.lines.push(lossy(line));
             }
             return None;
@@ -544,6 +595,9 @@ struct State {
     notifications: VecDeque<Notification>,
     replies: VecDeque<CommandReply>,
     queue_cap: usize,
+    queue_bytes_cap: usize,
+    /// Sum of [`Notification::cost`] over `notifications`.
+    queue_bytes: usize,
     dropped: u64,
     oversized: u64,
     dead: Option<String>,
@@ -553,24 +607,36 @@ struct State {
 
 impl State {
     fn push_notification(&mut self, notification: Notification) {
-        if self.notifications.len() >= self.queue_cap {
-            match self.notifications.iter().position(Notification::is_output) {
-                Some(i) => {
-                    self.notifications.remove(i);
-                }
-                None => {
-                    self.notifications.pop_front();
-                }
+        let cost = notification.cost();
+        while !self.notifications.is_empty()
+            && (self.notifications.len() >= self.queue_cap
+                || self.queue_bytes + cost > self.queue_bytes_cap)
+        {
+            let evicted = match self.notifications.iter().position(Notification::is_output) {
+                Some(i) => self.notifications.remove(i),
+                None => self.notifications.pop_front(),
+            };
+            if let Some(evicted) = evicted {
+                self.queue_bytes -= evicted.cost();
             }
             if self.dropped == 0 {
                 log::warn!(
-                    "tmux control: notification queue full ({}); dropping oldest output",
-                    self.queue_cap
+                    "tmux control: notification queue full ({} items, {} bytes); \
+                     dropping oldest output",
+                    self.queue_cap,
+                    self.queue_bytes_cap
                 );
             }
             self.dropped += 1;
         }
+        self.queue_bytes += cost;
         self.notifications.push_back(notification);
+    }
+
+    fn pop_notification(&mut self) -> Option<Notification> {
+        let notification = self.notifications.pop_front()?;
+        self.queue_bytes -= notification.cost();
+        Some(notification)
     }
 
     fn mark_dead(&mut self, reason: String) {
@@ -604,12 +670,14 @@ struct Shared {
 }
 
 impl Shared {
-    fn new(queue_cap: usize) -> Self {
+    fn new(queue_cap: usize, queue_bytes_cap: usize) -> Self {
         Self {
             state: Mutex::new(State {
                 notifications: VecDeque::new(),
                 replies: VecDeque::new(),
                 queue_cap: queue_cap.max(1),
+                queue_bytes_cap,
+                queue_bytes: 0,
                 dropped: 0,
                 oversized: 0,
                 dead: None,
@@ -717,6 +785,150 @@ fn stderr_loop(stderr: impl Read, shared: &Shared) {
     let _ = io::copy(&mut rest, &mut io::sink());
 }
 
+// ─── The writer thread and its bounded outbox ────────────────────────────────
+
+#[derive(Debug, Default)]
+struct OutboxState {
+    queue: VecDeque<Vec<u8>>,
+    /// Bytes queued and not yet taken by the writer.
+    bytes: usize,
+    closed: bool,
+}
+
+/// How long [`Outbox::push`] may wait for room.
+#[derive(Debug, Clone, Copy)]
+enum Room {
+    /// Not at all.
+    Now,
+    /// Until the deadline (`None`: no deadline).
+    Until(Option<Instant>),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Push {
+    Queued,
+    Full,
+    Closed,
+}
+
+/// Bytes waiting for tmux's stdin, capped at `cap`.
+#[derive(Debug)]
+struct Outbox {
+    state: Mutex<OutboxState>,
+    changed: Condvar,
+    cap: usize,
+}
+
+impl Outbox {
+    fn new(cap: usize) -> Self {
+        Self {
+            state: Mutex::new(OutboxState::default()),
+            changed: Condvar::new(),
+            cap,
+        }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, OutboxState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Queue `payload`; a payload larger than the cap still fits an empty
+    /// outbox.
+    fn push(&self, payload: Vec<u8>, room: Room) -> Push {
+        let mut state = self.lock();
+        loop {
+            if state.closed {
+                return Push::Closed;
+            }
+            if state.queue.is_empty() || state.bytes + payload.len() <= self.cap {
+                state.bytes += payload.len();
+                state.queue.push_back(payload);
+                self.changed.notify_all();
+                return Push::Queued;
+            }
+            state = match room {
+                Room::Now => return Push::Full,
+                Room::Until(None) => self
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Room::Until(Some(deadline)) => {
+                    let now = Instant::now();
+                    if now >= deadline {
+                        return Push::Full;
+                    }
+                    self.changed
+                        .wait_timeout(state, deadline - now)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
+        }
+    }
+
+    /// Refuse further pushes; the writer drains what is queued, then stops.
+    fn close(&self) {
+        self.lock().closed = true;
+        self.changed.notify_all();
+    }
+
+    /// Close and discard everything queued (the pipe is broken).
+    fn fail(&self) {
+        let mut state = self.lock();
+        state.closed = true;
+        state.queue.clear();
+        state.bytes = 0;
+        drop(state);
+        self.changed.notify_all();
+    }
+
+    /// The next payload for the writer; `None` once closed and drained.
+    fn pop(&self) -> Option<Vec<u8>> {
+        let mut state = self.lock();
+        loop {
+            if let Some(payload) = state.queue.pop_front() {
+                state.bytes -= payload.len();
+                self.changed.notify_all();
+                return Some(payload);
+            }
+            if state.closed {
+                return None;
+            }
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(PoisonError::into_inner);
+        }
+    }
+}
+
+/// Own tmux's stdin: write what the outbox hands over, and close stdin (by
+/// returning) once the outbox is closed and drained or a write fails. Only
+/// this thread ever blocks on the pipe.
+fn writer_loop(mut stdin: impl Write, outbox: &Outbox, shared: &Shared) {
+    while let Some(payload) = outbox.pop() {
+        if let Err(e) = stdin.write_all(&payload).and_then(|()| stdin.flush()) {
+            outbox.fail();
+            // Let the reader record what tmux printed before it went away.
+            let deadline = Instant::now() + DEATH_SETTLE;
+            let mut state = shared.lock();
+            while state.dead.is_none() {
+                match shared.wait(state, Some(deadline)) {
+                    Some(next) => state = next,
+                    None => {
+                        state = shared.lock();
+                        break;
+                    }
+                }
+            }
+            state.mark_dead(format!("write to tmux control client: {e}"));
+            drop(state);
+            shared.changed.notify_all();
+            return;
+        }
+    }
+}
+
 // ─── Command lines ───────────────────────────────────────────────────────────
 
 /// Single-quote `s` for the tmux command parser (`'` becomes `'\''`).
@@ -764,10 +976,28 @@ fn validate_subscription_name(name: &str) -> Result<()> {
 }
 
 fn validate_line(line: &str) -> Result<()> {
+    if line.len() > MAX_COMMAND_BYTES {
+        bail!(
+            "tmux control command is {} bytes, over the {MAX_COMMAND_BYTES}-byte limit",
+            line.len()
+        );
+    }
     if line.contains(['\n', '\0']) {
-        bail!("tmux control command must be one line without NUL: {line:?}");
+        bail!(
+            "tmux control command must be one line without NUL: {:?}",
+            truncate_for_message(line)
+        );
     }
     Ok(())
+}
+
+/// At most 200 bytes of `line` (on a char boundary), for error messages.
+fn truncate_for_message(line: &str) -> &str {
+    let mut end = line.len().min(200);
+    while !line.is_char_boundary(end) {
+        end -= 1;
+    }
+    &line[..end]
 }
 
 /// The `tmux -S <socket> -C attach-session -t =<session>` invocation.
@@ -787,8 +1017,10 @@ fn attach_command(socket: &TmuxSocket, session: &str) -> Command {
 #[derive(Debug, Clone, Copy)]
 struct Options {
     queue_cap: usize,
+    queue_bytes: usize,
     max_line: usize,
     max_reply: usize,
+    outbox_cap: usize,
     /// Fixed sentinel nonce (tests); random when `None`.
     nonce: Option<u64>,
 }
@@ -797,8 +1029,10 @@ impl Default for Options {
     fn default() -> Self {
         Self {
             queue_cap: DEFAULT_QUEUE_CAP,
+            queue_bytes: MAX_QUEUE_BYTES,
             max_line: MAX_LINE_BYTES,
             max_reply: MAX_REPLY_BYTES,
+            outbox_cap: MAX_OUTBOX_BYTES,
             nonce: None,
         }
     }
@@ -810,9 +1044,10 @@ impl Default for Options {
 #[derive(Debug)]
 pub struct ControlClient {
     child: Child,
-    stdin: Option<ChildStdin>,
+    outbox: Arc<Outbox>,
     shared: Arc<Shared>,
     reader: Option<JoinHandle<()>>,
+    writer: Option<JoinHandle<()>>,
     session: String,
     nonce: u64,
     next_call: u64,
@@ -860,7 +1095,8 @@ impl ControlClient {
             let _ = child.wait();
             bail!("tmux control client pipes unavailable");
         };
-        let shared = Arc::new(Shared::new(options.queue_cap));
+        let shared = Arc::new(Shared::new(options.queue_cap, options.queue_bytes));
+        let outbox = Arc::new(Outbox::new(options.outbox_cap));
         let reader_shared = Arc::clone(&shared);
         let reader = thread::Builder::new()
             .name("tmux-control".into())
@@ -875,6 +1111,19 @@ impl ControlClient {
                 return Err(e).context("spawn tmux control reader thread");
             }
         };
+        let writer_shared = Arc::clone(&shared);
+        let writer_outbox = Arc::clone(&outbox);
+        let writer = thread::Builder::new()
+            .name("tmux-control-in".into())
+            .spawn(move || writer_loop(stdin, &writer_outbox, &writer_shared));
+        let writer = match writer {
+            Ok(handle) => handle,
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e).context("spawn tmux control writer thread");
+            }
+        };
         let stderr_shared = Arc::clone(&shared);
         if let Err(e) = thread::Builder::new()
             .name("tmux-control-err".into())
@@ -884,9 +1133,10 @@ impl ControlClient {
         }
         Ok(Self {
             child,
-            stdin: Some(stdin),
+            outbox,
             shared,
             reader: Some(reader),
+            writer: Some(writer),
             session: session.to_owned(),
             nonce: options.nonce.unwrap_or_else(rand::random),
             next_call: 0,
@@ -941,43 +1191,46 @@ impl ControlClient {
         rest.parse().ok()
     }
 
-    fn write(&mut self, payload: &str, what: &str) -> Result<()> {
-        let Some(stdin) = self.stdin.as_mut() else {
-            bail!("{what}: tmux control client stdin is closed");
-        };
-        let written = stdin
-            .write_all(payload.as_bytes())
-            .and_then(|()| stdin.flush());
-        if let Err(e) = written {
-            // Let the reader record what tmux printed before it went away.
-            let deadline = Instant::now() + DEATH_SETTLE;
-            let mut state = self.shared.lock();
-            while state.dead.is_none() {
-                match self.shared.wait(state, Some(deadline)) {
-                    Some(next) => state = next,
-                    None => {
-                        state = self.shared.lock();
-                        break;
-                    }
-                }
+    /// Queue `payload` for tmux's stdin, waiting for outbox room no later than
+    /// `deadline`. An outbox still full at the deadline means tmux stopped
+    /// reading, which marks the client dead.
+    fn enqueue(
+        &self,
+        payload: String,
+        deadline: Option<Instant>,
+        timeout: Duration,
+        what: &str,
+    ) -> Result<()> {
+        match self
+            .outbox
+            .push(payload.into_bytes(), Room::Until(deadline))
+        {
+            Push::Queued => Ok(()),
+            Push::Full => {
+                let reason = format!(
+                    "tmux stopped reading its input ({} bytes pending)",
+                    self.outbox.cap
+                );
+                self.shared.update(|s| s.mark_dead(reason));
+                Err(anyhow!(
+                    "{what}: no room to write within {timeout:?}: tmux control client \
+                     for session {:?} is not reading its input",
+                    self.session
+                ))
             }
-            let reason = state.death();
-            drop(state);
-            return match reason {
-                Some(reason) => Err(anyhow!(
-                    "{what}: write to tmux control client: {e}: {reason}"
-                )),
-                None => Err(anyhow!("{what}: write to tmux control client: {e}")),
-            };
+            Push::Closed => Err(self
+                .dead_error(what)
+                .unwrap_or_else(|| anyhow!("{what}: tmux control client input is closed"))),
         }
-        Ok(())
     }
 
     /// Run one command line and wait up to `timeout` for its reply. Commands
     /// are serialised; notifications arriving meanwhile stay queued for
-    /// [`Self::next_notification`].
+    /// [`Self::next_notification`]. The whole call, queueing the write
+    /// included, is bounded by `timeout`.
     pub fn command(&mut self, line: &str, timeout: Duration) -> Result<CommandReply> {
-        let what = format!("tmux command {line:?}");
+        let deadline = Instant::now().checked_add(timeout);
+        let what = format!("tmux command {:?}", truncate_for_message(line));
         validate_line(line)?;
         if let Some(err) = self.dead_error(&what) {
             return Err(err);
@@ -991,9 +1244,8 @@ impl ControlClient {
         } else {
             format!("{line}\n{sentinel}")
         };
-        self.write(&payload, &what)?;
+        self.enqueue(payload, deadline, timeout, &what)?;
 
-        let deadline = Instant::now().checked_add(timeout);
         let mut reply = CommandReply {
             ok: true,
             lines: Vec::new(),
@@ -1038,7 +1290,7 @@ impl ControlClient {
         let deadline = Instant::now().checked_add(timeout);
         let mut state = self.shared.lock();
         loop {
-            if let Some(notification) = state.notifications.pop_front() {
+            if let Some(notification) = state.pop_notification() {
                 return Ok(Some(notification));
             }
             if let Some(reason) = state.death() {
@@ -1089,14 +1341,12 @@ impl ControlClient {
 
 impl Drop for ControlClient {
     fn drop(&mut self) {
-        if let Some(mut stdin) = self.stdin.take() {
-            if self.is_alive() {
-                let _ = stdin
-                    .write_all(b"detach-client\n")
-                    .and_then(|()| stdin.flush());
-            }
-            drop(stdin);
+        // Never wait on the pipe: queue the detach only if there is room now,
+        // then close the outbox so the writer closes stdin once it drains.
+        if self.is_alive() {
+            let _ = self.outbox.push(b"detach-client\n".to_vec(), Room::Now);
         }
+        self.outbox.close();
         let deadline = Instant::now() + SHUTDOWN_GRACE;
         loop {
             match self.child.try_wait() {
@@ -1113,12 +1363,16 @@ impl Drop for ControlClient {
                 }
             }
         }
-        // The reader ends at end of output; only join it when that already
-        // happened, so a pipe held open elsewhere cannot hang the drop.
-        if let Some(reader) = self.reader.take()
-            && reader.is_finished()
+        // The reader ends at end of output and the writer once stdin is closed
+        // or broken; only join them when that already happened, so a pipe held
+        // open elsewhere cannot hang the drop.
+        for handle in [self.reader.take(), self.writer.take()]
+            .into_iter()
+            .flatten()
         {
-            let _ = reader.join();
+            if handle.is_finished() {
+                let _ = handle.join();
+            }
         }
     }
 }
@@ -1741,5 +1995,107 @@ mod tests {
             client.next_notification(Duration::from_millis(50)).unwrap(),
             None
         );
+    }
+
+    #[test]
+    fn rejects_overlong_commands() {
+        let mut client = fake("", None, Options::default());
+        let line = format!("display -p {}", "x".repeat(MAX_COMMAND_BYTES));
+        let err = client.command(&line, COMMAND_TIMEOUT).unwrap_err();
+        assert!(format!("{err:#}").contains("byte limit"), "{err:#}");
+        assert!(client.is_alive());
+    }
+
+    #[test]
+    fn a_child_that_never_reads_stdin_cannot_block_commands_or_drop() {
+        // `sleep` keeps stdout open and never reads stdin, so the pipe fills.
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg("exec sleep 30");
+        let mut client = ControlClient::spawn_command(
+            cmd,
+            "probe",
+            Options {
+                outbox_cap: 8 * 1024,
+                ..Options::default()
+            },
+        )
+        .unwrap();
+        let line = format!("display -p {}", "x".repeat(60 * 1024));
+        let timeout = Duration::from_millis(100);
+        let mut stalled = None;
+        for _ in 0..32 {
+            let started = Instant::now();
+            let err = client.command(&line, timeout).unwrap_err();
+            assert!(
+                started.elapsed() < Duration::from_secs(1),
+                "command took {:?}",
+                started.elapsed()
+            );
+            let text = format!("{err:#}");
+            if !text.contains("timed out") {
+                stalled = Some(text);
+                break;
+            }
+        }
+        let stalled = stalled.expect("the outbox never filled");
+        assert!(stalled.contains("not reading its input"), "{stalled}");
+        assert!(!client.is_alive());
+        let started = Instant::now();
+        let err = client.command("display -p x", timeout).unwrap_err();
+        assert!(format!("{err:#}").contains("is dead"), "{err:#}");
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        let started = Instant::now();
+        drop(client);
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "drop took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn reply_cap_counts_per_line_overhead() {
+        let mut framer = Framer::new(10 * LINE_OVERHEAD);
+        assert_eq!(framer.feed(b"%begin 1 2 1"), None);
+        for _ in 0..1000 {
+            assert_eq!(framer.feed(b""), None);
+        }
+        let Some(Frame::Reply { reply, .. }) = framer.feed(b"%end 1 2 1") else {
+            panic!("block did not close");
+        };
+        assert_eq!(reply.lines.len(), 10);
+    }
+
+    #[test]
+    fn queue_byte_budget_evicts_oldest_output_first() {
+        let out = |n: u8| Notification::Output {
+            pane: 0,
+            bytes: vec![n; 10],
+        };
+        let item = std::mem::size_of::<Notification>();
+        let budget = 2 * (item + 10) + item;
+        let shared = Shared::new(DEFAULT_QUEUE_CAP, budget);
+        let mut state = shared.lock();
+        state.push_notification(out(1));
+        state.push_notification(Notification::WindowAdd { window: 1 });
+        state.push_notification(out(2));
+        assert_eq!((state.dropped, state.queue_bytes), (0, budget));
+        state.push_notification(out(3));
+        assert_eq!((state.dropped, state.queue_bytes), (1, budget));
+        let left: Vec<_> = state.notifications.iter().cloned().collect();
+        assert_eq!(
+            left,
+            vec![Notification::WindowAdd { window: 1 }, out(2), out(3)]
+        );
+        // A notification bigger than the whole budget still gets in alone.
+        state.push_notification(Notification::Output {
+            pane: 0,
+            bytes: vec![0; budget],
+        });
+        assert_eq!(state.notifications.len(), 1);
+        assert_eq!(state.dropped, 4);
+        assert!(state.pop_notification().is_some());
+        assert_eq!(state.queue_bytes, 0);
     }
 }
