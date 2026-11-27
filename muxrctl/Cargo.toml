@@ -22,9 +22,9 @@ ratatui = "0.30"
 crossterm = "0.29"
 
 # Interactive component runtime on top of ratatui (focus/hover/event routing,
-# Theme, TextInput-style components). The API is unstable (preview release);
-# pin the exact version.
-ratcn = { version = "=0.0.3", features = ["crossterm"] }
+# Theme, TextInput-style components). The API is stable within 0.1.x: patch
+# releases are never breaking and breaking changes wait for 0.2.
+ratcn = { version = "0.1", features = ["crossterm"] }
 
 # Async runtime — UpdateAction tasks post results back over an mpsc channel.
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "process"] }

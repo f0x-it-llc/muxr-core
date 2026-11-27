@@ -33,16 +33,12 @@ impl<C> DialogShortcuts<C> {
 }
 
 impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for DialogShortcuts<C> {
-    fn prepare(&mut self, state: &AppState) {
-        self.inner.prepare(state);
+    fn scope_options(&self, state: &AppState) -> ScopeOptions {
+        self.inner.scope_options(state)
     }
 
-    fn scope_options(&self) -> ScopeOptions {
-        self.inner.scope_options()
-    }
-
-    fn interaction_area(&self, area: Rect) -> Rect {
-        self.inner.interaction_area(area)
+    fn interaction_area(&self, area: Rect, state: &AppState) -> Rect {
+        self.inner.interaction_area(area, state)
     }
 
     fn declare(&mut self, ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
@@ -73,7 +69,12 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for DialogShortcu
         result
     }
 
-    fn reveal_in_viewport(&mut self, target: Rect, state: &AppState, ctx: &mut EventCtx<'_>) {
-        self.inner.reveal_in_viewport(target, state, ctx);
+    fn reveal_in_viewport(
+        &mut self,
+        target: Rect,
+        state: &AppState,
+        ctx: &mut EventCtx<'_>,
+    ) -> bool {
+        self.inner.reveal_in_viewport(target, state, ctx)
     }
 }

@@ -3249,6 +3249,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "ratatui-textarea"
+version = "0.9.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6cf7263fbb7f37caa4bcfd00fc604ff1409f70456a833fbdff99282e88fdfe92"
+dependencies = [
+ "ratatui-core",
+ "ratatui-widgets",
+ "unicode-segmentation",
+ "unicode-width 0.2.3",
+]
+
+[[package]]
 name = "ratatui-widgets"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3270,11 +3282,12 @@ dependencies = [
 
 [[package]]
 name = "ratcn"
-version = "0.0.3"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "75c2a4b0de6235b0ecaeb49a50460324b2eddf6f8b792bb283206acf06d1de9a"
+checksum = "783d0998c2124353507bbc5a5b466715ed9102a501be5ce6b92b25db10998c5d"
 dependencies = [
  "ratatui",
+ "ratatui-textarea",
  "unicode-segmentation",
  "unicode-width 0.2.3",
 ]

@@ -261,10 +261,10 @@ fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, are
 /// The layer's Close button, which also answers Esc.
 ///
 /// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`/`dismiss_key`; a
-/// `modal_scope` in ratcn 0.0.3 has neither, and an open modal turns every key
-/// nothing inside it handled into `Consumed` rather than letting it bubble out
-/// to the app. So an Esc routed "through the reducer" would never arrive: the
-/// only place it can be answered is a component inside the layer. Answering it
+/// `modal_scope` has neither, and an open modal turns every key nothing inside
+/// it handled into `Consumed` rather than letting it bubble out to the app. So
+/// an Esc routed "through the reducer" would never arrive: the only place it
+/// can be answered is a component inside the layer. Answering it
 /// here, beside the Enter/Space the button already answers, is what makes the
 /// strip's "Esc close" true — and both emit [`TokensMsg::QrClose`], which never
 /// revokes the token being shown.
@@ -306,12 +306,12 @@ impl Component<AppState, UiMsg> for CloseControl {
         Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx)
     }
 
-    fn scope_options(&self) -> ScopeOptions {
-        Component::<AppState, UiMsg>::scope_options(&self.button)
+    fn scope_options(&self, state: &AppState) -> ScopeOptions {
+        Component::<AppState, UiMsg>::scope_options(&self.button, state)
     }
 
-    fn interaction_area(&self, area: Rect) -> Rect {
-        Component::<AppState, UiMsg>::interaction_area(&self.button, area)
+    fn interaction_area(&self, area: Rect, state: &AppState) -> Rect {
+        Component::<AppState, UiMsg>::interaction_area(&self.button, area, state)
     }
 }
 

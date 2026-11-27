@@ -939,9 +939,9 @@ fn truncate(text: &str, width: u16) -> String {
 
 /// A control that also answers Esc with [`WizardMsg::Close`].
 ///
-/// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`; a `modal_scope` in ratcn
-/// 0.0.3 has none, and an open modal absorbs every key nothing inside it handled
-/// rather than letting it bubble out to the app — so an Esc "routed through the
+/// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`; a `modal_scope` has
+/// none, and an open modal absorbs every key nothing inside it handled rather
+/// than letting it bubble out to the app — so an Esc "routed through the
 /// reducer" would never arrive. Wrapping each control is what makes the row's
 /// "Esc cancels" true wherever the focus happens to be.
 ///
@@ -959,16 +959,12 @@ impl<C> EscCloses<C> {
 }
 
 impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for EscCloses<C> {
-    fn prepare(&mut self, state: &AppState) {
-        self.inner.prepare(state);
+    fn scope_options(&self, state: &AppState) -> ScopeOptions {
+        self.inner.scope_options(state)
     }
 
-    fn scope_options(&self) -> ScopeOptions {
-        self.inner.scope_options()
-    }
-
-    fn interaction_area(&self, area: Rect) -> Rect {
-        self.inner.interaction_area(area)
+    fn interaction_area(&self, area: Rect, state: &AppState) -> Rect {
+        self.inner.interaction_area(area, state)
     }
 
     fn declare(&mut self, ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
@@ -998,8 +994,13 @@ impl<C: Component<AppState, UiMsg>> Component<AppState, UiMsg> for EscCloses<C> 
         result
     }
 
-    fn reveal_in_viewport(&mut self, target: Rect, state: &AppState, ctx: &mut EventCtx<'_>) {
-        self.inner.reveal_in_viewport(target, state, ctx);
+    fn reveal_in_viewport(
+        &mut self,
+        target: Rect,
+        state: &AppState,
+        ctx: &mut EventCtx<'_>,
+    ) -> bool {
+        self.inner.reveal_in_viewport(target, state, ctx)
     }
 }
 

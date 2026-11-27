@@ -1,5 +1,6 @@
 //! A single-line text input: the one interactive ratcn component this crate
-//! writes itself, because `ratcn` 0.0.3 ships no text entry control.
+//! writes itself. It predates ratcn's own `Input`, which this crate does not
+//! use.
 //!
 //! Follows the shape of ratcn's own components (see `ratcn`'s `checkbox.rs`
 //! and the `Component` trait docs): a controlled value bound through
@@ -99,8 +100,6 @@ pub struct TextInput<S, M> {
     on_submit: Option<OnSubmitFn<M>>,
     bordered: bool,
     style: Option<StyleFn>,
-    /// The bound value, resolved once per declaration for [`paint`](Component::paint).
-    resolved_value: String,
 }
 
 impl<S, M> fmt::Debug for TextInput<S, M> {
@@ -132,7 +131,6 @@ impl<S, M> TextInput<S, M> {
             on_submit: None,
             bordered: true,
             style: None,
-            resolved_value: String::new(),
         }
     }
 
@@ -309,21 +307,18 @@ impl<S, M> TextInput<S, M> {
 }
 
 impl<S: 'static, M: 'static> Component<S, M> for TextInput<S, M> {
-    fn prepare(&mut self, state: &S) {
-        self.resolved_value = self
-            .value
-            .as_ref()
-            .map_or_else(String::new, |(read, _)| read(state));
-    }
-
     fn declare(&mut self, _ctx: &mut DeclareCtx<'_, S, M>) {
         // A text input paints itself; it declares no children.
     }
 
     fn paint(&mut self, ctx: &mut PaintCtx<'_, S>) {
         let style = resolve_style(self.style.as_deref(), ctx.theme, TextInputStyle::from_theme);
+        let value = self
+            .value
+            .as_ref()
+            .map_or_else(String::new, |(read, _)| read(ctx.state()));
         let widget = TextInputWidget {
-            value: &self.resolved_value,
+            value: &value,
             placeholder: &self.placeholder,
             focused: ctx.focused(),
             disabled: self.disabled,
@@ -349,11 +344,11 @@ impl<S: 'static, M: 'static> Component<S, M> for TextInput<S, M> {
         }
     }
 
-    fn scope_options(&self) -> ScopeOptions {
+    fn scope_options(&self, _state: &S) -> ScopeOptions {
         ScopeOptions::default().focusable(self.can_act())
     }
 
-    fn interaction_area(&self, area: Rect) -> Rect {
+    fn interaction_area(&self, area: Rect, _state: &S) -> Rect {
         geometry::fixed_height(area, self.height())
     }
 }
@@ -495,7 +490,7 @@ mod tests {
         terminal: &mut Terminal<TestBackend>,
         ratcn: &mut Ratcn<State, Msg>,
         state: &State,
-        declare: impl FnOnce(&mut DeclareCtx<'_, State, Msg>),
+        declare: impl FnMut(&mut DeclareCtx<'_, State, Msg>),
     ) {
         let theme = Theme::default_dark();
         terminal
