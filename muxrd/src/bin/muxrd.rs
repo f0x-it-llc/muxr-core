@@ -35,7 +35,7 @@ use muxrd::config::{self, CertSource, check_h2c_bind_safety};
 use muxrd::control::{self, ControlRequest, ControlResponse};
 use muxrd::grpc::MuxrService;
 use muxrd::multiplexer::detect;
-use muxrd::multiplexer::{BackendSet, HerdrBackend, MuxBackend, ZellijBackend};
+use muxrd::multiplexer::{BackendSet, HerdrBackend, MuxBackend, TmuxBackend, ZellijBackend};
 use muxrd::proto::muxr_server::MuxrServer;
 use muxrd::ratelimit::RateLimitLayer;
 use muxrd::tls::SanEntry;
@@ -436,12 +436,13 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
             .and_then(|v| match v.to_lowercase().as_str() {
                 "zellij" => Some(BackendKind::Zellij),
                 "herdr" => Some(BackendKind::Herdr),
+                "tmux" => Some(BackendKind::Tmux),
                 "" => None,
                 other => {
                     log::warn!(
                         "MUXRD_BACKEND={other:?} is not a recognized backend; \
                          ignoring (serving all detected backends). \
-                         Valid values: zellij, herdr."
+                         Valid values: zellij, herdr, tmux."
                     );
                     None
                 }
@@ -496,6 +497,11 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
                 log::info!("backend: herdr ({})", b.backend_version());
                 herdr_backend = Some(Arc::clone(&b));
                 backend_entries.push((BackendKind::Herdr, b as Arc<dyn MuxBackend>));
+            }
+            BackendKind::Tmux => {
+                let b = Arc::new(TmuxBackend::from_env()?);
+                log::info!("backend: tmux ({})", b.backend_version());
+                backend_entries.push((BackendKind::Tmux, b));
             }
         }
     }

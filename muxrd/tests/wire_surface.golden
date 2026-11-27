@@ -5,6 +5,7 @@ enum muxr.v1.AgentStatus.AGENT_STATUS_UNKNOWN = 5
 enum muxr.v1.AgentStatus.AGENT_STATUS_UNSPECIFIED = 0
 enum muxr.v1.AgentStatus.AGENT_STATUS_WORKING = 2
 enum muxr.v1.Backend.BACKEND_HERDR = 2
+enum muxr.v1.Backend.BACKEND_TMUX = 3
 enum muxr.v1.Backend.BACKEND_UNSPECIFIED = 0
 enum muxr.v1.Backend.BACKEND_ZELLIJ = 1
 enum muxr.v1.MouseKind.MOUSE_KIND_WHEEL_DOWN = 1

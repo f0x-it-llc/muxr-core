@@ -595,6 +595,7 @@ pub(crate) fn proto_backend(kind: BackendKind) -> crate::proto::Backend {
     match kind {
         BackendKind::Zellij => crate::proto::Backend::Zellij,
         BackendKind::Herdr => crate::proto::Backend::Herdr,
+        BackendKind::Tmux => crate::proto::Backend::Tmux,
     }
 }
 
@@ -606,6 +607,7 @@ pub(crate) fn kind_from_proto(backend: crate::proto::Backend) -> Option<BackendK
     match backend {
         crate::proto::Backend::Zellij => Some(BackendKind::Zellij),
         crate::proto::Backend::Herdr => Some(BackendKind::Herdr),
+        crate::proto::Backend::Tmux => Some(BackendKind::Tmux),
         crate::proto::Backend::Unspecified => None,
     }
 }

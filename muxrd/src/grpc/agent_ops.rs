@@ -1075,7 +1075,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn unknown_backend_token_is_invalid_argument() {
         let err = MuxrService::new()
-            .list_agents_impl(session_ref("tmux:dev"))
+            .list_agents_impl(session_ref("screen:dev"))
             .await
             .expect_err("unknown backend token must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1324,7 +1324,7 @@ pub(super) mod tests {
         };
         assert_eq!(unknown.code(), tonic::Code::NotFound);
         assert_eq!(unknown.message(), "session: no such session");
-        let Err(token) = open(&service, "tmux:dev").await else {
+        let Err(token) = open(&service, "screen:dev").await else {
             panic!("an unknown backend token must not open a stream");
         };
         assert_eq!(token.code(), tonic::Code::InvalidArgument);

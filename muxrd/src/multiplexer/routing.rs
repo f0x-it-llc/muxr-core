@@ -11,7 +11,7 @@
 //!
 //! Documented here as the single source of truth for all backend-resolution errors:
 //!
-//! - An **unknown/unparseable** backend kind (e.g. `tmux:dev`, or a bare name on a
+//! - An **unknown/unparseable** backend kind (e.g. `screen:dev`, or a bare name on a
 //!   multi-backend server) → `InvalidArgument`.  The client sent a malformed id it
 //!   should not have produced.
 //! - A **recognised but not-running** backend (known kind such as `herdr:`, but not
@@ -34,11 +34,12 @@ use super::{BackendSet, MuxBackend};
 ///
 /// The string scheme is **lowercase** and matches both the [`BackendKind`]
 /// `Display` impl and [`make_id`] (the minting side). Keep all three in sync:
-/// `zellij` / `herdr`.
+/// `zellij` / `herdr` / `tmux`.
 fn parse_backend_kind(s: &str) -> Option<BackendKind> {
     match s {
         "zellij" => Some(BackendKind::Zellij),
         "herdr" => Some(BackendKind::Herdr),
+        "tmux" => Some(BackendKind::Tmux),
         _ => None,
     }
 }
@@ -134,7 +135,7 @@ pub(crate) fn resolve_session_kind(
             let kind = parse_backend_kind(kind_str).ok_or_else(|| {
                 Status::invalid_argument(format!(
                     "session id {id:?} names an unknown backend {kind_str:?} \
-                     (expected one of: zellij, herdr)"
+                     (expected one of: zellij, herdr, tmux)"
                 ))
             })?;
             // Recognised kind, but not running on this server → NotFound.
@@ -255,9 +256,20 @@ mod tests {
 
     #[test]
     fn resolve_session_rejects_unknown_backend_prefix() {
-        let err = resolve_session(&zellij_only_set(), "tmux:dev")
+        let err = resolve_session(&zellij_only_set(), "screen:dev")
             .expect_err("unknown backend prefix must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[test]
+    fn tmux_prefix_parses_and_make_id_round_trips() {
+        assert_eq!(parse_backend_kind("tmux"), Some(BackendKind::Tmux));
+        assert_eq!(make_id(BackendKind::Tmux, "dev"), "tmux:dev");
+        // A tmux id on a server without tmux is a recognised-but-absent
+        // backend (NotFound), not an unknown kind.
+        let err = resolve_session(&zellij_only_set(), "tmux:dev")
+            .expect_err("tmux is not running on a zellij-only server");
+        assert_eq!(err.code(), tonic::Code::NotFound);
     }
 
     #[test]
