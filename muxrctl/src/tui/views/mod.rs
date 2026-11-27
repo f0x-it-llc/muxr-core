@@ -604,6 +604,20 @@ mod tests {
     }
 
     #[test]
+    fn a_letter_typed_after_moving_left_lands_mid_host() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        harness.type_str("exmple.com");
+        // Back to just after the `x`.
+        for _ in 0.."mple.com".len() {
+            harness.key(KeyCode::Left);
+        }
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Config));
+        harness.type_str("a");
+        assert_eq!(harness.state.config.host, "example.com");
+    }
+
+    #[test]
     fn q_quits_on_the_dashboard_but_is_a_literal_in_the_host_field() {
         let mut harness = Harness::new();
         harness.key(KeyCode::Char('c'));
