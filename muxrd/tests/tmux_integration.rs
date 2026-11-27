@@ -19,7 +19,9 @@
 //! ```
 //!
 //! Each test starts its own private tmux server: it sets `MUXRD_TMUX_SOCKET` to
-//! a unique `-L` name, starts the server with `-f /dev/null` (no user
+//! a unique bare name (a socket under `$TMUX_TMPDIR`, else `/tmp`, in
+//! `tmux-<uid>/`, a directory the test creates owner-only when it is missing),
+//! starts the server with `-f /dev/null` (no user
 //! configuration) and `/bin/sh` as the default shell, and kills it and removes
 //! its socket in a `Drop` guard, so the suite never touches the user's own
 //! server. Because the socket is chosen through the process environment, the
@@ -51,6 +53,7 @@
 //! runs as a separate, unmodified binary.
 
 use std::ffi::OsString;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -75,12 +78,14 @@ const WAIT: Duration = Duration::from_secs(2);
 /// scans the server every 5 s.
 const WATCH_WAIT: Duration = Duration::from_secs(8);
 
-/// How long a status report may take to reach the bus.
-const REPORT_WAIT: Duration = Duration::from_secs(1);
+/// How long a status report, re-sent every [`REPORT_RESEND`], may take to
+/// reach the bus. A watcher whose control client is up may still be taking
+/// its first pane listing, and output from a pane it does not track yet is
+/// not scanned, so the first report can be missed on a loaded host.
+const REPORT_WAIT: Duration = Duration::from_secs(5);
 
-/// Settle time after a watcher's control client appears, so its first pane
-/// listing is done before the pane prints anything.
-const WATCH_SETTLE: Duration = Duration::from_millis(500);
+/// How often a report that has not arrived is printed again.
+const REPORT_RESEND: Duration = Duration::from_millis(300);
 
 // ─── the private server ─────────────────────────────────────────────────────────
 
@@ -139,6 +144,17 @@ impl Server {
             "the backend does not use the private socket: {}",
             socket.display()
         );
+        // The bare name resolves to `$TMUX_TMPDIR` (or `/tmp`) joined with
+        // `tmux-<uid>/<name>`, and tmux reaches it with `-S`, which never
+        // creates the directory: on a fresh host it does not exist yet. tmux
+        // wants it owner-only, as it makes its own.
+        if let Some(dir) = socket.parent() {
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)
+                .unwrap_or_else(|e| panic!("create socket directory {}: {e}", dir.display()));
+        }
         let mut server = Self {
             backend,
             socket,
@@ -296,13 +312,13 @@ impl Server {
             .collect()
     }
 
-    /// Wait for the kernel's control client on `session`.
+    /// Wait for the kernel's control client on `session`. The watcher may not
+    /// have listed the session's panes yet: report with [`Kernel::report`].
     fn await_watcher(&self, session: &str) -> Vec<String> {
         assert!(
             wait_until(WATCH_WAIT, || !self.control_clients(session).is_empty()),
             "no control client on session {session} within {WATCH_WAIT:?}"
         );
-        std::thread::sleep(WATCH_SETTLE);
         self.control_clients(session)
     }
 }
@@ -475,6 +491,34 @@ impl Kernel {
             }
             _ => None,
         })
+    }
+
+    /// Print the OSC 7501 report `body` in `pane`, again every
+    /// [`REPORT_RESEND`], until an `AgentStatusChanged` of `pane` with
+    /// `status` arrives; panics after `timeout` ([`REPORT_WAIT`] in most
+    /// tests).
+    ///
+    /// Re-sending covers a watcher still taking its first pane listing, which
+    /// does not scan output of a pane it does not track yet. A report repeated
+    /// after it applied changes nothing, so no extra event follows.
+    fn report(
+        &mut self,
+        server: &Server,
+        (session, pane): (&str, u32),
+        body: &str,
+        status: AgentStatus,
+        timeout: Duration,
+    ) -> events::AgentStatusChanged {
+        let deadline = Instant::now() + timeout;
+        loop {
+            server.type_into(session, pane, &osc7501(body));
+            if let Some(change) = self.wait_status(pane, status, REPORT_RESEND) {
+                return change;
+            }
+            if Instant::now() >= deadline {
+                panic!("no {status:?} for pane {pane} within {timeout:?} of `{body}`");
+            }
+        }
     }
 }
 
@@ -853,14 +897,13 @@ fn agent_report_drives_status_and_list_agents() {
     let mut kernel = Kernel::start(&server.backend);
     server.await_watcher(&session);
 
-    server.type_into(
-        &session,
-        pane,
-        &osc7501("state=blocked:kind=permission:app=probe"),
+    let change = kernel.report(
+        &server,
+        (&session, pane),
+        "state=blocked:kind=permission:app=probe",
+        AgentStatus::Blocked,
+        REPORT_WAIT,
     );
-    let change = kernel
-        .wait_status(pane, AgentStatus::Blocked, REPORT_WAIT)
-        .unwrap_or_else(|| panic!("no Blocked for pane {pane} within {REPORT_WAIT:?}"));
     assert_eq!(change.workspace_id, "");
     assert_eq!(change.workspace_name.as_deref(), Some(session.as_str()));
     assert_eq!(change.kind.as_deref(), Some("probe"));
@@ -874,10 +917,13 @@ fn agent_report_drives_status_and_list_agents() {
     let mark = server.pane(&session, pane).unwrap().agent;
     assert!(mark.is_some(), "query_layout carries no agent mark");
 
-    server.type_into(&session, pane, &osc7501("state=clear"));
-    kernel
-        .wait_status(pane, AgentStatus::Idle, REPORT_WAIT)
-        .unwrap_or_else(|| panic!("no Idle for pane {pane} within {REPORT_WAIT:?}"));
+    kernel.report(
+        &server,
+        (&session, pane),
+        "state=clear",
+        AgentStatus::Idle,
+        REPORT_WAIT,
+    );
 }
 
 #[test]
@@ -898,10 +944,13 @@ fn second_session_has_its_own_watcher() {
     );
 
     let pane = server.first_pane(&second);
-    server.type_into(&second, pane, &osc7501("state=working:app=probe"));
-    let change = kernel
-        .wait_status(pane, AgentStatus::Working, REPORT_WAIT)
-        .unwrap_or_else(|| panic!("no Working for pane {pane} within {REPORT_WAIT:?}"));
+    let change = kernel.report(
+        &server,
+        (&second, pane),
+        "state=working:app=probe",
+        AgentStatus::Working,
+        REPORT_WAIT,
+    );
     assert_eq!(change.workspace_name.as_deref(), Some(second.as_str()));
     assert!(server.backend.list_agents(&first).unwrap().is_empty());
     assert_eq!(server.backend.list_agents(&second).unwrap().len(), 1);
@@ -915,10 +964,13 @@ fn killing_a_watched_session_closes_its_panes() {
     let pane = server.first_pane(&session);
     let mut kernel = Kernel::start(&server.backend);
     server.await_watcher(&session);
-    server.type_into(&session, pane, &osc7501("state=working:app=probe"));
-    kernel
-        .wait_status(pane, AgentStatus::Working, REPORT_WAIT)
-        .unwrap_or_else(|| panic!("no Working for pane {pane} within {REPORT_WAIT:?}"));
+    kernel.report(
+        &server,
+        (&session, pane),
+        "state=working:app=probe",
+        AgentStatus::Working,
+        REPORT_WAIT,
+    );
 
     let ack = server.backend.kill_session(&session).unwrap();
     assert!(ack.ok, "kill_session failed: {ack:?}");
@@ -994,10 +1046,14 @@ fn flood_keeps_the_watcher_cheap() {
         clients,
         "the watcher's control client did not survive the flood"
     );
-    server.type_into(&session, pane, &osc7501("state=working:app=probe"));
-    kernel
-        .wait_status(pane, AgentStatus::Working, Duration::from_secs(10))
-        .unwrap_or_else(|| panic!("no report from pane {pane} after the flood"));
+    // The watcher may still be working through the flood's output.
+    kernel.report(
+        &server,
+        (&session, pane),
+        "state=working:app=probe",
+        AgentStatus::Working,
+        Duration::from_secs(10),
+    );
 }
 
 // ─── tmux 3.8 only ──────────────────────────────────────────────────────────────
