@@ -22,19 +22,28 @@
 //! - scans every pane's output for OSC 7501 status reports and applies them;
 //! - resumes a paused pane at once (output tmux dropped while it was paused is
 //!   lost by design; pauses are counted);
-//! - re-lists panes on window and layout changes, publishing
-//!   [`PaneClosed`] for panes that vanished;
+//! - re-lists panes on window and layout changes, dropping the rows of
+//!   panes that vanished;
 //! - infers a status ([`status::heuristic`]) for panes that never reported,
 //!   on every subscription change and every [`TICK`];
 //! - respawns a dead client with a 1, 2, 4 … 30 s backoff while the session
-//!   exists, and once it is gone removes its rows, publishes [`PaneClosed`]
-//!   for each pane it tracked and exits.
+//!   exists, and once it is gone drops its rows and exits.
 //!
 //! Every visible change rewrites the pane's [`AgentRow`]; an
 //! [`AgentStatusChanged`] is published only when the status or kind differs
 //! from the last one published for that pane. Events carry an empty
-//! `workspace_id` (tmux rows have no space) and always a kind and a tab, which
-//! the `WatchAgents` fast path requires.
+//! `workspace_id` (tmux rows have no space), the session name as
+//! `workspace_name` (the push label) and always a kind and a tab, which the
+//! `WatchAgents` fast path requires.
+//!
+//! # Row ownership
+//!
+//! A pane can sit in two sessions at once (a linked window) or move between
+//! them (`join-pane`, `move-window`), so two watchers may track it. A watcher
+//! only writes or drops a row under its own session name: the first to write
+//! owns the pane, the other stays silent until that row is gone. A dropped
+//! row is announced with [`PaneClosed`] only by the watcher that published
+//! it; a pane that never had an agent row closes silently.
 //!
 //! # Bounds
 //!
@@ -336,6 +345,7 @@ struct PaneTrack {
     inferred: Option<AgentStatus>,
     /// Status and kind of the last published event.
     published: Option<(AgentStatus, String)>,
+    /// This watcher wrote the pane's row, under its own session.
     has_row: bool,
     probe_logged: bool,
 }
@@ -361,6 +371,8 @@ struct Watcher<S> {
     dirty: bool,
     last_relist: Option<Instant>,
     pauses: u64,
+    /// Panes the last listing left out because [`MAX_PANES`] were tracked.
+    over_cap: HashSet<u32>,
     cap_logged: bool,
 }
 
@@ -384,6 +396,7 @@ impl<S: Source> Watcher<S> {
             dirty: false,
             last_relist: None,
             pauses: 0,
+            over_cap: HashSet::new(),
             cap_logged: false,
         }
     }
@@ -561,13 +574,23 @@ impl<S: Source> Watcher<S> {
         Ok(())
     }
 
+    /// A pane this watcher does not track: a listing is owed unless the last
+    /// one left it out for the cap (re-listing would leave it out again).
+    fn untracked(&mut self, pane: u32) {
+        if !self.over_cap.contains(&pane) {
+            self.dirty = true;
+        }
+    }
+
     fn on_output(&mut self, pane: u32, bytes: &[u8], now: Instant) {
         let Some(track) = self.panes.get_mut(&pane) else {
-            self.dirty = true;
+            self.untracked(pane);
             return;
         };
         track.last_output = Some(now);
-        self.state.touch_output(pane, now);
+        if track.has_row {
+            self.state.touch_output(pane, now);
+        }
         for report in track.scanner.feed(bytes) {
             match report {
                 Report::Probe => {
@@ -591,7 +614,7 @@ impl<S: Source> Watcher<S> {
 
     fn on_subscription(&mut self, pane: u32, value: &str, now: Instant) {
         let Some(track) = self.panes.get_mut(&pane) else {
-            self.dirty = true;
+            self.untracked(pane);
             return;
         };
         if self.with_running {
@@ -644,9 +667,8 @@ impl<S: Source> Watcher<S> {
         let Some(status) = next else {
             // Not (or no longer) an agent: its row goes, like a closed pane.
             if std::mem::replace(&mut track.has_row, false) {
-                track.published = None;
-                self.state.remove_pane(pane);
-                publish(&self.bus, MuxEvent::PaneClosed(PaneClosed { pane }));
+                let published = track.published.take().is_some();
+                drop_row(&self.state, &self.bus, &self.session, pane, published);
             }
             return;
         };
@@ -692,50 +714,52 @@ impl<S: Source> Watcher<S> {
         }
     }
 
-    /// Read the session's panes: seed new ones, refresh known ones and close
-    /// the ones that vanished.
+    /// Read the session's panes: close the ones that vanished, then refresh
+    /// known ones and seed new ones up to [`MAX_PANES`].
     fn relist(&mut self, now: Instant) -> Result<()> {
         self.last_relist = Some(now);
         let panes = self.source.panes(&self.session)?;
         let windows = self.source.windows(&self.session)?;
         self.dirty = false;
-        let mut seen = HashSet::with_capacity(panes.len());
+        // Prune first, so the cap counts only panes that still exist.
+        let listed: HashSet<u32> = panes.iter().map(|p| p.id).collect();
+        let gone: Vec<u32> = self
+            .panes
+            .keys()
+            .copied()
+            .filter(|pane| !listed.contains(pane))
+            .collect();
+        for pane in gone {
+            self.close_pane(pane);
+        }
+        self.over_cap.clear();
         let mut fresh = Vec::new();
         for row in panes {
-            if !self.panes.contains_key(&row.id) && self.panes.len() >= MAX_PANES {
-                if !std::mem::replace(&mut self.cap_logged, true) {
-                    log::info!(
-                        "tmux watcher [{}]: tracking at most {MAX_PANES} panes; further \
-                         panes are ignored",
-                        self.session
-                    );
+            if !self.panes.contains_key(&row.id) {
+                if self.panes.len() >= MAX_PANES {
+                    self.over_cap.insert(row.id);
+                    if !std::mem::replace(&mut self.cap_logged, true) {
+                        log::info!(
+                            "tmux watcher [{}]: tracking at most {MAX_PANES} panes; further \
+                             panes are ignored",
+                            self.session
+                        );
+                    }
+                    continue;
                 }
-                continue;
+                fresh.push(row.id);
             }
-            seen.insert(row.id);
             let tab_name = windows
                 .iter()
                 .find(|w| w.id == row.window_id)
                 .map(|w| w.name.clone())
                 .unwrap_or_default();
-            let track = self.panes.entry(row.id).or_insert_with(|| {
-                fresh.push(row.id);
-                PaneTrack::default()
-            });
+            let track = self.panes.entry(row.id).or_default();
             track.window = row.window_id;
             track.tab_name = tab_name;
             track.title = row.title;
             track.command = row.current_command;
             track.running = row.command_running;
-        }
-        let gone: Vec<u32> = self
-            .panes
-            .keys()
-            .copied()
-            .filter(|pane| !seen.contains(pane))
-            .collect();
-        for pane in gone {
-            self.close_pane(pane);
         }
         for pane in fresh {
             self.evaluate(pane, now);
@@ -743,13 +767,21 @@ impl<S: Source> Watcher<S> {
         Ok(())
     }
 
+    /// Forget a pane that left this session. Its row is dropped, and
+    /// [`PaneClosed`] published, only when this watcher published it; a row
+    /// another session's watcher holds (a moved or linked pane) is left alone.
     fn close_pane(&mut self, pane: u32) {
         if let Some(track) = self.panes.remove(&pane)
             && track.has_row
         {
-            self.state.remove_pane(pane);
+            drop_row(
+                &self.state,
+                &self.bus,
+                &self.session,
+                pane,
+                track.published.is_some(),
+            );
         }
-        publish(&self.bus, MuxEvent::PaneClosed(PaneClosed { pane }));
     }
 
     /// Follow a rename: rows of tracked panes move to the new name.
@@ -803,8 +835,49 @@ fn reported_row(track: &PaneTrack, session: &str) -> AgentRow {
     }
 }
 
+/// Who holds the row of a pane.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Holder {
+    Nobody,
+    /// A row under the asking watcher's session.
+    This,
+    /// A row under another session: that session's watcher owns the pane.
+    Other,
+}
+
+fn holder(state: &AgentState, session: &str, pane: u32) -> Holder {
+    if state.mark(pane).is_none() {
+        Holder::Nobody
+    } else if state
+        .rows_for_session(session)
+        .iter()
+        .any(|(id, _)| *id == pane)
+    {
+        Holder::This
+    } else {
+        Holder::Other
+    }
+}
+
+/// Drop the row of `pane` when it is still under `session`, publishing
+/// [`PaneClosed`] when this watcher had published it.
+fn drop_row(state: &AgentState, bus: &EventBus, session: &str, pane: u32, published: bool) {
+    if holder(state, session, pane) != Holder::This {
+        return;
+    }
+    state.remove_pane(pane);
+    if published {
+        publish(bus, MuxEvent::PaneClosed(PaneClosed { pane }));
+    }
+}
+
 /// Write `row` and publish it when its status or kind changed since the last
 /// event for the pane.
+///
+/// A pane is owned by the first watcher that writes its row: a pane another
+/// session's watcher already holds (a linked window, a pane moved in before
+/// that watcher forgot it) is left to it, so one pane never has two writers or
+/// duplicate events. Once that row is gone the next change here takes over.
 fn store(
     state: &AgentState,
     bus: &EventBus,
@@ -813,6 +886,11 @@ fn store(
     track: &mut PaneTrack,
     row: AgentRow,
 ) {
+    if holder(state, session, pane) == Holder::Other {
+        track.has_row = false;
+        track.published = None;
+        return;
+    }
     let status = row.status;
     let kind = row.kind.clone();
     let title = row
@@ -836,7 +914,9 @@ fn store(
         MuxEvent::AgentStatusChanged(AgentStatusChanged {
             pane,
             workspace_id: String::new(),
-            workspace_name: None,
+            // The session name labels pushes; `WatchAgents` matches on the
+            // (empty) `workspace_id` only.
+            workspace_name: Some(session.to_owned()),
             status,
             title,
             kind: Some(kind),
@@ -1172,7 +1252,7 @@ mod tests {
         assert_eq!(ev.pane, 3);
         assert_eq!(ev.status, AgentStatus::Blocked);
         assert!(ev.workspace_id.is_empty());
-        assert_eq!(ev.workspace_name, None);
+        assert_eq!(ev.workspace_name.as_deref(), Some("s"), "the push label");
         assert_eq!(ev.kind.as_deref(), Some("claude"));
         assert_eq!(ev.tab, Some(1));
         assert_eq!(ev.name, None);
@@ -1281,7 +1361,8 @@ mod tests {
         let mut r = rig(&[(3, "bash"), (5, "bash")]);
         r.feed(report(5, "state=working:app=claude"));
         r.events();
-        r.source.world().panes.retain(|p| p.id != 5);
+        // Both vanish; only the one with an agent row is announced.
+        r.source.world().panes.clear();
         r.feed(Notification::LayoutChange { window: 1 });
         r.watcher.maybe_relist(Instant::now() + RELIST_GAP);
         let events = r.events();
@@ -1291,7 +1372,7 @@ mod tests {
             "{events:?}"
         );
         assert!(r.state.rows_for_session("s").is_empty());
-        assert!(!r.watcher.panes.contains_key(&5));
+        assert!(r.watcher.panes.is_empty());
     }
 
     #[test]
@@ -1326,6 +1407,46 @@ mod tests {
         w.relist(Instant::now()).unwrap();
         assert_eq!(w.panes.len(), MAX_PANES);
         assert!(w.cap_logged);
+
+        // Output of a pane left out for the cap owes no listing: one would
+        // leave it out again.
+        let extra = MAX_PANES as u32 + 1;
+        w.on_output(extra, b"\x1b]7501;state=blocked\x07", Instant::now());
+        w.on_subscription(extra, "t|claude", Instant::now());
+        assert!(!w.dirty, "an over-cap pane must not churn listings");
+        // A pane never listed still does.
+        w.on_output(9999, b"x", Instant::now());
+        assert!(w.dirty);
+    }
+
+    #[test]
+    fn the_cap_counts_panes_after_pruning() {
+        let source = FakeSource::default();
+        source.world().panes = (0..MAX_PANES as u32)
+            .map(|id| pane_row(id, 1, "bash"))
+            .collect();
+        let (bus, _rx) = broadcast::channel(4);
+        let mut w = Watcher::new(
+            KEY,
+            "s".into(),
+            source.clone(),
+            Arc::new(AgentState::new()),
+            bus,
+            false,
+        );
+        w.relist(Instant::now()).unwrap();
+        assert_eq!(w.panes.len(), MAX_PANES);
+        {
+            // One pane closes and a new one opens in the same listing.
+            let mut world = source.world();
+            world.panes.remove(0);
+            world.panes.push(pane_row(MAX_PANES as u32, 1, "bash"));
+        }
+        w.relist(Instant::now()).unwrap();
+        assert_eq!(w.panes.len(), MAX_PANES);
+        assert!(w.panes.contains_key(&(MAX_PANES as u32)));
+        assert!(!w.panes.contains_key(&0));
+        assert!(w.over_cap.is_empty());
     }
 
     // ── Inferred status ─────────────────────────────────────────────────────
@@ -1543,7 +1664,7 @@ mod tests {
     }
 
     #[test]
-    fn gone_session_closes_every_tracked_pane_and_exits() {
+    fn gone_session_drops_its_agent_rows_and_exits() {
         let source = FakeSource::default();
         {
             let mut world = source.world();
@@ -1578,8 +1699,133 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(closed, [3, 5]);
+        assert_eq!(closed, [5], "only the pane with a published agent row");
         assert!(state.rows_for_session("s").is_empty());
+    }
+
+    // ── Panes in two sessions ───────────────────────────────────────────────
+
+    /// A watcher on session `name` (id `id`) over `state` and `bus`, attached,
+    /// whose listing holds `panes` (`(id, command)`) in window @1.
+    fn watcher_on(
+        name: &str,
+        id: u32,
+        panes: &[(u32, &str)],
+        state: &Arc<AgentState>,
+        bus: &EventBus,
+    ) -> (FakeSource, Watcher<FakeSource>) {
+        let key = SessionKey { id, created: 1 };
+        let source = FakeSource::default();
+        {
+            let mut world = source.world();
+            world.sessions = vec![SessionRow {
+                name: name.into(),
+                id,
+                created_unix: 1,
+                attached: 0,
+                windows: 1,
+            }];
+            world.panes = panes.iter().map(|(p, c)| pane_row(*p, 1, c)).collect();
+            world.windows = vec![window_row(1, "main")];
+        }
+        let mut w = Watcher::new(
+            key,
+            name.into(),
+            source.clone(),
+            Arc::clone(state),
+            bus.clone(),
+            false,
+        );
+        let mut client = FakeControl {
+            session_id: id,
+            ..FakeControl::default()
+        };
+        w.attach(&mut client, Instant::now()).unwrap();
+        (source, w)
+    }
+
+    fn drain(rx: &mut broadcast::Receiver<MuxEvent>) -> Vec<MuxEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn a_linked_pane_has_one_owner_and_one_event() {
+        let state = Arc::new(AgentState::new());
+        let (bus, mut rx) = broadcast::channel(16);
+        let (_sa, mut a) = watcher_on("a", 1, &[(3, "bash")], &state, &bus);
+        let (_sb, mut b) = watcher_on("b", 2, &[(3, "bash")], &state, &bus);
+        // Both clients receive the linked pane's output.
+        let now = Instant::now();
+        let bytes = b"\x1b]7501;state=blocked:app=claude\x1b\\";
+        a.on_output(3, bytes, now);
+        b.on_output(3, bytes, now);
+        let events = drain(&mut rx);
+        assert_eq!(status_events(&events).len(), 1, "{events:?}");
+        assert_eq!(state.rows_for_session("a").len(), 1);
+        assert!(state.rows_for_session("b").is_empty());
+        assert!(a.panes[&3].has_row && !b.panes[&3].has_row);
+
+        // A later change in the non-owner stays silent too.
+        b.on_output(3, b"\x1b]7501;state=working:app=claude\x1b\\", now);
+        assert!(drain(&mut rx).is_empty());
+        assert_eq!(
+            state.rows_for_session("a")[0].1.status,
+            AgentStatus::Blocked
+        );
+    }
+
+    #[test]
+    fn a_pane_leaving_another_sessions_listing_keeps_its_owners_row() {
+        let state = Arc::new(AgentState::new());
+        let (bus, mut rx) = broadcast::channel(16);
+        let (sa, mut a) = watcher_on("a", 1, &[(3, "bash")], &state, &bus);
+        let (_sb, mut b) = watcher_on("b", 2, &[(3, "bash")], &state, &bus);
+        b.on_output(
+            3,
+            b"\x1b]7501;state=blocked:app=claude\x1b\\",
+            Instant::now(),
+        );
+        drain(&mut rx);
+
+        // The window is unlinked from `a`: `a` forgets the pane locally.
+        sa.world().panes.clear();
+        a.relist(Instant::now()).unwrap();
+        assert!(drain(&mut rx).is_empty(), "no PaneClosed for b's pane");
+        assert!(!a.panes.contains_key(&3));
+        let rows = state.rows_for_session("b");
+        assert_eq!(rows.len(), 1, "b's row survives");
+
+        // b keeps writing it.
+        b.on_output(3, b"\x1b]7501;state=clear\x1b\\", Instant::now());
+        let events = drain(&mut rx);
+        assert_eq!(status_events(&events)[0].status, AgentStatus::Idle);
+        assert_eq!(state.rows_for_session("b")[0].1.status, AgentStatus::Idle);
+    }
+
+    #[test]
+    fn a_moved_pane_is_taken_over_once_its_old_row_is_gone() {
+        let state = Arc::new(AgentState::new());
+        let (bus, mut rx) = broadcast::channel(16);
+        let (sa, mut a) = watcher_on("a", 1, &[(3, "claude")], &state, &bus);
+        assert_eq!(state.rows_for_session("a").len(), 1, "inferred idle");
+        drain(&mut rx);
+
+        // join-pane moves %3 into `b`; b sees it before a re-lists.
+        let (_sb, mut b) = watcher_on("b", 2, &[(3, "claude")], &state, &bus);
+        assert!(drain(&mut rx).is_empty(), "a still owns it");
+        assert!(state.rows_for_session("b").is_empty());
+
+        sa.world().panes.clear();
+        a.relist(Instant::now()).unwrap();
+        assert_eq!(
+            drain(&mut rx),
+            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]
+        );
+        b.tick(Instant::now());
+        let events = drain(&mut rx);
+        let ev = status_events(&events)[0];
+        assert_eq!(ev.workspace_name.as_deref(), Some("b"));
+        assert_eq!(state.rows_for_session("b").len(), 1);
     }
 
     #[test]

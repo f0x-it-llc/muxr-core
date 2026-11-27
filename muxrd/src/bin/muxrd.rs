@@ -711,7 +711,7 @@ fn cert_identity(
 /// when disabled); it is advertised via `GetVersion`
 /// (`MuxrService::with_notify_relay_url`) and reported over the control
 /// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
-/// `"generic"`) drives the outbound notifier's payload text (task 05).
+/// `"generic"`) drives the outbound notifier's payload text.
 /// `update_check` decides whether the daily check for a newer release is
 /// spawned (`config::EffectiveConfig::update_check`).
 #[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
