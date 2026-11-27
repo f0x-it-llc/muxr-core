@@ -7,8 +7,15 @@
 //! so an id alone would reach a pane of any session. Every pane and tab
 //! operation therefore first reads the named session's panes or windows and
 //! refuses an id that session does not hold, matching the session-scoped ids of
-//! the other backends. A read that fails because the session is gone answers a
-//! typed [`UnknownSession`].
+//! the other backends. The routed controls of an attach check their ids the
+//! same way against the attached session. A read that fails because the
+//! session is gone answers a typed [`UnknownSession`].
+//!
+//! # Names
+//!
+//! tmux expands formats in window names and pane titles it is given, so every
+//! client-supplied tab or pane name is passed with `#` doubled and reaches
+//! tmux as literal text.
 //!
 //! # Focus and zoom
 //!
@@ -250,10 +257,35 @@ fn non_empty(s: &str) -> Option<String> {
     (!s.is_empty()).then(|| s.to_owned())
 }
 
-/// The routed attach controls, over the runner.
+/// Escape a client-supplied name for a tmux argument that tmux expands as a
+/// format (`rename-window`, `new-window -n`, `select-pane -T`): `##` is a
+/// literal `#`, so nothing in the name is interpreted.
+fn literal(name: &str) -> String {
+    name.replace('#', "##")
+}
+
+/// Every pane id on the server, or `None` when that cannot be read reliably.
+fn server_pane_ids(tmux: &Tmux) -> Option<HashSet<u32>> {
+    let out = tmux
+        .run(&["list-panes", "-a", "-F", "#{pane_id}"])
+        .ok()
+        .filter(|o| o.status.success())?;
+    let ids: HashSet<u32> = String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix('%')?.parse().ok())
+        .collect();
+    // A live server holding the session being read has at least one pane.
+    (!ids.is_empty()).then_some(ids)
+}
+
+/// The routed attach controls of one session's attach, over the runner.
+///
+/// Pane and window ids are server-wide, so every control first checks that
+/// the id belongs to this session and refuses one that does not.
 struct Control {
     tmux: Tmux,
     agents: Arc<AgentState>,
+    session: String,
 }
 
 /// An `Ok` ack or its error.
@@ -268,20 +300,64 @@ fn ack_result(op: &str, ack: ActionAck) -> Result<()> {
     }
 }
 
+impl Control {
+    /// The window holding `pane` in this session, and the pane's row.
+    fn pane_and_window(&self, pane: u32) -> Result<(PaneRow, WindowRow)> {
+        let session = self.session.as_str();
+        let (windows, panes) = read_session(&self.tmux, session, |t| {
+            Ok((t.list_windows(session)?, t.list_panes(session)?))
+        })?;
+        let row = panes
+            .into_iter()
+            .find(|p| p.id == pane)
+            .ok_or_else(|| anyhow!("pane {pane} is not in session '{session}'"))?;
+        let window = windows
+            .into_iter()
+            .find(|w| w.id == row.window_id)
+            .ok_or_else(|| anyhow!("pane {pane} has no window in session '{session}'"))?;
+        Ok((row, window))
+    }
+}
+
 impl AttachControl for Control {
     fn select_window(&self, window: u32) -> Result<()> {
+        let session = self.session.as_str();
+        let windows = read_session(&self.tmux, session, |t| t.list_windows(session))?;
+        if !windows.iter().any(|w| w.id == window) {
+            bail!("tab {window} is not in session '{session}'");
+        }
         ack_result("select-window", self.tmux.select_window(window)?)
     }
 
     fn select_pane(&self, pane: u32) -> Result<()> {
-        ack_result("select-pane", self.tmux.select_pane(pane)?)
+        // `select-pane` alone does not change the current window, so a pane in
+        // another window is reached by selecting that window first.
+        let (row, window) = self.pane_and_window(pane)?;
+        if !window.active {
+            ack_result("select-window", self.tmux.select_window(window.id)?)?;
+        }
+        ack_result("select-pane", self.tmux.select_pane(row.id)?)
     }
 
     fn zoom_toggle(&self, pane: u32) -> Result<()> {
-        ack_result("resize-pane -Z", self.tmux.zoom_toggle(pane)?)
+        // Zooming a pane makes it its window's active pane but leaves the
+        // current window alone; entering zoom on a pane of another window
+        // selects that window first, so the client lands on the zoomed pane.
+        // Leaving zoom moves nothing.
+        let (row, window) = self.pane_and_window(pane)?;
+        if !window.zoomed && !window.active {
+            ack_result("select-window", self.tmux.select_window(window.id)?)?;
+        }
+        ack_result("resize-pane -Z", self.tmux.zoom_toggle(row.id)?)
     }
 
     fn layout(&self, session: &str) -> Result<LayoutSnapshot> {
+        if session != self.session {
+            bail!(
+                "tmux attach of '{}' cannot read session '{session}'",
+                self.session
+            );
+        }
         layout_of(&self.tmux, &self.agents, session)
     }
 }
@@ -386,7 +462,7 @@ impl MuxBackend for TmuxBackend {
                 info: ack.info,
             });
         };
-        let titled = self.tmux.set_pane_title(id, &name)?;
+        let titled = self.tmux.set_pane_title(id, &literal(&name))?;
         if titled.ok {
             return Ok(ack);
         }
@@ -402,7 +478,7 @@ impl MuxBackend for TmuxBackend {
 
     fn rename_pane(&self, session: &str, pane: PaneRef, name: String) -> Result<ActionAck> {
         let (row, _) = found!(self.pane_row(session, pane));
-        self.tmux.set_pane_title(row.id, &name)
+        self.tmux.set_pane_title(row.id, &literal(&name))
     }
 
     fn resize_pane(
@@ -445,6 +521,7 @@ impl MuxBackend for TmuxBackend {
     }
 
     fn new_tab(&self, session: &str, name: Option<String>) -> Result<ActionAck> {
+        let name = name.map(|n| literal(&n));
         self.tmux.new_window(session, name.as_deref())
     }
 
@@ -460,7 +537,7 @@ impl MuxBackend for TmuxBackend {
 
     fn rename_tab(&self, session: &str, tab_id: u64, name: String) -> Result<ActionAck> {
         let window = found!(self.window_id(session, tab_id));
-        self.tmux.rename_window(window, &name)
+        self.tmux.rename_window(window, &literal(&name))
     }
 
     // ── Agents ──────────────────────────────────────────────────────────────
@@ -476,10 +553,25 @@ impl MuxBackend for TmuxBackend {
         let (windows, panes) = read_session(&self.tmux, session, |t| {
             Ok((t.list_windows(session)?, t.list_panes(session)?))
         })?;
+        // A row whose pane is not in this session is skipped. It is dropped
+        // only when its pane is gone from the whole server: after a rename the
+        // pane lives on under another session name until the watcher re-keys
+        // its row. When the server-wide read fails, nothing is dropped.
+        let missing: Vec<u32> = rows
+            .iter()
+            .map(|(id, _)| *id)
+            .filter(|id| !panes.iter().any(|p| p.id == *id))
+            .collect();
+        if !missing.is_empty()
+            && let Some(alive) = server_pane_ids(&self.tmux)
+        {
+            for id in missing.iter().filter(|id| !alive.contains(id)) {
+                self.agents.remove_pane(*id);
+            }
+        }
         let mut agents = Vec::with_capacity(rows.len());
         for (id, row) in rows {
             let Some(pane) = panes.iter().find(|p| p.id == id) else {
-                self.agents.remove_pane(id);
                 continue;
             };
             let window = windows.iter().find(|w| w.id == pane.window_id);
@@ -537,18 +629,24 @@ impl MuxBackend for TmuxBackend {
         pane: PaneRef,
         relay_focus: Option<PaneRef>,
     ) -> Result<PaneFullscreenContext> {
-        // tmux zoom is addressed by pane id across the session, so the relay
-        // needs no tab placement: no tab ids keep its tab gate permissive.
-        let _ = relay_focus;
+        // One windows + panes read places both the target and the relay's
+        // tracked focus in their windows (tabs), so the relay's tab gate can
+        // refuse an exit whose target window is not the one its focus is in
+        // instead of zooming the window its stale focus points at.
         if pane.is_plugin {
             return Ok(PaneFullscreenContext::not_found());
         }
         let (windows, panes) = read_layout_rows(&self.tmux, session)?;
-        let Some(window) =
-            layout::window_of(&panes, pane.id).and_then(|id| windows.iter().find(|w| w.id == id))
-        else {
+        let window_of = |p: PaneRef| {
+            (!p.is_plugin)
+                .then(|| layout::window_of(&panes, p.id))
+                .flatten()
+                .and_then(|id| windows.iter().find(|w| w.id == id))
+        };
+        let Some(window) = window_of(pane) else {
             return Ok(PaneFullscreenContext::not_found());
         };
+        let relay_focus_tab_id = relay_focus.and_then(window_of).map(|w| u64::from(w.id));
         let (is_floating, floating_visible, focused_floating) =
             layout::floating_visibility(&panes, pane.id);
         Ok(PaneFullscreenContext {
@@ -557,9 +655,9 @@ impl MuxBackend for TmuxBackend {
             floating_visible,
             focused_floating,
             tab_fullscreen: window.zoomed,
-            tab_id: None,
+            tab_id: Some(u64::from(window.id)),
             tab_active: window.active,
-            relay_focus_tab_id: None,
+            relay_focus_tab_id,
         })
     }
 
@@ -579,6 +677,7 @@ impl MuxBackend for TmuxBackend {
         let ctl: Arc<dyn AttachControl> = Arc::new(Control {
             tmux: self.tmux.clone(),
             agents: Arc::clone(&self.agents),
+            session: session.to_owned(),
         });
         attach::open(self.tmux.socket(), session, rows, cols, read_only, ctl)
     }
@@ -674,11 +773,12 @@ mod tests {
         d=$(dirname \"$2\")\n\
         [ \"$3\" = __warm ] && exit 0\n\
         shift 2\n\
+        k=\"$1\"; [ \"$2\" = -a ] && k=\"$1-a\"\n\
         printf '%s\\n' \"$@\" >> \"$d/log\"\n\
         printf '==\\n' >> \"$d/log\"\n\
-        [ -f \"$d/out.$1\" ] && cat \"$d/out.$1\"\n\
-        [ -f \"$d/err.$1\" ] && cat \"$d/err.$1\" >&2\n\
-        if [ -f \"$d/code.$1\" ]; then exit \"$(cat \"$d/code.$1\")\"; fi\n\
+        [ -f \"$d/out.$k\" ] && cat \"$d/out.$k\"\n\
+        [ -f \"$d/err.$k\" ] && cat \"$d/err.$k\" >&2\n\
+        if [ -f \"$d/code.$k\" ]; then exit \"$(cat \"$d/code.$k\")\"; fi\n\
         exit 0\n";
 
     /// Run the fresh script once until exec stops failing with ETXTBSY: a
@@ -1130,6 +1230,7 @@ mod tests {
         state.set_pane(3, agent_row("s", "side"));
         state.set_pane(5, agent_row("s", "main"));
         state.set_pane(7, agent_row("other", "main"));
+        f.out("list-panes-a", "%1\n%3\n%7\n");
         let agents = f.backend.list_agents("s").unwrap();
         let ids: Vec<u32> = agents.iter().map(|a| a.pane).collect();
         // Same status: the later change sorts first.
@@ -1149,6 +1250,42 @@ mod tests {
         assert!(state.mark(5).is_none());
         assert!(state.mark(7).is_some());
         assert!(f.backend.supports_agents());
+        assert_eq!(
+            f.calls_of("list-panes").last().unwrap(),
+            &v(&["list-panes", "-a", "-F", "#{pane_id}"])
+        );
+    }
+
+    #[test]
+    fn list_agents_keeps_rows_whose_pane_lives_in_another_session() {
+        // Session `s` was renamed to `t` (its rows still say `s`) and a new
+        // session `s` holds only pane 8.
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(4, 0, true, false, "main"));
+        f.out("list-panes", &pane_rec(8, 4, 0, true, false));
+        let state = f.backend.agent_state();
+        state.set_pane(2, agent_row("s", "w"));
+        state.set_pane(5, agent_row("s", "w"));
+        state.set_pane(8, agent_row("s", "main"));
+        f.out("list-panes-a", "%2\n%8\n");
+        let agents = f.backend.list_agents("s").unwrap();
+        assert_eq!(agents.iter().map(|a| a.pane).collect::<Vec<_>>(), [8]);
+        // Pane 2 still exists (under `t`): skipped, not dropped. Pane 5 is gone.
+        assert!(state.mark(2).is_some());
+        assert!(state.mark(5).is_none());
+
+        // When the server-wide read fails, nothing is dropped.
+        state.set_pane(5, agent_row("s", "w"));
+        f.fail("list-panes-a", "server exited\n");
+        assert_eq!(f.backend.list_agents("s").unwrap().len(), 1);
+        assert!(state.mark(2).is_some() && state.mark(5).is_some());
+
+        // With every row in the session, no server-wide read happens at all.
+        state.remove_pane(2);
+        state.remove_pane(5);
+        let before = f.calls_of("list-panes").len();
+        f.backend.list_agents("s").unwrap();
+        assert_eq!(f.calls_of("list-panes").len(), before + 1);
     }
 
     #[test]
@@ -1177,14 +1314,24 @@ mod tests {
             .unwrap();
         assert!(zoomed.exists && zoomed.tab_fullscreen && zoomed.tab_active);
         assert!(!zoomed.is_floating);
-        assert_eq!((zoomed.tab_id, zoomed.relay_focus_tab_id), (None, None));
+        assert_eq!(zoomed.tab_id, Some(1));
+        assert_eq!(zoomed.relay_focus_tab_id, Some(2));
 
         let plain = f
             .backend
             .pane_fullscreen_context("s", PaneRef::terminal(2), None)
             .unwrap();
         assert!(plain.exists && !plain.tab_fullscreen && !plain.tab_active);
-        assert_eq!(plain.tab_id, None);
+        assert_eq!((plain.tab_id, plain.relay_focus_tab_id), (Some(2), None));
+
+        // A relay focus that is gone, or a plugin ref, places no tab.
+        for focus in [PaneRef::terminal(99), PaneRef::plugin(1)] {
+            let ctx = f
+                .backend
+                .pane_fullscreen_context("s", PaneRef::terminal(1), Some(focus))
+                .unwrap();
+            assert_eq!((ctx.tab_id, ctx.relay_focus_tab_id), (Some(1), None));
+        }
 
         let floating = f
             .backend
@@ -1204,6 +1351,124 @@ mod tests {
                 .unwrap(),
             (true, true, None)
         );
+    }
+
+    #[test]
+    fn client_names_reach_tmux_as_literal_text() {
+        let f = Fake::new("3.7c");
+        f.out("list-windows", &window_rec(5, 0, true, false, "main"));
+        f.out("list-panes", &pane_rec(3, 5, 0, true, false));
+        f.out("split-window", "%7\n");
+        f.out("new-window", "@6\n");
+        f.backend.rename_tab("s", 5, "fix #S".into()).unwrap();
+        f.backend
+            .rename_pane("s", PaneRef::terminal(3), "#(touch /tmp/x)".into())
+            .unwrap();
+        f.backend.new_tab("s", Some("a ## b".into())).unwrap();
+        f.backend
+            .new_pane("s", false, Some("#{pane_id}".into()))
+            .unwrap();
+        assert_eq!(
+            f.calls_of("rename-window"),
+            [v(&["rename-window", "-t", "@5", "--", "fix ##S"])]
+        );
+        assert_eq!(
+            f.calls_of("select-pane"),
+            [
+                v(&["select-pane", "-t", "%3", "-T", "##(touch /tmp/x)"]),
+                v(&["select-pane", "-t", "%7", "-T", "##{pane_id}"]),
+            ]
+        );
+        assert_eq!(
+            f.calls_of("new-window")[0][3..5],
+            v(&["-n", "a #### b"])[..]
+        );
+        assert_eq!(literal("plain"), "plain");
+    }
+
+    fn control(f: &Fake, session: &str) -> Control {
+        Control {
+            tmux: f.backend.tmux.clone(),
+            agents: f.backend.agent_state(),
+            session: session.to_owned(),
+        }
+    }
+
+    /// The calls that act (everything but the `list-*` reads).
+    fn acting(calls: &[Vec<String>]) -> Vec<Vec<String>> {
+        calls
+            .iter()
+            .filter(|c| !c[0].starts_with("list-"))
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn attach_controls_refuse_ids_of_other_sessions() {
+        let f = Fake::new("3.7c");
+        // Session `s`: active window 1 (pane 1), inactive window 2 (pane 3).
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, false, "main"),
+                window_rec(2, 1, false, false, "side"),
+            ]
+            .concat(),
+        );
+        f.out(
+            "list-panes",
+            &[
+                pane_rec(1, 1, 0, true, false),
+                pane_rec(3, 2, 0, true, false),
+            ]
+            .concat(),
+        );
+        let ctl = control(&f, "s");
+        for err in [
+            ctl.select_pane(9).unwrap_err(),
+            ctl.zoom_toggle(9).unwrap_err(),
+            ctl.select_window(7).unwrap_err(),
+            ctl.layout("other").unwrap_err(),
+        ] {
+            assert!(format!("{err:#}").contains("'s'"), "{err:#}");
+        }
+        assert!(acting(&f.calls()).is_empty());
+
+        ctl.select_window(2).unwrap();
+        ctl.select_pane(1).unwrap();
+        ctl.select_pane(3).unwrap();
+        ctl.zoom_toggle(1).unwrap();
+        ctl.zoom_toggle(3).unwrap();
+        assert_eq!(
+            acting(&f.calls()),
+            vec![
+                v(&["select-window", "-t", "@2"]),
+                v(&["select-pane", "-t", "%1"]),
+                // A pane of another window: that window first.
+                v(&["select-window", "-t", "@2"]),
+                v(&["select-pane", "-t", "%3"]),
+                v(&["resize-pane", "-Z", "-t", "%1"]),
+                v(&["select-window", "-t", "@2"]),
+                v(&["resize-pane", "-Z", "-t", "%3"]),
+            ]
+        );
+        assert_eq!(ctl.layout("s").unwrap().tabs.len(), 2);
+    }
+
+    #[test]
+    fn leaving_zoom_moves_no_focus() {
+        let f = Fake::new("3.7c");
+        f.out(
+            "list-windows",
+            &[
+                window_rec(1, 0, true, false, "main"),
+                window_rec(2, 1, false, true, "zoomed"),
+            ]
+            .concat(),
+        );
+        f.out("list-panes", &pane_rec(3, 2, 0, true, false));
+        control(&f, "s").zoom_toggle(3).unwrap();
+        assert_eq!(acting(&f.calls()), [v(&["resize-pane", "-Z", "-t", "%3"])]);
     }
 
     #[test]
@@ -1386,13 +1651,52 @@ mod tests {
         assert_eq!(layout.tabs.len(), 2);
         assert_eq!(layout.tabs[1].name, "second");
 
-        // A pane of another session is refused.
-        let base_pane = b.query_layout("base").unwrap().tabs[0].panes[0].id;
+        // Names are literal text: no format or command is expanded.
+        let marker = std::env::temp_dir().join(format!("{}-expanded", server.name));
+        let run = format!("#(touch {})", marker.display());
+        let renamed = b.rename_pane("e2e", PaneRef::terminal(id), "a ## b".into());
+        assert!(renamed.unwrap().ok);
+        let tab_id = layout.tabs[1].tab_id;
+        assert!(b.rename_tab("e2e", tab_id, run.clone()).unwrap().ok);
+        let layout = b.query_layout("e2e").unwrap();
+        let titled = layout.tabs[0].panes.iter().find(|p| p.id == id).unwrap();
+        assert_eq!(titled.title, "a ## b");
+        assert_eq!(layout.tabs[1].name, run);
+        assert!(b.rename_tab("e2e", tab_id, "fix #S".into()).unwrap().ok);
+        assert_eq!(b.query_layout("e2e").unwrap().tabs[1].name, "fix #S");
+        std::thread::sleep(Duration::from_millis(200));
+        let expanded = marker.exists();
+        let _ = std::fs::remove_file(&marker);
+        assert!(!expanded, "a #() in a name ran");
+
+        // A pane or window of another session is refused, ephemeral and routed.
+        let base = b.query_layout("base").unwrap();
+        let base_pane = base.tabs[0].panes[0].id;
+        let base_window = u32::try_from(base.tabs[0].tab_id).unwrap();
         assert!(
             !b.focus_pane("e2e", PaneRef::terminal(base_pane))
                 .unwrap()
                 .ok
         );
+        let ctl = Control {
+            tmux: b.tmux.clone(),
+            agents: b.agent_state(),
+            session: "e2e".into(),
+        };
+        assert!(ctl.select_pane(base_pane).is_err());
+        assert!(ctl.zoom_toggle(base_pane).is_err());
+        assert!(ctl.select_window(base_window).is_err());
+        assert!(!b.query_layout("base").unwrap().tabs[0].fullscreen_active);
+        assert!(ctl.select_pane(id).is_ok());
+
+        // The fullscreen context places the target and the relay focus.
+        let target = PaneRef::terminal(id);
+        let ctx = b
+            .pane_fullscreen_context("e2e", target, Some(target))
+            .unwrap();
+        assert_eq!(ctx.tab_id, Some(layout.tabs[0].tab_id));
+        assert_eq!(ctx.relay_focus_tab_id, ctx.tab_id);
+        assert!(ctx.tab_active);
 
         assert!(b.kill_session("e2e").unwrap().ok);
         let names: Vec<String> = b
