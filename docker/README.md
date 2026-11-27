@@ -13,7 +13,9 @@ the image build.
 
 > The rig defaults to the **zellij** backend. To exercise muxrd's **herdr**
 > backend instead, use the opt-in herdr profile — see
-> [Herdr backend (opt-in)](#herdr-backend-opt-in) below.
+> [Herdr backend (opt-in)](#herdr-backend-opt-in) below. For the **tmux**
+> backend, or all three backends at once, see
+> [tmux backend (opt-in)](#tmux-backend-opt-in).
 
 ## What's inside
 
@@ -31,12 +33,16 @@ the image build.
   an `editor` tab (nvim + shell + btop), a `shell` tab (shell + htop), and a
   `logs` tab (live log stream).
 - Terminal tooling: **Neovim + NvChad**, **btop**, htop, lazygit, ripgrep, fd,
-  fzf, bat, tree, jq, ncdu, tmux, git, node/npm, python3, plus toys.
+  fzf, bat, tree, jq, ncdu, tmux, git, node/npm, python3, plus toys. The tmux
+  here is the distribution's (3.5a on Debian trixie) in every image except the
+  tmux rigs (`tmux` and `all` profiles), which replace it with a pinned tmux
+  built from source — see [tmux backend (opt-in)](#tmux-backend-opt-in).
 
 **Architecture:** the image builds natively on both `amd64` and `arm64` hosts —
 zellij, herdr and lazygit are each downloaded for the build platform (BuildKit's
-automatic `TARGETARCH`), so on Apple silicon or an ARM Linux box there is nothing
-to set and nothing runs under emulation. To force the amd64 image anyway:
+automatic `TARGETARCH`) and the tmux rigs build tmux from source, so on Apple
+silicon or an ARM Linux box there is nothing to set and nothing runs under
+emulation. To force the amd64 image anyway:
 
 ```bash
 DOCKER_DEFAULT_PLATFORM=linux/amd64 ./docker/run.sh --herdr
@@ -141,6 +147,110 @@ zellij rig's). To inspect/drive herdr directly inside the container:
 docker exec muxr-herdr-rig herdr status server
 docker exec muxr-herdr-rig herdr workspace list
 ```
+
+## tmux backend (opt-in)
+
+Two more profiles drive muxrd's **tmux** backend: `tmux` (tmux only) and `all`
+(zellij, herdr and tmux at once). Neither is built unless asked for:
+
+```bash
+# tmux only, loopback:
+./docker/run.sh --tmux
+# …or compose directly:
+docker compose -f docker/compose.yaml --profile tmux up --build muxrd-tmux
+
+# zellij + herdr + tmux at once (LAN/phone: add --host as for the other rigs):
+./docker/run.sh --all
+docker compose -f docker/compose.yaml --profile all up --build muxrd-all
+```
+
+`tmux` builds the `runtime-tmux` image: the zellij runtime plus tmux built from
+its release tarball, copied over the distribution's tmux 3.5a so exactly one
+tmux is on `PATH`. The entrypoint starts a detached session named
+`backend-dev` (the `SESSION` env var) with one horizontal split and exports
+`MUXRD_BACKEND=tmux` and `MUXRD_TMUX_SOCKET` (tmux's default socket,
+`/tmp/tmux-0/default`) to SSH logins, so the `muxrctl`-started daemon selects
+tmux and talks to the same server a plain `tmux attach` reaches. Then SSH in and
+drive `muxrctl` as for zellij. The container is **`muxr-tmux-rig`**.
+
+`all` builds `runtime-herdr-tmux` (the herdr image plus the same tmux), starts
+all three backends and leaves `MUXRD_BACKEND` unset, so muxrd serves them all;
+zellij and tmux both carry a `backend-dev` session. The container is
+**`muxr-all-rig`**.
+
+> **tmux is PINNED and checksum-verified** — `TMUX_VERSION` defaults to `3.8`,
+> and the Dockerfile's `tmux-build` stage checks the downloaded
+> `tmux-3.8.tar.gz` against `TMUX_SHA256`
+> (`e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e`, the
+> release asset's digest, verified by downloading and building it) with
+> `sha256sum -c` before unpacking it. It is the rig's first checksum-verified
+> download; the zellij, herdr and lazygit downloads trust TLS and the release
+> URL. 3.8 is the newest release, so the paths muxrd gates on tmux 3.7 and 3.8
+> (floating panes, moving a pane between tiled and floating,
+> `pane_command_running`) run here; 3.5a stays the supported floor.
+>
+> **The version and the digest move together** — the Dockerfile defaults,
+> **both** compose fallbacks (the `tmux` *and* `all` services) and the `run.sh`
+> banner. To try another release, set both:
+> `TMUX_VERSION=<x.y> TMUX_SHA256=<digest> ./docker/run.sh --tmux`. A version
+> without its digest fails the build at the checksum.
+
+> **What you'll see:** tmux's own status line inside the phone's terminal — the
+> attach is an ordinary tmux client. Window size is shared with every other
+> client of the session: tmux sizes a window to its most recently active client
+> by default, so your own `tmux attach` (or resizing it) changes what the phone
+> sees. Focus and zoom are session-wide too: switching tabs or panes in the app
+> moves every client of the session. Detach (`Ctrl-b d`) when done.
+
+The tmux rigs keep muxrd's state in their own volumes (`muxrd-tmux-data`;
+`muxrd-all-data`, `zellij-all-config`, `herdr-all-data`); tmux keeps none. To
+inspect tmux directly inside the container:
+
+```bash
+docker exec muxr-tmux-rig tmux list-sessions
+docker exec muxr-tmux-rig tmux list-panes -s -t =backend-dev
+```
+
+### Running the tmux suite in the rig
+
+`muxrd/tests/tmux_integration.rs` is the tmux backend's live gate. Every test is
+`#[ignore]`d and starts its own private tmux server (a unique socket, killed
+when the test ends), so it never touches the rig's `backend-dev` session or
+your own tmux. Against a local tmux:
+
+```bash
+cargo test --release -p muxrd --test tmux_integration -- --ignored --test-threads=1
+# another tmux binary: MUXRD_TMUX_BIN=/path/to/tmux cargo test …
+```
+
+`--release` matters for one check: the flood test enforces its CPU bound in an
+optimized build and only prints the share in a debug one. Inside the rig the
+suite runs against the pinned tmux 3.8, so the 3.8-only tests run too. The rig
+image has no Rust toolchain, so the Dockerfile's `builder` stage builds the
+suite as a static musl binary, which is copied in (from the repo root):
+
+```bash
+# 1. The tmux rig, detached:
+docker compose -f docker/compose.yaml --profile tmux up -d --build muxrd-tmux
+
+# 2. The suite, built by the builder stage:
+docker build -f docker/Dockerfile --target builder -t muxr-rig-builder .
+out="$(mktemp -d)"
+docker run --rm -v "${out}:/out" muxr-rig-builder sh -euc '
+  set -o pipefail
+  OPENSSL_STATIC=1 PKG_CONFIG_ALL_STATIC=1 cargo test --release --locked \
+    -p muxrd --test tmux_integration --no-run 2>&1 | tee /out/build.log
+  bin="$(sed -n "s/.*Executable .*(\(.*\))$/\1/p" /out/build.log)"
+  cp "${bin}" /out/tmux_integration'
+
+# 3. Run it in the rig:
+docker cp "${out}/tmux_integration" muxr-tmux-rig:/usr/local/bin/tmux_integration
+docker exec muxr-tmux-rig tmux_integration --ignored --test-threads=1
+```
+
+The same binary runs in the `all` rig (`muxr-all-rig`). `./docker/stop.sh`
+removes the rigs; remove the builder image with
+`docker image rm muxr-rig-builder`.
 
 ## LAN / phone access
 
@@ -247,15 +357,19 @@ cargo run --example read_client -- \
 | `--ssh-port <N>` | `2222`      | Host port to publish SSH on                        |
 | `--herdr`        | —           | Run the herdr-backend rig instead of zellij        |
 | `--both`         | —           | Run the multi-backend rig (zellij + herdr at once) |
+| `--tmux`         | —           | Run the tmux-backend rig (tmux 3.8 from source)    |
+| `--all`          | —           | Run zellij, herdr and tmux at once                 |
 | `--fresh`        | —           | `--no-cache` rebuild first — never a stale binary  |
 
 ## Teardown — stop.sh
 
 The rig is a **throwaway environment**: spin it up with `run.sh`, tear it down
-completely with `stop.sh`. With no flags it stops **all** rig variants and
-removes their containers, named volumes (token DB, TLS cert, zellij/herdr
-session state, muxr-notify DB) **and** the built images — the next `run.sh`
-rebuilds and re-pairs from a clean slate:
+completely with `stop.sh`. With no flags it stops **all** rig variants
+(zellij, herdr, both, tmux and all) and removes their containers, named
+volumes (token DB, TLS cert, zellij/herdr session state, muxr-notify DB)
+**and** the built images (`muxr-grpc-rig`, `muxr-herdr-rig`, `muxr-both-rig`,
+`muxr-tmux-rig`, `muxr-all-rig`) — the next `run.sh` rebuilds and re-pairs
+from a clean slate:
 
 ```bash
 ./docker/stop.sh               # full reset (tokens + images gone)

@@ -24,6 +24,20 @@
 #                                      serves BOTH simultaneously (Phase 3
 #                                      serve-all default — the on-device multi-
 #                                      backend test rig)
+#   tmux-build     — debian:trixie-slim building tmux from its release tarball
+#                    (build arguments TMUX_VERSION, default 3.8, and TMUX_SHA256).
+#                    The tarball is checked with `sha256sum -c` against the
+#                    pinned digest BEFORE it is unpacked: this is the rig's first
+#                    checksum-verified download (the zellij, herdr and lazygit
+#                    downloads above trust TLS and the release URL alone)
+#   runtime-tmux   — runtime + that tmux copied over the distribution's tmux
+#                    3.5a, so exactly one tmux is on PATH. BACKEND=tmux →
+#                    muxrd restricted to tmux. Built ONLY for the `tmux` profile
+#   runtime-herdr-tmux
+#                  — runtime-herdr + the same tmux: all three backends.
+#                    BACKEND=all → start zellij, herdr and tmux; muxrd
+#                    auto-detects & serves all three. Built ONLY for the `all`
+#                    profile
 #
 # muxr-notify is a SEPARATE distributable artifact from muxrd/muxrctl (never
 # bundled in the release suite tarballs or install.sh) — its own deployment
@@ -38,11 +52,15 @@
 # `TARGETARCH` itself instead of sharing one token: a shared token passes on
 # amd64 and 404s only on arm64. To force the amd64 image under emulation:
 #   DOCKER_DEFAULT_PLATFORM=linux/amd64 ./docker/run.sh …
+# tmux needs no mapping: the tmux rigs download its source and build it for
+# the build platform.
 #
 # Build context: repo root  (compose sets context: ..)
 #   docker compose -f docker/compose.yaml up --build                              # zellij (default)
 #   docker compose -f docker/compose.yaml --profile herdr up --build muxrd-herdr  # herdr only
 #   docker compose -f docker/compose.yaml --profile both  up --build muxrd-both   # BOTH backends
+#   docker compose -f docker/compose.yaml --profile tmux  up --build muxrd-tmux   # tmux only
+#   docker compose -f docker/compose.yaml --profile all   up --build muxrd-all    # all three
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -322,5 +340,84 @@ RUN set -eux; \
 #   muxrd selection = CLI --backend > MUXRD_BACKEND env > serve-all (Phase 3).
 #   BACKEND=herdr → MUXRD_BACKEND=herdr (restrict);  BACKEND=both → unset (serve all).
 ENV BACKEND=herdr
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage 4 — tmux-build: tmux from its release tarball, checksum-verified
+# ══════════════════════════════════════════════════════════════════════════════
+# The distribution's tmux (3.5a on trixie, installed by `runtime`) is the
+# backend's floor; the tmux rigs run the newest release instead, so the paths
+# muxrd gates on tmux 3.7 and 3.8 (floating panes, moving a pane between tiled
+# and floating, `pane_command_running`) run somewhere. Built on the same base
+# as `runtime`, so the binary links against the libevent and ncurses libraries
+# the distribution's tmux already pulled into the runtime image.
+#
+# PINNED: TMUX_VERSION and TMUX_SHA256 move together. The digest is the
+# release asset's sha256, verified by downloading and building it; `sha256sum
+# -c` refuses any other tarball before it is unpacked, so a moved tag or a
+# tampered asset fails the build here. Keep compose.yaml's two
+# `${TMUX_VERSION:-…}` / `${TMUX_SHA256:-…}` defaults and run.sh's banner in
+# step. To build another release, pass both:
+#   --build-arg TMUX_VERSION=<x.y> --build-arg TMUX_SHA256=<digest>
+FROM debian:trixie-slim AS tmux-build
+
+ARG TMUX_VERSION=3.8
+ARG TMUX_SHA256=e79c699c7e949dccd0a4a125e17b8d1261e311b16979dbc8eb34542f3966d82e
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      build-essential libevent-dev libncurses-dev bison pkg-config ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+RUN set -eux; \
+    tarball="tmux-${TMUX_VERSION}.tar.gz"; \
+    curl -fsSL -o "${tarball}" \
+      "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/${tarball}"; \
+    echo "${TMUX_SHA256}  ${tarball}" | sha256sum -c -; \
+    tar -xzf "${tarball}"; \
+    cd "tmux-${TMUX_VERSION}"; \
+    ./configure && make && make install; \
+    /usr/local/bin/tmux -V
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage 5 — runtime-tmux: the runtime image (zellij) + the source-built tmux
+# ══════════════════════════════════════════════════════════════════════════════
+# The built tmux is copied over the distribution's /usr/bin/tmux, so exactly
+# one tmux is on PATH: the muxrd under test, the rig's tmux session and a
+# `tmux attach` in an SSH shell all run the pinned release. Built ONLY when the
+# `tmux` compose profile selects `target: runtime-tmux`.
+FROM runtime AS runtime-tmux
+
+ARG TMUX_VERSION=3.8
+COPY --from=tmux-build /usr/local/bin/tmux /usr/bin/tmux
+RUN set -eux; \
+    [ "$(command -v tmux)" = /usr/bin/tmux ]; \
+    tmux -V; \
+    tmux -V | grep -q "tmux ${TMUX_VERSION}"
+
+# Default this image to the tmux-only backend; the entrypoint exports
+# MUXRD_BACKEND=tmux and MUXRD_TMUX_SOCKET to SSH logins.
+ENV BACKEND=tmux
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Stage 6 — runtime-herdr-tmux: runtime-herdr (zellij + herdr) + the same tmux
+#           → an image carrying ALL THREE backends
+# ══════════════════════════════════════════════════════════════════════════════
+# Built ONLY when the `all` compose profile selects `target: runtime-herdr-tmux`.
+FROM runtime-herdr AS runtime-herdr-tmux
+
+ARG TMUX_VERSION=3.8
+COPY --from=tmux-build /usr/local/bin/tmux /usr/bin/tmux
+RUN set -eux; \
+    [ "$(command -v tmux)" = /usr/bin/tmux ]; \
+    tmux -V; \
+    tmux -V | grep -q "tmux ${TMUX_VERSION}"
+
+# BACKEND=all: the entrypoint starts zellij, herdr and tmux and leaves
+# MUXRD_BACKEND unset, so muxrd serves all three.
+ENV BACKEND=all
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

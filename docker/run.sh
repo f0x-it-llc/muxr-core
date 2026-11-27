@@ -18,6 +18,11 @@
 #   --both          Run the MULTI-backend rig: zellij AND herdr at once. muxrd
 #                   auto-detects and serves BOTH simultaneously (Phase 3 serve-all
 #                   — the on-device multi-backend test rig). Run ONE rig at a time.
+#   --tmux          Run the tmux-backend rig (a pinned tmux built from its
+#                   checksum-verified release tarball; muxrd is restricted to
+#                   tmux via MUXRD_BACKEND). Run ONE rig at a time.
+#   --all           Run zellij, herdr AND tmux at once; muxrd auto-detects and
+#                   serves all three. Run ONE rig at a time.
 #   --fresh         Rebuild the image with --no-cache before starting, so a stale
 #                   cached cargo-build layer can never serve an old muxrd binary.
 #                   (For a full state reset — tokens/cert/volumes too — use
@@ -28,7 +33,10 @@
 #   ZELLIJ_VERSION  zellij release the image installs: 0.46.0 (default) or
 #                   0.45.1, the two versions muxrd supports. Changing it
 #                   rebuilds the image layer that installs zellij.
-#   HERDR_VERSION   herdr release for --herdr / --both (see the Dockerfile).
+#   HERDR_VERSION   herdr release for --herdr / --both / --all (see the Dockerfile).
+#   TMUX_VERSION    tmux release for --tmux / --all, built from source: 3.8
+#                   (default). Another release also needs its tarball digest
+#                   in TMUX_SHA256, or the build fails its checksum check.
 #
 # Examples:
 #   # Loopback only — safe for local testing (zellij backend):
@@ -42,6 +50,10 @@
 #
 #   # BOTH backends at once, exposed on the LAN for on-device testing:
 #   ./docker/run.sh --both --host 192.168.1.50
+#
+#   # tmux backend rig (loopback), or all three backends at once:
+#   ./docker/run.sh --tmux
+#   ./docker/run.sh --all --host 192.168.1.50
 #
 #   # Expose on the LAN so a phone can connect:
 #   ./docker/run.sh --host 192.168.1.50
@@ -66,6 +78,8 @@ usage() {
 BIND_ADDR="127.0.0.1"
 HERDR=0
 BOTH=0
+TMUX_RIG=0
+ALL=0
 FRESH=0
 EXTRA_ARGS=()
 
@@ -106,6 +120,14 @@ while [[ $# -gt 0 ]]; do
       BOTH=1
       shift
       ;;
+    --tmux)
+      TMUX_RIG=1
+      shift
+      ;;
+    --all)
+      ALL=1
+      shift
+      ;;
     --fresh)
       FRESH=1
       shift
@@ -125,8 +147,8 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ "${HERDR}" -eq 1 && "${BOTH}" -eq 1 ]]; then
-  echo "[run.sh] ERROR: --herdr and --both are mutually exclusive" >&2
+if (( HERDR + BOTH + TMUX_RIG + ALL > 1 )); then
+  echo "[run.sh] ERROR: --herdr, --both, --tmux and --all are mutually exclusive" >&2
   exit 1
 fi
 
@@ -147,6 +169,8 @@ fi
 backend_label=zellij
 [[ "${HERDR}" -eq 1 ]] && backend_label=herdr
 [[ "${BOTH}" -eq 1 ]]  && backend_label="both (zellij+herdr)"
+[[ "${TMUX_RIG}" -eq 1 ]]  && backend_label=tmux
+[[ "${ALL}" -eq 1 ]]   && backend_label="all (zellij+herdr+tmux)"
 
 echo "[run.sh] BIND_ADDR=${BIND_ADDR}  backend=${backend_label}"
 # Surface the zellij release this build will install, the same way as the
@@ -154,7 +178,7 @@ echo "[run.sh] BIND_ADDR=${BIND_ADDR}  backend=${backend_label}"
 # default, so say which one won. Every rig image installs zellij, the herdr
 # one included, so this is printed for every mode.
 echo "[run.sh] zellij release: ${ZELLIJ_VERSION:-0.46.0 (the compose default)}"
-if [[ "${HERDR}" -eq 1 || "${BOTH}" -eq 1 ]]; then
+if [[ "${HERDR}" -eq 1 || "${BOTH}" -eq 1 || "${ALL}" -eq 1 ]]; then
   # Surface the herdr release this build will install. The compose default is
   # PINNED to the last wire-protocol-tested release (see Dockerfile) — an
   # HERDR_VERSION from the environment overrides it, so say which one won.
@@ -162,13 +186,25 @@ if [[ "${HERDR}" -eq 1 || "${BOTH}" -eq 1 ]]; then
   # how the 0.8.2/proto-20 attach breakage happened.)
   echo "[run.sh] herdr release: ${HERDR_VERSION:-0.9.5 (pinned default)}"
 fi
+if [[ "${TMUX_RIG}" -eq 1 || "${ALL}" -eq 1 ]]; then
+  # The tmux rigs build tmux from its release tarball, checked against a pinned
+  # sha256 before it is unpacked; a TMUX_VERSION from the environment needs its
+  # own TMUX_SHA256 as well.
+  echo "[run.sh] tmux release: ${TMUX_VERSION:-3.8 (pinned default)}, built from source"
+fi
 echo "[run.sh] publishing  gRPC ${BIND_ADDR}:${GRPC_PORT:-50051}  +  SSH ${BIND_ADDR}:${SSH_PORT:-2222}"
 echo "[run.sh] after boot:  ./docker/ssh.sh ${BIND_ADDR} ${SSH_PORT:-2222}  then run  muxrctl"
 echo ""
 
 # Profile-gated services are named explicitly so the default zellij service isn't
 # also started (it would clash on the published ports).
-if [[ "${BOTH}" -eq 1 ]]; then
+if [[ "${ALL}" -eq 1 ]]; then
+  COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile all)
+  SERVICE=muxrd-all
+elif [[ "${TMUX_RIG}" -eq 1 ]]; then
+  COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile tmux)
+  SERVICE=muxrd-tmux
+elif [[ "${BOTH}" -eq 1 ]]; then
   COMPOSE=("${DOCKER[@]}" compose -f "${COMPOSE_FILE}" --profile both)
   SERVICE=muxrd-both
 elif [[ "${HERDR}" -eq 1 ]]; then
