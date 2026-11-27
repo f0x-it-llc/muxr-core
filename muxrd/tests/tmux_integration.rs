@@ -849,6 +849,10 @@ fn wheel_follows_the_mouse_option() {
     let server = Server::start();
     let session = server.session("wheel");
     let pane = server.first_pane(&session);
+    // The default changed in tmux 3.8 (`mouse on`; `off` before), so the first
+    // half sets `mouse off` itself. It is set before the attach opens, so the
+    // client never switches mouse reporting on in the first place.
+    server.tmux(&["set-option", "-g", "mouse", "off"]);
     // Scrollback for a wheel to move through.
     server.type_into(&session, pane, b"seq 1 200\r");
     assert!(wait_until(WAIT, || server
@@ -860,8 +864,8 @@ fn wheel_follows_the_mouse_option() {
     let stream = Stream::start(rx);
     assert!(stream.wait_for(b"\x1b[?1049h", 0, WAIT), "no screen");
 
-    // `mouse off` (the default): the client never asks for mouse reports, so
-    // the wheel frame is dropped and the pane stays as it was.
+    // `mouse off`: the client never asks for mouse reports, so the wheel frame
+    // is dropped and the pane stays as it was.
     assert_eq!(server.tmux(&["show-options", "-gv", "mouse"]), "off");
     let before = server.capture(pane);
     tx.send_mouse(MuxMouseKind::WheelUp, 5, 5).unwrap();
