@@ -232,3 +232,129 @@ pub struct HistoryView {
     pub revision: u64,
     pub series: HistorySeries,
 }
+
+// ─── Processes ────────────────────────────────────────────────────────────────
+
+/// Floor of a process subscription's interval; the spike measured a full cpu + memory + cmd +
+/// user refresh of ~490 processes at ~6.5 ms of cpu.
+pub const MIN_PROCESS_INTERVAL: Duration = Duration::from_secs(3);
+
+/// Ceiling of a process subscription's interval.
+pub const MAX_PROCESS_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Rows a [`ProcessQuery`] gets by default.
+pub const DEFAULT_PROCESS_LIMIT: u32 = 50;
+
+/// Most rows a [`ProcessQuery`] can ask for.
+pub const MAX_PROCESS_LIMIT: u32 = 200;
+
+/// The column a process list is sorted by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcessSort {
+    /// Cpu percentage, highest first by default.
+    #[default]
+    Cpu,
+    /// Resident memory, largest first by default.
+    Memory,
+    /// Pid, ascending by default.
+    Pid,
+    /// Name (case-insensitive), ascending by default.
+    Name,
+}
+
+/// What one process subscriber wants to see. Each subscription gets a view built for its own query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessQuery {
+    pub sort: ProcessSort,
+    /// Flip the column's default direction (ties stay by pid ascending).
+    pub reverse: bool,
+    /// Case-insensitive substring of the name, the user or the decimal pid. Never the command
+    /// line. Empty matches everything.
+    pub filter: String,
+    /// Rows to return, clamped to `1..=`[`MAX_PROCESS_LIMIT`].
+    pub limit: u32,
+    /// A process (pid, start time in Unix seconds) to append when it fell outside the cut; it
+    /// also carries its thread count.
+    pub pinned: Option<(u32, i64)>,
+    /// Refresh interval asked for, clamped to `[MIN_PROCESS_INTERVAL, MAX_PROCESS_INTERVAL]`.
+    pub interval: Duration,
+}
+
+impl Default for ProcessQuery {
+    fn default() -> Self {
+        Self {
+            sort: ProcessSort::default(),
+            reverse: false,
+            filter: String::new(),
+            limit: DEFAULT_PROCESS_LIMIT,
+            pinned: None,
+            interval: MIN_PROCESS_INTERVAL,
+        }
+    }
+}
+
+impl ProcessQuery {
+    /// The row limit after clamping.
+    pub fn effective_limit(&self) -> usize {
+        self.limit.clamp(1, MAX_PROCESS_LIMIT) as usize
+    }
+
+    /// The refresh interval after clamping.
+    pub fn effective_interval(&self) -> Duration {
+        self.interval
+            .clamp(MIN_PROCESS_INTERVAL, MAX_PROCESS_INTERVAL)
+    }
+}
+
+/// A process's scheduler state, mapped from the host's own status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProcessState {
+    Running,
+    Sleeping,
+    /// Uninterruptible sleep (Linux `D`).
+    DiskWait,
+    Zombie,
+    Stopped,
+    Idle,
+    Dead,
+    Unknown,
+}
+
+/// One process. Plain data; the identity of a process is `(pid, start_unix_s)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessRow {
+    pub pid: u32,
+    pub parent_pid: Option<u32>,
+    /// Never empty: the host's name, else the executable's file name, else `<unknown>`.
+    pub name: String,
+    /// The full command line joined by spaces; empty when the host does not show it.
+    pub command: String,
+    /// User name, falling back to the numeric uid; empty when the host reports neither.
+    pub user: String,
+    /// Percent of the whole machine's cpu capacity, 0..=100.
+    pub cpu_percent: f32,
+    /// Resident memory; `None` (never 0) when the host refuses it.
+    pub memory_bytes: Option<u64>,
+    /// Thread count; only the pinned process's row carries it (Linux only).
+    pub threads: Option<u32>,
+    /// Start time, seconds since the Unix epoch.
+    pub start_unix_s: i64,
+    /// Accumulated cpu time in milliseconds.
+    pub cpu_time_ms: u64,
+    pub state: ProcessState,
+}
+
+/// One subscriber's view of the process table.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProcessSnapshot {
+    /// +1 per process refresh, monotonic for the daemon's lifetime.
+    pub revision: u64,
+    /// Wall-clock time of the refresh, milliseconds since the Unix epoch.
+    pub unix_ms: u64,
+    /// Every process on the host, before the filter. Kernel threads count.
+    pub total: u32,
+    /// Processes in [`ProcessState::Running`], before the filter.
+    pub running: u32,
+    /// The filtered, sorted, truncated rows, then the pinned row when it fell outside the cut.
+    pub rows: Vec<ProcessRow>,
+}

@@ -5,7 +5,9 @@
 mod demand;
 mod history;
 mod model;
+mod processes;
 mod sampler;
+mod signal;
 
 use std::sync::{Arc, Mutex, MutexGuard};
 
@@ -16,15 +18,20 @@ pub use demand::{
     SUMMARY_INTERVAL,
 };
 pub use model::{
-    DiskSpace, HistoryRange, HistorySeries, HistoryView, HostInfo, LoadAverage, Memory,
-    NetInterface, Temperature, Tier, VitalsSample,
+    DEFAULT_PROCESS_LIMIT, DiskSpace, HistoryRange, HistorySeries, HistoryView, HostInfo,
+    LoadAverage, MAX_PROCESS_INTERVAL, MAX_PROCESS_LIMIT, MIN_PROCESS_INTERVAL, Memory,
+    NetInterface, ProcessQuery, ProcessRow, ProcessSnapshot, ProcessSort, ProcessState,
+    Temperature, Tier, VitalsSample,
 };
+pub use processes::{ProcessSubscription, RawProcess};
 pub use sampler::{
     CpuTimes, DiskReading, HostSource, InterfaceReading, RawReading, ReadSpec, SysinfoSource,
 };
+pub use signal::{ProcessSignal, SignalRefusal, send_signal};
 
 use demand::{Demand, DemandGuard};
 use history::History;
+use processes::ProcessRegistry;
 
 /// Samples buffered per subscriber before the slowest one starts losing the oldest. At the 2 s
 /// floor that is half a minute of slack; a lagging subscriber sees [`VitalsItem::Lagged`].
@@ -66,6 +73,7 @@ struct Inner {
 pub(crate) struct Shared {
     inner: Mutex<Inner>,
     demand: Demand,
+    processes: ProcessRegistry,
     factory: SourceFactory,
     clock: Clock,
     shutdown: watch::Receiver<bool>,
@@ -118,15 +126,16 @@ impl Shared {
             .as_ref()
             .is_some_and(|r| r.generation == generation)
         {
-            Self::stop(&mut inner, &self.demand);
+            self.stop(&mut inner);
             log::info!("monitor: disabled");
         }
     }
 
-    fn stop(inner: &mut Inner, demand: &Demand) {
+    fn stop(&self, inner: &mut Inner) {
         inner.run = None;
         inner.history = History::default();
-        demand.clear();
+        self.demand.clear();
+        self.processes.clear();
     }
 }
 
@@ -175,6 +184,7 @@ impl MonitorHandle {
                     host_info: HostInfo::default(),
                 }),
                 demand: Demand::default(),
+                processes: ProcessRegistry::default(),
                 factory,
                 clock,
                 shutdown,
@@ -211,7 +221,7 @@ impl MonitorHandle {
                 log::info!("monitor: enabled");
             }
             (false, true) => {
-                Shared::stop(&mut inner, &self.shared.demand);
+                self.shared.stop(&mut inner);
                 log::info!("monitor: disabled");
             }
             _ => {}
@@ -231,6 +241,43 @@ impl MonitorHandle {
                 rx: None,
                 demand: None,
             },
+        }
+    }
+
+    /// Watch the process table through `query`. The sampler refreshes processes only while at
+    /// least one subscription is alive, at the smallest interval any of them asks for. On a
+    /// disabled monitor the subscription yields nothing.
+    pub fn watch_processes(&self, query: ProcessQuery) -> ProcessSubscription {
+        // Registered under the lock that `set_enabled` holds, so a subscription is never
+        // registered into a run that is already being torn down.
+        let inner = self.shared.lock();
+        if inner.run.is_some() {
+            self.shared.processes.register(query)
+        } else {
+            ProcessSubscription::closed()
+        }
+    }
+
+    /// Send `signal` to the process `(pid, expected_start_unix_s)` on a blocking thread; `None`
+    /// while monitoring is disabled. Needs no process subscription. See [`send_signal`].
+    pub async fn signal_process(
+        &self,
+        pid: u32,
+        expected_start_unix_s: i64,
+        signal: ProcessSignal,
+    ) -> Option<Result<(), SignalRefusal>> {
+        if !self.is_enabled() {
+            return None;
+        }
+        let sent =
+            tokio::task::spawn_blocking(move || send_signal(pid, expected_start_unix_s, signal))
+                .await;
+        match sent {
+            Ok(result) => Some(result),
+            Err(err) => {
+                log::error!("monitor: signal lookup panicked: {err}");
+                None
+            }
         }
     }
 

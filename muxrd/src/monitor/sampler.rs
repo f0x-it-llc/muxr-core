@@ -9,16 +9,18 @@ use std::time::Duration;
 
 use anyhow::Context;
 use sysinfo::{
-    Components, CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, RefreshKind,
-    System,
+    Components, CpuRefreshKind, DiskRefreshKind, Disks, MemoryRefreshKind, Networks, Pid,
+    ProcessRefreshKind, ProcessStatus, ProcessesToUpdate, RefreshKind, System, UpdateKind, Users,
 };
 use tokio::sync::watch;
 use tokio::time::Instant;
 
 use super::Shared;
+use super::demand::DemandLevel;
 use super::model::{
-    DiskSpace, HostInfo, LoadAverage, Memory, NetInterface, Temperature, VitalsSample,
+    DiskSpace, HostInfo, LoadAverage, Memory, NetInterface, ProcessState, Temperature, VitalsSample,
 };
+use super::processes::{self, ProcessTracker, RawProcess, threads_from_status};
 
 /// Delay between the priming refresh and the first emitted sample. A cpu figure needs two
 /// refreshes at least `sysinfo::MINIMUM_CPU_UPDATE_INTERVAL` apart; a second gives a steadier one.
@@ -110,6 +112,20 @@ pub trait HostSource: Send + 'static {
     fn host_info(&mut self) -> anyhow::Result<HostInfo>;
     /// Refresh and return one reading.
     fn read(&mut self, spec: ReadSpec) -> anyhow::Result<RawReading>;
+
+    /// Refresh and return the whole process table. Called only while someone watches processes,
+    /// after [`HostSource::read`] in the same blocking job. No process source: an empty table.
+    fn read_processes(&mut self) -> anyhow::Result<Vec<RawProcess>> {
+        Ok(Vec::new())
+    }
+
+    /// The text of `/proc/<pid>/status`, for a pinned pid; `None` off Linux or on a read error.
+    fn read_proc_status(&mut self, _pid: u32) -> Option<String> {
+        None
+    }
+
+    /// Nobody watches processes any more: drop the process table.
+    fn release_processes(&mut self) {}
 }
 
 // ─── Pure readers ─────────────────────────────────────────────────────────────
@@ -532,6 +548,120 @@ pub struct SysinfoSource {
     components: Option<Components>,
     disk_rule: DiskRule,
     cpu_freq_mhz: Option<u64>,
+    /// Open only while someone watches processes.
+    procs: Option<ProcessSource>,
+}
+
+/// The process side of [`SysinfoSource`]. Its own `System` keeps the process table (and the cpu
+/// counters its percentages are computed against), so dropping it drops the table.
+struct ProcessSource {
+    sys: System,
+    users: Users,
+    /// Start time per pid at the previous refresh, to spot a recycled pid.
+    starts: HashMap<u32, u64>,
+}
+
+/// Cpu and memory every refresh; name, command line and user once per process.
+fn process_kind(identity: UpdateKind) -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cpu()
+        .with_memory()
+        .with_cmd(identity)
+        .with_user(identity)
+        // Skips enumerating every thread as a process (Linux).
+        .without_tasks()
+}
+
+fn process_state(status: ProcessStatus) -> ProcessState {
+    match status {
+        ProcessStatus::Run => ProcessState::Running,
+        ProcessStatus::Sleep => ProcessState::Sleeping,
+        ProcessStatus::UninterruptibleDiskSleep => ProcessState::DiskWait,
+        ProcessStatus::Zombie => ProcessState::Zombie,
+        ProcessStatus::Stop | ProcessStatus::Tracing | ProcessStatus::Suspended => {
+            ProcessState::Stopped
+        }
+        ProcessStatus::Idle => ProcessState::Idle,
+        ProcessStatus::Dead => ProcessState::Dead,
+        _ => ProcessState::Unknown,
+    }
+}
+
+impl ProcessSource {
+    fn new() -> anyhow::Result<Self> {
+        Ok(Self {
+            sys: System::new().context("open sysinfo's process handle")?,
+            users: Users::new_with_refreshed_list().context("read the user list")?,
+            starts: HashMap::new(),
+        })
+    }
+
+    fn read(&mut self) -> Vec<RawProcess> {
+        // Process percentages are relative to the cpu counters of this same `System`.
+        self.sys
+            .refresh_cpu_specifics(CpuRefreshKind::nothing().with_usage());
+        self.sys.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            process_kind(UpdateKind::OnlyIfNotSet),
+        );
+        // A pid whose start time changed is a new process: read its identity afresh.
+        let recycled: Vec<Pid> = self
+            .sys
+            .processes()
+            .iter()
+            .filter(|(pid, p)| {
+                self.starts
+                    .get(&pid.as_u32())
+                    .is_some_and(|start| *start != p.start_time())
+            })
+            .map(|(pid, _)| *pid)
+            .collect();
+        if !recycled.is_empty() {
+            self.sys.refresh_processes_specifics(
+                ProcessesToUpdate::Some(&recycled),
+                false,
+                process_kind(UpdateKind::Always),
+            );
+        }
+        self.starts = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| (pid.as_u32(), p.start_time()))
+            .collect();
+
+        let cores = self.sys.cpus().len().max(1) as f32;
+        self.sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| {
+                let memory = p.memory();
+                RawProcess {
+                    pid: pid.as_u32(),
+                    parent_pid: p.parent().map(Pid::as_u32),
+                    start_unix_s: i64::try_from(p.start_time()).unwrap_or(i64::MAX),
+                    name: p.name().to_string_lossy().into_owned(),
+                    cmd: p
+                        .cmd()
+                        .iter()
+                        .map(|a| a.to_string_lossy().into_owned())
+                        .collect(),
+                    user: p.user_id().map_or_else(String::new, |uid| {
+                        self.users
+                            .get_user_by_id(uid)
+                            .map_or_else(|| uid.to_string(), |u| u.name().to_owned())
+                    }),
+                    // sysinfo reports percent of one core.
+                    cpu_percent: (p.cpu_usage() / cores).clamp(0.0, 100.0),
+                    // Linux reports every process; elsewhere a refused figure reads as 0.
+                    memory_bytes: (cfg!(target_os = "linux") || memory > 0).then_some(memory),
+                    cpu_time_ms: p.accumulated_cpu_time(),
+                    state: process_state(p.status()),
+                }
+            })
+            .collect()
+    }
 }
 
 impl SysinfoSource {
@@ -544,6 +674,7 @@ impl SysinfoSource {
             components: None,
             disk_rule: DiskRule::for_host(),
             cpu_freq_mhz: None,
+            procs: None,
         })
     }
 
@@ -709,6 +840,23 @@ impl HostSource for SysinfoSource {
             temperatures,
         })
     }
+
+    fn read_processes(&mut self) -> anyhow::Result<Vec<RawProcess>> {
+        let source = match &mut self.procs {
+            Some(source) => source,
+            slot => slot.insert(ProcessSource::new()?),
+        };
+        Ok(source.read())
+    }
+
+    #[cfg(target_os = "linux")]
+    fn read_proc_status(&mut self, pid: u32) -> Option<String> {
+        std::fs::read_to_string(format!("/proc/{pid}/status")).ok()
+    }
+
+    fn release_processes(&mut self) {
+        self.procs = None;
+    }
 }
 
 // ─── The sampling task ────────────────────────────────────────────────────────
@@ -750,11 +898,20 @@ fn finish(shared: &Shared, generation: u64, end: End) {
     }
 }
 
+/// How long to wait after a read: the demand level's interval, or the process watchers' when
+/// that is shorter. Each tick that has watchers refreshes processes too.
+fn wait_for(level: DemandLevel, processes: Option<Duration>) -> Duration {
+    processes.map_or(level.interval, |p| p.min(level.interval))
+}
+
 /// The sampling task for run `generation`: open the source, prime it, then sample at the demand
 /// level's interval until the run is dropped, the daemon shuts down, or the source fails hard.
 pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::Receiver<bool>) {
     let mut shutdown = shared.shutdown.clone();
     let mut demand = shared.demand.watch();
+    let mut watchers = shared.processes.watch();
+    let mut tracker = ProcessTracker::default();
+    let mut procs_open = false;
     let origin = Instant::now();
     let mono_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -796,6 +953,7 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
     let mut next = last_read + PRIME_DELAY;
     let mut primed = false;
     let mut warned = false;
+    let mut proc_warned = false;
     log::debug!("monitor: sampler started");
 
     loop {
@@ -805,7 +963,20 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
             changed = demand.changed() => {
                 // The registry outlives every run (it lives in `Shared`), so this never errs.
                 if changed.is_ok() && primed {
-                    next = last_read + demand.borrow_and_update().interval;
+                    let level = *demand.borrow_and_update();
+                    next = last_read + wait_for(level, shared.processes.interval());
+                }
+                continue;
+            }
+            changed = watchers.changed() => {
+                let interval = *watchers.borrow_and_update();
+                if changed.is_ok() && primed {
+                    next = last_read + wait_for(*demand.borrow(), interval);
+                }
+                if interval.is_none() && procs_open {
+                    procs_open = false;
+                    tracker.clear();
+                    source.release_processes();
                 }
                 continue;
             }
@@ -818,19 +989,27 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
             temperatures: level.full,
             cpu_frequency: started.duration_since(freq_read_at) >= FREQUENCY_REFRESH,
         };
+        // Process refreshes ride the same blocking job, and only while someone watches.
+        let pinned = shared.processes.pinned_pids();
+        if pinned.is_none() && procs_open {
+            procs_open = false;
+            tracker.clear();
+            source.release_processes();
+        }
         let job = tokio::task::spawn_blocking(move || {
             let result = source.read(spec);
-            (source, result)
+            let procs = pinned.map(|pinned| processes::collect(&mut *source, &pinned));
+            (source, result, procs)
         });
         let joined = tokio::select! {
             biased;
             end = ended(&mut stop, &mut shutdown) => return finish(&shared, generation, end),
             joined = job => joined,
         };
-        let result = match joined {
-            Ok((back, result)) => {
+        let (result, procs) = match joined {
+            Ok((back, result, procs)) => {
                 source = back;
-                result
+                (result, procs)
             }
             Err(err) => {
                 log::error!("monitor: sampler read panicked: {err}");
@@ -841,8 +1020,34 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
         let at_ms = mono_ms();
         // A subscriber that arrived during the read counts from this reading.
         let level_now = *demand.borrow_and_update();
-        next = last_read + level_now.interval;
+        next = last_read + wait_for(level_now, shared.processes.interval());
         primed = true;
+
+        let table = procs.and_then(|reading| {
+            procs_open = true;
+            match reading.processes {
+                Ok(raw) => {
+                    proc_warned = false;
+                    let table = tracker.ingest(raw);
+                    let threads: HashMap<u32, u32> = reading
+                        .statuses
+                        .iter()
+                        .filter_map(|(pid, text)| {
+                            Some((*pid, threads_from_status(text.as_deref()?)?))
+                        })
+                        .collect();
+                    shared.processes.publish(&table, &threads, (shared.clock)());
+                    Some(table)
+                }
+                Err(err) => {
+                    if !proc_warned {
+                        proc_warned = true;
+                        log::warn!("monitor: process refresh failed: {err:#}");
+                    }
+                    None
+                }
+            }
+        });
 
         match result {
             Ok(raw) => {
@@ -852,6 +1057,10 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
                 warned = false;
                 let mut sample = deriver.derive(raw, at_ms);
                 sample.unix_ms = (shared.clock)();
+                if let Some(table) = &table {
+                    sample.process_count = Some(table.total);
+                    sample.running_count = Some(table.running);
+                }
                 if !shared.publish(generation, sample, level.full) {
                     // The run was replaced while this reading was in flight.
                     return;
@@ -1267,5 +1476,23 @@ mod tests {
             assert!((0.0..=100.0).contains(&(user + system)));
         }
         assert!(sample.temperatures.iter().all(|t| t.celsius != 0.0));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_real_source_lists_this_process_with_its_threads() {
+        let mut source = SysinfoSource::new().unwrap();
+        let table = source.read_processes().unwrap();
+        let me = table
+            .iter()
+            .find(|p| p.pid == std::process::id())
+            .expect("this process is listed");
+        assert!(!me.name.is_empty() && !me.cmd.is_empty() && !me.user.is_empty());
+        assert!(me.memory_bytes.is_some_and(|m| m > 0));
+        assert!((0.0..=100.0).contains(&me.cpu_percent));
+        let status = source.read_proc_status(std::process::id()).unwrap();
+        assert!(threads_from_status(&status).is_some_and(|t| t >= 1));
+        source.release_processes();
+        assert!(source.procs.is_none());
     }
 }
