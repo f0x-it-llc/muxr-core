@@ -216,6 +216,12 @@
 //!   [`PaneClosed`](crate::multiplexer::events::PaneClosed), so a consumer
 //!   mirroring the agent inventory can drop it without a re-read.
 //!
+//! Every agent-status and closure event carries the same
+//! [`EventScope`](crate::multiplexer::events::EventScope), built in one place
+//! ([`herdr_scope`]): the herdr backend and the collapsed session the backend
+//! lists ([`HERDR_SESSION`]). The tmux kernel shares the bus and its pane
+//! numbers overlap this registry's, so consumers tell the two apart by scope.
+//!
 //! Both name forms are parsed tolerantly (dot and underscore alike), since the
 //! two envelopes genuinely disagree.
 //!
@@ -273,12 +279,13 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::watch;
 use tokio::time::Instant;
 
+use crate::cli::BackendKind;
 use crate::multiplexer::events::{
-    AgentStatus, AgentStatusChanged, EventBus, LayoutChanged, MuxEvent, PaneClosed,
+    AgentStatus, AgentStatusChanged, EventBus, EventScope, LayoutChanged, MuxEvent, PaneClosed,
 };
 
 use super::api::{AgentStatus as HerdrAgentStatus, ApiRequest};
-use super::backend::HerdrBackend;
+use super::backend::{HERDR_SESSION, HerdrBackend};
 use super::control::HerdrControl;
 use super::paths::HerdrSocketPaths;
 use super::registry::{HerdrPaneRegistry, HerdrTabRegistry};
@@ -1146,10 +1153,24 @@ fn publish(kernel: &Kernel, mut ev: AgentStatusChanged) {
     let _ = kernel.bus.send(MuxEvent::AgentStatusChanged(ev));
 }
 
+/// The scope of every pane event this kernel publishes: herdr's single
+/// collapsed session, the one the backend lists.
+fn herdr_scope() -> EventScope {
+    EventScope::new(BackendKind::Herdr, HERDR_SESSION)
+}
+
+/// A closure of `pane` in [`herdr_scope`].
+fn pane_closed(pane: u32) -> MuxEvent {
+    MuxEvent::PaneClosed(PaneClosed {
+        scope: herdr_scope(),
+        pane,
+    })
+}
+
 /// Publish a closed pane's neutral id. No receivers is fine, as for [`publish`].
 fn publish_closed(kernel: &Kernel, pane: u32) {
     log::debug!("herdr event kernel: pane {pane} closed");
-    let _ = kernel.bus.send(MuxEvent::PaneClosed(PaneClosed { pane }));
+    let _ = kernel.bus.send(pane_closed(pane));
 }
 
 /// A `pane.closed` / `pane.exited` push. A dead subscription is harmless; drop
@@ -1377,7 +1398,7 @@ impl ResyncEvents {
     fn into_bus_events(self) -> Vec<MuxEvent> {
         self.closed
             .into_iter()
-            .map(|pane| MuxEvent::PaneClosed(PaneClosed { pane }))
+            .map(pane_closed)
             .chain(self.changed.into_iter().map(MuxEvent::AgentStatusChanged))
             .collect()
     }
@@ -1413,6 +1434,7 @@ fn build_resync_events(
         last_status.insert(id, status);
         if changed {
             events.push(AgentStatusChanged {
+                scope: herdr_scope(),
                 pane: id,
                 workspace_id: p.workspace_id.clone(),
                 workspace_name: Some(p.workspace_label.clone()),
@@ -1678,6 +1700,7 @@ fn parse_agent_status(data: Option<&Value>, panes: &HerdrPaneRegistry) -> Pushed
     // A pushed event never carries terminal_id → never clobber a live attach key.
     let pane = translate_pane(panes, pane_id, None);
     Pushed::AgentStatus(AgentStatusChanged {
+        scope: herdr_scope(),
         pane,
         workspace_id: workspace_id.to_string(),
         workspace_name: None,
@@ -2714,6 +2737,61 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn every_pane_event_carries_herdr_and_the_herdr_session() {
+        let want = EventScope::new(BackendKind::Herdr, HERDR_SESSION);
+        assert_eq!(want.session, "herdr", "the session ListSessions reports");
+
+        // A live push.
+        let reg = HerdrPaneRegistry::new();
+        let Pushed::AgentStatus(pushed) =
+            classify_pushed(&fake_herdr::agent_status_line("w1:p1", "blocked"), &reg)
+        else {
+            panic!("an agent-status push classifies as a status");
+        };
+        assert_eq!(pushed.scope, want, "a push");
+
+        // A resync: one pane vanishes, one changes.
+        let mut last = HashMap::new();
+        let mut pane_tabs = HashMap::new();
+        let tabs = HerdrTabRegistry::new();
+        build_resync_events(
+            &[
+                resync_pane("w1:p1", HerdrAgentStatus::Idle),
+                resync_pane("w1:p2", HerdrAgentStatus::Idle),
+            ],
+            &reg,
+            &tabs,
+            &mut last,
+            &mut pane_tabs,
+        );
+        let events = build_resync_events(
+            &[resync_pane("w1:p1", HerdrAgentStatus::Working)],
+            &reg,
+            &tabs,
+            &mut last,
+            &mut pane_tabs,
+        )
+        .into_bus_events();
+        assert_eq!(events.len(), 2, "{events:?}");
+        for ev in &events {
+            match ev {
+                MuxEvent::PaneClosed(c) => assert_eq!(c.scope, want, "a resync closure"),
+                MuxEvent::AgentStatusChanged(c) => assert_eq!(c.scope, want, "a resync change"),
+                other => panic!("unexpected {other:?}"),
+            }
+        }
+
+        // A pushed closure.
+        let (kernel, mut bus) = offline_kernel();
+        let id = kernel.panes.assign_or_get("w1:p1", "t-w1:p1");
+        forget_pane(&kernel, &mut HashSet::new(), None, Some(id));
+        match bus.try_recv().expect("published") {
+            MuxEvent::PaneClosed(c) => assert_eq!(c.scope, want, "a pushed closure"),
+            other => panic!("expected a closure, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn fresh_start_emits_every_pane_once_whatever_its_status() {
         let reg = HerdrPaneRegistry::new();
         let mut last = HashMap::new();
@@ -2841,9 +2919,10 @@ pub(crate) mod tests {
         let bus = events.into_bus_events();
         let mut want: Vec<MuxEvent> = expected_closed
             .iter()
-            .map(|&pane| MuxEvent::PaneClosed(PaneClosed { pane }))
+            .map(|&pane| pane_closed(pane))
             .collect();
         want.push(MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope: herdr_scope(),
             pane: p1,
             workspace_id: "w1".into(),
             workspace_name: Some("main".into()),
@@ -3747,6 +3826,10 @@ pub(crate) mod tests {
         .await
         .expect("a pushed pane closure must reach the bus");
         assert_eq!(closed.pane, 1, "the registry's neutral id for w1:p1");
+        assert_eq!(
+            closed.scope,
+            EventScope::new(BackendKind::Herdr, HERDR_SESSION)
+        );
         kernel.stop().await;
     }
 
@@ -3819,6 +3902,7 @@ pub(crate) mod tests {
 
     fn status_ev(pane: u32, tab: Option<u64>) -> AgentStatusChanged {
         AgentStatusChanged {
+            scope: herdr_scope(),
             pane,
             workspace_id: "w1".into(),
             workspace_name: None,
@@ -3855,7 +3939,10 @@ pub(crate) mod tests {
 
         assert_eq!(
             events.try_recv().expect("published"),
-            MuxEvent::PaneClosed(PaneClosed { pane: id })
+            MuxEvent::PaneClosed(PaneClosed {
+                scope: EventScope::new(BackendKind::Herdr, "herdr"),
+                pane: id,
+            })
         );
         assert!(
             !lock(&kernel.pane_tabs).contains_key(&id),
@@ -3925,7 +4012,7 @@ pub(crate) mod tests {
         let after = kernel.until_resynced().await;
 
         assert_eq!(after.len(), 2, "one closure and one change: {after:?}");
-        assert_eq!(after[0], MuxEvent::PaneClosed(PaneClosed { pane: p3 }));
+        assert_eq!(after[0], pane_closed(p3));
         match &after[1] {
             MuxEvent::AgentStatusChanged(ev) => {
                 assert_eq!(ev.pane, p2);
