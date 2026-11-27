@@ -41,9 +41,12 @@
 //! A pane can sit in two sessions at once (a linked window) or move between
 //! them (`join-pane`, `move-window`), so two watchers may track it. A watcher
 //! only writes or drops a row under its own session name: the first to write
-//! owns the pane, the other stays silent until that row is gone. A dropped
-//! row is announced with [`PaneClosed`] only by the watcher that published
-//! it; a pane that never had an agent row closes silently.
+//! owns the pane, the other stays silent until that row is gone and then,
+//! within one [`TICK`], stores it again from the pane's current status. A
+//! closed pane is announced with [`PaneClosed`] by the watcher that published
+//! it, unless another session holds its row by then, and also when the
+//! backend already removed the row (it does so on pane close and session
+//! kill); a pane that never had an agent row closes silently.
 //!
 //! # Bounds
 //!
@@ -504,11 +507,12 @@ impl<S: Source> Watcher<S> {
                 Ok(None) => {}
             }
             let now = Instant::now();
+            // An owed listing first, so the tick sees panes that just closed.
+            self.maybe_relist(now);
             if now >= next_tick {
                 self.tick(now);
                 next_tick = now + TICK;
             }
-            self.maybe_relist(now);
         }
     }
 
@@ -637,11 +641,37 @@ impl<S: Source> Watcher<S> {
         self.evaluate(pane, now);
     }
 
-    /// Re-run the heuristic for every pane without a report.
+    /// Re-store every pane whose row is gone, then re-run the heuristic for
+    /// every pane without a report.
     fn tick(&mut self, now: Instant) {
         let panes: Vec<u32> = self.panes.keys().copied().collect();
         for pane in panes {
+            // With a listing owed, a missing row may belong to a pane that
+            // just closed; the next tick takes over once it is listed.
+            if !self.dirty {
+                self.adopt(pane);
+            }
             self.evaluate(pane, now);
+        }
+    }
+
+    /// When no session holds the row of `pane` (its owner dropped it, the
+    /// backend removed it, or this watcher lost a race for it), forget that
+    /// this watcher stored or published it and store it again from the pane's
+    /// current status: reported here, inferred by the following
+    /// [`Self::evaluate`].
+    fn adopt(&mut self, pane: u32) {
+        let Some(track) = self.panes.get_mut(&pane) else {
+            return;
+        };
+        if self.state.mark(pane).is_some() {
+            return;
+        }
+        track.has_row = false;
+        track.published = None;
+        if track.status.has_report() {
+            let row = reported_row(track, &self.session);
+            store(&self.state, &self.bus, &self.session, pane, track, row);
         }
     }
 
@@ -666,8 +696,9 @@ impl<S: Source> Watcher<S> {
         track.inferred = next;
         let Some(status) = next else {
             // Not (or no longer) an agent: its row goes, like a closed pane.
-            if std::mem::replace(&mut track.has_row, false) {
-                let published = track.published.take().is_some();
+            let stored = std::mem::replace(&mut track.has_row, false);
+            let published = track.published.take().is_some();
+            if stored || published {
                 drop_row(&self.state, &self.bus, &self.session, pane, published);
             }
             return;
@@ -767,12 +798,11 @@ impl<S: Source> Watcher<S> {
         Ok(())
     }
 
-    /// Forget a pane that left this session. Its row is dropped, and
-    /// [`PaneClosed`] published, only when this watcher published it; a row
-    /// another session's watcher holds (a moved or linked pane) is left alone.
+    /// Forget a pane that left this session (see [`drop_row`]): a row another
+    /// session's watcher holds (a moved or linked pane) is left alone.
     fn close_pane(&mut self, pane: u32) {
         if let Some(track) = self.panes.remove(&pane)
-            && track.has_row
+            && (track.has_row || track.published.is_some())
         {
             drop_row(
                 &self.state,
@@ -859,13 +889,20 @@ fn holder(state: &AgentState, session: &str, pane: u32) -> Holder {
     }
 }
 
-/// Drop the row of `pane` when it is still under `session`, publishing
-/// [`PaneClosed`] when this watcher had published it.
+/// Let go of `pane`: nothing happens while another session holds its row.
+/// Otherwise the row is removed when it is under `session`, and
+/// [`PaneClosed`] is published when this watcher had published the pane, even
+/// when the row is already gone: the backend removes rows itself when it
+/// closes a pane or kills a session, and consumers holding the agent still
+/// need to hear that it went.
 fn drop_row(state: &AgentState, bus: &EventBus, session: &str, pane: u32, published: bool) {
-    if holder(state, session, pane) != Holder::This {
-        return;
+    match holder(state, session, pane) {
+        Holder::Other => return,
+        Holder::This => {
+            state.remove_pane(pane);
+        }
+        Holder::Nobody => {}
     }
-    state.remove_pane(pane);
     if published {
         publish(bus, MuxEvent::PaneClosed(PaneClosed { pane }));
     }
@@ -877,7 +914,8 @@ fn drop_row(state: &AgentState, bus: &EventBus, session: &str, pane: u32, publis
 /// A pane is owned by the first watcher that writes its row: a pane another
 /// session's watcher already holds (a linked window, a pane moved in before
 /// that watcher forgot it) is left to it, so one pane never has two writers or
-/// duplicate events. Once that row is gone the next change here takes over.
+/// duplicate events. Once that row is gone the next change or tick here takes
+/// over ([`Watcher::adopt`]).
 fn store(
     state: &AgentState,
     bus: &EventBus,
@@ -1826,6 +1864,105 @@ mod tests {
         let ev = status_events(&events)[0];
         assert_eq!(ev.workspace_name.as_deref(), Some("b"));
         assert_eq!(state.rows_for_session("b").len(), 1);
+    }
+
+    #[test]
+    fn a_reporting_pane_is_taken_over_within_one_tick() {
+        let state = Arc::new(AgentState::new());
+        let (bus, mut rx) = broadcast::channel(16);
+        let (sa, mut a) = watcher_on("a", 1, &[(3, "bash")], &state, &bus);
+        let (_sb, mut b) = watcher_on("b", 2, &[(3, "bash")], &state, &bus);
+        let bytes = b"\x1b]7501;state=blocked:kind=question:app=claude\x1b\\";
+        a.on_output(3, bytes, Instant::now());
+        b.on_output(3, bytes, Instant::now());
+        assert_eq!(status_events(&drain(&mut rx)).len(), 1, "a owns it");
+
+        sa.world().panes.clear();
+        a.relist(Instant::now()).unwrap();
+        drain(&mut rx);
+
+        // No new report arrives: the tick alone re-stores b's reported status.
+        b.tick(Instant::now());
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        let ev = status_events(&events)[0];
+        assert_eq!(ev.status, AgentStatus::Blocked);
+        assert_eq!(ev.workspace_name.as_deref(), Some("b"));
+        let rows = state.rows_for_session("b");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].1.summary.as_deref(), Some("question"));
+    }
+
+    #[test]
+    fn a_race_loser_takes_over_once_the_winner_lets_go() {
+        let state = Arc::new(AgentState::new());
+        let (bus, mut rx) = broadcast::channel(16);
+        let (sa, mut a) = watcher_on("a", 1, &[(3, "claude")], &state, &bus);
+        let (_sb, mut b) = watcher_on("b", 2, &[(3, "claude")], &state, &bus);
+        // b lost a race: it believes it stored and published the row a holds.
+        let track = b.panes.get_mut(&3).unwrap();
+        track.has_row = true;
+        track.published = Some((AgentStatus::Idle, "claude".into()));
+        drain(&mut rx);
+        b.tick(Instant::now());
+        assert!(drain(&mut rx).is_empty(), "a still holds it");
+        assert!(state.rows_for_session("b").is_empty());
+
+        sa.world().panes.clear();
+        a.relist(Instant::now()).unwrap();
+        assert_eq!(
+            drain(&mut rx),
+            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]
+        );
+        b.tick(Instant::now());
+        let events = drain(&mut rx);
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(
+            status_events(&events)[0].workspace_name.as_deref(),
+            Some("b")
+        );
+        assert_eq!(state.rows_for_session("b").len(), 1);
+    }
+
+    // ── Rows the backend removed ────────────────────────────────────────────
+
+    #[test]
+    fn a_pane_the_backend_closed_is_announced_once() {
+        let mut r = rig(&[(3, "bash")]);
+        r.feed(report(3, "state=blocked:app=claude"));
+        r.events();
+        // `TmuxBackend::close_pane` drops the row, then tmux reports the
+        // layout change.
+        r.state.remove_pane(3);
+        r.feed(Notification::LayoutChange { window: 1 });
+        let now = Instant::now();
+        r.watcher.tick(now);
+        assert!(r.events().is_empty(), "no takeover while a listing is owed");
+        assert!(r.state.rows_for_session("s").is_empty());
+
+        r.source.world().panes.clear();
+        r.watcher.maybe_relist(now + RELIST_GAP);
+        assert_eq!(r.events(), [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]);
+        r.watcher.tick(now + RELIST_GAP);
+        assert!(r.events().is_empty());
+    }
+
+    #[test]
+    fn a_session_the_backend_killed_announces_each_agent_once() {
+        let mut r = rig(&[(3, "bash"), (5, "claude"), (7, "bash")]);
+        r.feed(report(3, "state=blocked:app=claude"));
+        r.events();
+        // `TmuxBackend::kill_session` drops the session's rows first.
+        r.state.remove_session("s");
+        r.watcher.session_gone();
+        assert_eq!(
+            r.events(),
+            [
+                MuxEvent::PaneClosed(PaneClosed { pane: 3 }),
+                MuxEvent::PaneClosed(PaneClosed { pane: 5 }),
+            ],
+            "the agents, once each; not the plain shell"
+        );
     }
 
     #[test]
