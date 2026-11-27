@@ -96,8 +96,9 @@ or newer 0.45.x, or 0.46.x; the server refuses other versions). For the
 user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at
 runtime rather than pinning one, so it works across herdr releases. For the
 **tmux** backend, requires tmux 3.5a or newer on `PATH` (floating panes need 3.7;
-moving a pane between tiled and floating and prompt-based status need 3.8; Debian 13
-ships 3.5a, while Ubuntu 24.04 ships 3.4 and is too old). No running tmux server is
+moving a pane between tiled and floating and the running-command signal from shell
+prompt marks (OSC 133) need 3.8; Debian 13 ships 3.5a, while Ubuntu 24.04 ships
+3.4 and is too old). No running tmux server is
 required. muxrd auto-detects which backends are available and serves all of them;
 pass `--backend` / `MUXRD_BACKEND` (for example `--backend tmux`) to restrict to one.
 
@@ -169,8 +170,9 @@ cargo fmt                # format before committing
 ## Docker dev rig
 
 `docker/` builds a self-contained container running the server against a
-pre-populated Zellij session — or, via the opt-in `herdr` and `tmux` profiles, against a herdr
-workspace or a tmux session (the `all` profile runs every backend) — useful for on-device testing from a phone on the same network. It
+pre-populated Zellij session — or, via the opt-in `herdr` and `tmux` profiles,
+against a herdr workspace or a tmux session (the `all` profile runs every
+backend) — useful for on-device testing from a phone on the same network. It
 also starts an in-container `muxr-notify` instance (`FCM_MODE=log`, loopback
 only) so push-notification flows are exercisable end-to-end without any
 Firebase setup. See [`docker/README.md`](docker/README.md) and
@@ -217,8 +219,8 @@ no agents. On tmux, agents that print OSC 7501 status reports unprompted (Codex,
 OpenCode 2, Amp) are reported exactly. Agents that wait for the terminal to answer
 a probe first (Claude Code today) are inferred from the running command, recent
 output and the pane title, and are labelled "(inferred)"; tmux releases after 3.8
-answer the probe. Servers that can report agents advertise the `"agents"` capability on
-`GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
+answer the probe. Servers that can report agents advertise the `"agents"`
+capability on `GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
 `SessionInfo.agents` on `ListSessions`.
 
 ## Releasing
