@@ -1,7 +1,7 @@
 //! Command runner: short-lived tmux invocations and their typed rows.
 //!
 //! Every unary operation and every layout query runs one
-//! `tmux -S <socket> <command> ...` process and parses its stdout. Layout
+//! `tmux -L <name>|-S <path> <command> ...` process and parses its stdout. Layout
 //! strings are never parsed.
 //!
 //! # Record format
@@ -414,7 +414,7 @@ impl Tmux {
         &self.version
     }
 
-    /// Run `tmux -S <socket> <args>` with a 5 s timeout (the child is killed on
+    /// Run `tmux -L <name>|-S <path> <args>` with a 5 s timeout (the child is killed on
     /// expiry). stdout and stderr are captured; decode them lossily.
     pub fn run(&self, args: &[&str]) -> Result<Output> {
         let mut child = Command::new(&self.bin)
@@ -760,8 +760,9 @@ mod tests {
             use std::os::unix::fs::PermissionsExt;
             std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
             let tmux = Tmux::with_bin(
-                TmuxSocket {
-                    path: PathBuf::from("/fake/sock"),
+                TmuxSocket::Named {
+                    name: "muxrd-fake".into(),
+                    display_path: PathBuf::from("/fake/tmux-1/muxrd-fake"),
                 },
                 TmuxVersion::parse(&format!("tmux {version}")).unwrap(),
                 script.into_os_string(),
@@ -777,14 +778,14 @@ mod tests {
             std::fs::write(self.dir.join(name), content).unwrap();
         }
 
-        /// Recorded invocations, each without the leading `-S <socket>`.
+        /// Recorded invocations, each without the leading `-L <name>`.
         fn calls(&self) -> Vec<Vec<String>> {
             let log = std::fs::read_to_string(self.dir.join("log")).unwrap_or_default();
             let mut calls = Vec::new();
             let mut cur: Vec<String> = Vec::new();
             for line in log.lines() {
                 if line == "==" {
-                    assert_eq!(&cur[..2], ["-S", "/fake/sock"]);
+                    assert_eq!(&cur[..2], ["-L", "muxrd-fake"]);
                     calls.push(cur[2..].to_vec());
                     cur = Vec::new();
                 } else {
@@ -1135,12 +1136,24 @@ mod tests {
     #[test]
     fn missing_binary_is_an_error() {
         let t = Tmux::with_bin(
-            TmuxSocket {
-                path: PathBuf::from("/fake/sock"),
-            },
+            TmuxSocket::Path(PathBuf::from("/fake/sock")),
             TmuxVersion::parse("tmux 3.8").unwrap(),
             "/nonexistent/tmux-bin".into(),
         );
         assert!(t.run(&["list-sessions"]).is_err());
+    }
+
+    #[test]
+    fn an_explicit_socket_path_is_passed_with_dash_s() {
+        let f = Fake::new("3.8");
+        let t = Tmux::with_bin(
+            TmuxSocket::Path(PathBuf::from("/fake/sock")),
+            TmuxVersion::parse("tmux 3.8").unwrap(),
+            f.dir.join("tmux").into_os_string(),
+        );
+        t.run(&["list-sessions"]).unwrap();
+        let log = std::fs::read_to_string(f.dir.join("log")).unwrap();
+        let argv: Vec<&str> = log.lines().take_while(|l| *l != "==").collect();
+        assert_eq!(argv, ["-S", "/fake/sock", "list-sessions"]);
     }
 }

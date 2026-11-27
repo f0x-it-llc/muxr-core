@@ -18,21 +18,23 @@
 //! # docker/README.md, "Running the tmux suite in the rig".
 //! ```
 //!
-//! Each test starts its own private tmux server: it sets `MUXRD_TMUX_SOCKET` to
-//! a unique bare name (a socket under `$TMUX_TMPDIR`, else `/tmp`, in
-//! `tmux-<uid>/`, a directory the test creates owner-only when it is missing),
-//! starts the server with `-f /dev/null` (no user
-//! configuration) and `/bin/sh` as the default shell, and kills it and removes
-//! its socket in a `Drop` guard, so the suite never touches the user's own
-//! server. Because the socket is chosen through the process environment, the
-//! tests run serially: pass `--test-threads=1` as above (a process-wide lock
-//! also serialises them if it is forgotten).
+//! Each test starts its own private tmux server: it points `TMUX_TMPDIR` at a
+//! fresh owner-only directory (made under the caller's `TMUX_TMPDIR`, else the
+//! system temp directory) and sets `MUXRD_TMUX_SOCKET` to a bare name, so the
+//! backend reaches the server with `-L <name>` and tmux itself creates and
+//! checks `tmux-<uid>/` there. It starts the server with `-f /dev/null` (no
+//! user configuration) and `/bin/sh` as the default shell, and kills it and
+//! removes its socket and directories in a `Drop` guard, so the suite never
+//! touches the user's own server. Because the socket is chosen through the
+//! process environment, the tests run serially: pass `--test-threads=1` as
+//! above (a process-wide lock also serialises them if it is forgotten).
 //!
 //! ## What each test exercises
 //!
 //! | test | exercises |
 //! |------|-----------|
 //! | `probe_passes_and_version_matches_tmux_v` | `detect::probe_tmux()` and `backend_version()` against `tmux -V` |
+//! | `explicit_socket_path_needs_an_owner_only_directory` | an absolute `MUXRD_TMUX_SOCKET` in a 0777 dir is refused by `from_env` and the probe; a 0700 dir is taken (`-S`) |
 //! | `session_create_list_rename_kill` | `create_session` / `list_sessions` / `rename_session` / `kill_session` |
 //! | `fresh_session_is_one_tab_one_pane` | `query_layout` and `query_session_size` of a new 80x24 session |
 //! | `new_floating_pane_follows_the_version` | `new_pane(floating)`: a floating pane on 3.7+, an honest failed ack below |
@@ -53,7 +55,7 @@
 //! runs as a separate, unmodified binary.
 
 use std::ffi::OsString;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -114,13 +116,30 @@ fn tmux_v() -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Where each server's fresh `TMUX_TMPDIR` is made: the caller's own
+/// `TMUX_TMPDIR` as the suite found it, else the system temp directory.
+fn tmpdir_base() -> &'static PathBuf {
+    static BASE: OnceLock<PathBuf> = OnceLock::new();
+    BASE.get_or_init(|| {
+        std::env::var_os("TMUX_TMPDIR")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(std::env::temp_dir)
+    })
+}
+
 /// A private tmux server on a unique socket and a backend pointed at it.
 ///
 /// Dropping it kills the server (by signal when `kill-server` leaves it
-/// running) and removes the socket file.
+/// running) and removes the socket file and its fresh `TMUX_TMPDIR`.
 struct Server {
     backend: TmuxBackend,
+    /// The leading `-L <name>` of every tmux command.
+    socket_args: [OsString; 2],
+    /// Where tmux puts the socket.
     socket: PathBuf,
+    /// This server's own `TMUX_TMPDIR`.
+    tmpdir: PathBuf,
     /// The server's process id, once it is known.
     pid: Option<libc::pid_t>,
     _serial: MutexGuard<'static, ()>,
@@ -132,32 +151,42 @@ impl Server {
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_nanos();
-        let name = format!("muxrd-it-{}-{nanos}-{}", std::process::id(), seq());
+            .subsec_nanos();
+        let n = seq();
+        // A directory of its own, so tmux makes `tmux-<uid>/` itself and runs
+        // its ownership check on it. Short names keep the socket path inside
+        // the 104-byte `sun_path` limit.
+        let tmpdir = tmpdir_base().join(format!("mxit-{}-{n}-{nanos:x}", std::process::id()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&tmpdir)
+            .unwrap_or_else(|e| panic!("create TMUX_TMPDIR {}: {e}", tmpdir.display()));
+        let name = format!("muxrd-it-{n}");
         // SAFETY: the tests run serially (`--test-threads=1` and `SERIAL`), so
         // no other thread reads the environment while it changes.
-        unsafe { std::env::set_var(TMUX_SOCKET_ENV, &name) };
+        unsafe {
+            std::env::set_var("TMUX_TMPDIR", &tmpdir);
+            std::env::set_var(TMUX_SOCKET_ENV, &name);
+        }
         let backend = TmuxBackend::from_env().expect("TmuxBackend::from_env (set MUXRD_TMUX_BIN)");
-        let socket = backend.socket().path.clone();
+        // A bare name is a `-L` socket: tmux resolves it under `TMUX_TMPDIR`.
+        let socket_args = backend.socket().base_args();
+        assert_eq!(
+            socket_args,
+            [OsString::from("-L"), OsString::from(&name)],
+            "the backend does not use the private socket by name"
+        );
+        let socket = backend.socket().display_path().to_path_buf();
         assert!(
-            socket.ends_with(&name),
-            "the backend does not use the private socket: {}",
+            socket.starts_with(&tmpdir) && socket.ends_with(&name),
+            "the backend's socket is outside the private TMUX_TMPDIR: {}",
             socket.display()
         );
-        // The bare name resolves to `$TMUX_TMPDIR` (or `/tmp`) joined with
-        // `tmux-<uid>/<name>`, and tmux reaches it with `-S`, which never
-        // creates the directory: on a fresh host it does not exist yet. tmux
-        // wants it owner-only, as it makes its own.
-        if let Some(dir) = socket.parent() {
-            std::fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(dir)
-                .unwrap_or_else(|e| panic!("create socket directory {}: {e}", dir.display()));
-        }
         let mut server = Self {
             backend,
+            socket_args,
             socket,
+            tmpdir,
             pid: None,
             _serial: serial,
         };
@@ -182,6 +211,13 @@ impl Server {
             .tmux(&["display-message", "-p", "#{pid}"])
             .parse()
             .ok();
+        let reported = server.tmux(&["display-message", "-p", "#{socket_path}"]);
+        assert_eq!(
+            std::fs::canonicalize(&reported).ok(),
+            std::fs::canonicalize(&server.socket).ok(),
+            "tmux put the socket at {reported}, not {}",
+            server.socket.display()
+        );
         server
     }
 
@@ -192,8 +228,8 @@ impl Server {
     /// Run tmux against this server.
     fn run(&self, args: &[&str]) -> Output {
         Command::new(tmux_bin())
-            .arg("-S")
-            .arg(&self.socket)
+            .args(&self.socket_args)
+            .env("TMUX_TMPDIR", &self.tmpdir)
             .args(args)
             .env_remove("TMUX")
             .env_remove("TMUX_PANE")
@@ -326,8 +362,8 @@ impl Server {
 impl Drop for Server {
     fn drop(&mut self) {
         let _ = Command::new(tmux_bin())
-            .arg("-S")
-            .arg(&self.socket)
+            .args(&self.socket_args)
+            .env("TMUX_TMPDIR", &self.tmpdir)
             .arg("kill-server")
             .env_remove("TMUX")
             .stdin(Stdio::null())
@@ -344,8 +380,13 @@ impl Drop for Server {
                 unsafe { libc::kill(pid, libc::SIGKILL) };
             }
         }
-        // tmux leaves the socket file behind; it is this test's own.
+        // tmux leaves the socket file behind; it and the directories are this
+        // test's own. `remove_dir` keeps anything unexpected in place.
         let _ = std::fs::remove_file(&self.socket);
+        if let Some(dir) = self.socket.parent() {
+            let _ = std::fs::remove_dir(dir);
+        }
+        let _ = std::fs::remove_dir(&self.tmpdir);
     }
 }
 
@@ -606,6 +647,50 @@ fn probe_passes_and_version_matches_tmux_v() {
     // `tmux next-3.9` is reported as `tmux 3.9`.
     assert_eq!(version, raw.replacen("tmux next-", "tmux ", 1));
     assert_eq!(*server.version(), TmuxVersion::parse(&raw).unwrap());
+}
+
+#[test]
+#[ignore = "needs tmux 3.5a or newer"]
+fn explicit_socket_path_needs_an_owner_only_directory() {
+    let _serial = SERIAL.lock().unwrap_or_else(PoisonError::into_inner);
+    let root = tmpdir_base().join(format!("mxit-{}-path-{}", std::process::id(), seq()));
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap_or_else(|e| panic!("create {}: {e}", root.display()));
+    let open = root.join("open");
+    let private = root.join("private");
+    std::fs::create_dir(&open).unwrap();
+    std::fs::set_permissions(&open, std::fs::Permissions::from_mode(0o777)).unwrap();
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&private)
+        .unwrap();
+    let with_socket = |path: &std::path::Path| {
+        // SAFETY: serialised by `SERIAL`, as in `Server::start`.
+        unsafe { std::env::set_var(TMUX_SOCKET_ENV, path) };
+        (TmuxBackend::from_env(), probe_tmux())
+    };
+
+    let (refused, probed) = with_socket(&open.join("s"));
+    let text = format!(
+        "{:#}",
+        refused.expect_err("a 0777 socket directory is refused")
+    );
+    assert!(text.contains("unsafe permissions 0777"), "{text}");
+    assert!(
+        !probed,
+        "probe_tmux() must fail for a 0777 socket directory"
+    );
+
+    let (accepted, probed) = with_socket(&private.join("s"));
+    let backend = accepted.expect("a 0700 socket directory is accepted");
+    assert_eq!(backend.socket().base_args()[0], OsString::from("-S"));
+    assert!(probed, "probe_tmux() must pass for a 0700 socket directory");
+
+    // SAFETY: as above.
+    unsafe { std::env::remove_var(TMUX_SOCKET_ENV) };
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 // ─── session lifecycle ──────────────────────────────────────────────────────────

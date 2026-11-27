@@ -63,9 +63,12 @@ pub struct TmuxBackend {
 
 impl TmuxBackend {
     /// Resolve the socket and tmux version from the environment, refusing a
-    /// tmux older than the supported floor.
+    /// socket that fails [`TmuxSocket::check_socket_path`] and a tmux older
+    /// than the supported floor.
     pub fn from_env() -> Result<Self> {
-        let socket = TmuxSocket::resolve();
+        let socket = TmuxSocket::resolve()
+            .and_then(|s| s.check_socket_path().map(|()| s))
+            .map_err(|e| anyhow!("tmux backend unavailable: {e:#}"))?;
         let bin = tmux_bin();
         let version = tmux_version().map_err(|e| {
             anyhow!(
@@ -698,22 +701,37 @@ mod tests {
 
     use super::*;
     use crate::multiplexer::tmux::agent_state::AgentRow;
-    use crate::multiplexer::tmux::paths::TMUX_BIN_ENV;
+    use crate::multiplexer::tmux::paths::{TMUX_BIN_ENV, TMUX_SOCKET_ENV};
     use crate::multiplexer::types::{AgentMark, AgentStatus};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    /// Run `f` with `MUXRD_TMUX_BIN` set to `value`, restoring it afterwards.
+    /// Run `f` with `MUXRD_TMUX_BIN` set to `value` and `MUXRD_TMUX_SOCKET`
+    /// unset, restoring both afterwards.
     fn with_bin<T>(value: &std::ffi::OsStr, f: impl FnOnce() -> T) -> T {
+        with_env(value, None, f)
+    }
+
+    /// Run `f` with `MUXRD_TMUX_BIN` set to `bin` and `MUXRD_TMUX_SOCKET` set
+    /// to `socket` (unset when `None`), restoring both afterwards.
+    fn with_env<T>(
+        bin: &std::ffi::OsStr,
+        socket: Option<&std::ffi::OsStr>,
+        f: impl FnOnce() -> T,
+    ) -> T {
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let saved = std::env::var_os(TMUX_BIN_ENV);
-        // SAFETY: every test touching this variable holds ENV_LOCK.
-        unsafe { std::env::set_var(TMUX_BIN_ENV, value) };
+        let saved_bin = std::env::var_os(TMUX_BIN_ENV);
+        let saved_socket = std::env::var_os(TMUX_SOCKET_ENV);
+        let put = |key: &str, value: Option<&std::ffi::OsStr>| match value {
+            // SAFETY: every test touching these variables holds ENV_LOCK.
+            Some(v) => unsafe { std::env::set_var(key, v) },
+            None => unsafe { std::env::remove_var(key) },
+        };
+        put(TMUX_BIN_ENV, Some(bin));
+        put(TMUX_SOCKET_ENV, socket);
         let out = f();
-        match saved {
-            Some(v) => unsafe { std::env::set_var(TMUX_BIN_ENV, v) },
-            None => unsafe { std::env::remove_var(TMUX_BIN_ENV) },
-        }
+        put(TMUX_BIN_ENV, saved_bin.as_deref());
+        put(TMUX_SOCKET_ENV, saved_socket.as_deref());
         out
     }
 
@@ -755,6 +773,59 @@ mod tests {
         let _ = std::fs::remove_dir_all(fake.parent().unwrap());
         assert_eq!(backend.backend_version(), "tmux 3.5a");
         assert_eq!(backend.version().to_string(), "3.5a");
+        assert_eq!(
+            backend.socket().base_args(),
+            [std::ffi::OsString::from("-L"), "default".into()]
+        );
+    }
+
+    #[test]
+    fn from_env_refuses_a_socket_in_a_world_writable_dir() {
+        let fake = fake_tmux("unsafe", "tmux 3.5a");
+        let dir = fake.parent().unwrap().join("open");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let socket = dir.join("s");
+        let err = with_env(fake.as_os_str(), Some(socket.as_os_str()), || {
+            TmuxBackend::from_env()
+        })
+        .expect_err("a socket in a 0777 directory must be refused");
+        let _ = std::fs::remove_dir_all(fake.parent().unwrap());
+        let text = format!("{err:#}");
+        assert!(text.contains("tmux backend unavailable"), "{text}");
+        assert!(text.contains("unsafe permissions 0777"), "{text}");
+        assert!(text.contains(&socket.display().to_string()), "{text}");
+    }
+
+    #[test]
+    fn from_env_refuses_a_bad_socket_name() {
+        let fake = fake_tmux("badname", "tmux 3.5a");
+        let err = with_env(
+            fake.as_os_str(),
+            Some("a/b".as_ref()),
+            TmuxBackend::from_env,
+        )
+        .expect_err("a name with '/' must be refused");
+        let _ = std::fs::remove_dir_all(fake.parent().unwrap());
+        assert!(
+            format!("{err:#}").contains("must not contain '/'"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn from_env_takes_a_socket_in_an_owner_only_dir() {
+        let fake = fake_tmux("private", "tmux 3.5a");
+        let dir = fake.parent().unwrap().join("private");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let socket = dir.join("s");
+        let backend = with_env(fake.as_os_str(), Some(socket.as_os_str()), || {
+            TmuxBackend::from_env()
+        })
+        .expect("a socket in a 0700 directory is accepted");
+        let _ = std::fs::remove_dir_all(fake.parent().unwrap());
+        assert_eq!(backend.socket(), &TmuxSocket::Path(socket));
     }
 
     // ── Hermetic fake tmux ──────────────────────────────────────────────────
@@ -815,7 +886,7 @@ mod tests {
             let socket = dir.join("sock");
             warm_up(&script, &socket);
             let tmux = Tmux::with_bin(
-                TmuxSocket { path: socket },
+                TmuxSocket::Path(socket),
                 TmuxVersion::parse(&format!("tmux {version}")).unwrap(),
                 script.into_os_string(),
             );
@@ -1490,7 +1561,7 @@ mod tests {
     #[test]
     fn accessors_expose_the_runner_identity() {
         let f = Fake::new("3.8");
-        assert_eq!(f.backend.socket().path, f.dir.join("sock"));
+        assert_eq!(f.backend.socket().display_path(), f.dir.join("sock"));
         assert_eq!(f.backend.version().to_string(), "3.8");
         assert_eq!(f.backend.backend_version(), "tmux 3.8");
         assert!(f.backend.validate_session_name("good_name").is_ok());
@@ -1559,9 +1630,7 @@ mod tests {
         fn backend(&self) -> TmuxBackend {
             let version = TmuxVersion::parse(&self.tmux(&["-V"])).unwrap();
             TmuxBackend::with_runner(Tmux::with_bin(
-                TmuxSocket {
-                    path: self.socket.clone(),
-                },
+                TmuxSocket::named(&self.name).unwrap(),
                 version,
                 self.bin.clone().into_os_string(),
             ))

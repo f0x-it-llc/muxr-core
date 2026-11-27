@@ -1,7 +1,7 @@
 //! Pty attach: `tmux attach-session` in a daemon-owned pty, receiver and sender.
 //!
 //! [`open`] allocates a pty, sizes it, and runs an ordinary tmux client
-//! (`tmux -S <socket> attach-session [-r] -t =<session>`) on the slave side as
+//! (`tmux -L <name>|-S <path> attach-session [-r] -t =<session>`) on the slave side as
 //! the leader of its own session with the pty as its controlling terminal. The
 //! master side is split into the two relay halves:
 //!
@@ -41,6 +41,7 @@
 //! SIGCHLD), kills it after one second if needed, and reaps it exactly once.
 
 use std::borrow::Cow;
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, OwnedFd};
@@ -456,8 +457,8 @@ fn resolve_tmux_bin() -> Result<PathBuf> {
 }
 
 /// The client's argument vector after the binary.
-fn attach_args(socket: &TmuxSocket, session: &str, read_only: bool) -> Vec<std::ffi::OsString> {
-    let mut args: Vec<std::ffi::OsString> = socket.base_args().into();
+fn attach_args(socket: &TmuxSocket, session: &str, read_only: bool) -> Vec<OsString> {
+    let mut args: Vec<OsString> = socket.base_args().into();
     args.push("attach-session".into());
     if read_only {
         args.push("-r".into());
@@ -467,9 +468,10 @@ fn attach_args(socket: &TmuxSocket, session: &str, read_only: bool) -> Vec<std::
     args
 }
 
-/// The client's whole environment: terminal type, colour depth and a locale
+/// The client's environment: terminal type, colour depth and a locale
 /// (muxrd's `LANG`/`LC_ALL`, `C.UTF-8` when unset). An unset `LC_ALL` takes
 /// the chosen `LANG`, so a fallback never overrides the operator's locale.
+/// [`socket_env`] adds the one variable that locates the server.
 fn child_env(lang: Option<String>, lc_all: Option<String>) -> Vec<(&'static str, String)> {
     let lang = lang
         .filter(|v| !v.is_empty())
@@ -483,6 +485,15 @@ fn child_env(lang: Option<String>, lc_all: Option<String>) -> Vec<(&'static str,
         ("LANG", lang),
         ("LC_ALL", lc_all),
     ]
+}
+
+/// muxrd's non-empty `TMUX_TMPDIR`, kept in the client's cleared environment:
+/// a `-L` socket is resolved under it, so without it the client would look
+/// for a different server than every other tmux command muxrd runs.
+fn socket_env(tmux_tmpdir: Option<OsString>) -> Option<(&'static str, OsString)> {
+    tmux_tmpdir
+        .filter(|v| !v.is_empty())
+        .map(|v| ("TMUX_TMPDIR", v))
 }
 
 /// Attach a tmux client to `session` in a new pty of `rows`×`cols` and return
@@ -512,6 +523,7 @@ pub fn open(
             std::env::var("LANG").ok(),
             std::env::var("LC_ALL").ok(),
         ))
+        .envs(socket_env(std::env::var_os("TMUX_TMPDIR")))
         .stdin(Stdio::from(
             slave.try_clone().context("tmux attach: dup pty")?,
         ))
@@ -1341,22 +1353,28 @@ mod tests {
 
     #[test]
     fn attach_args_target_the_exact_session() {
-        let socket = TmuxSocket {
-            path: PathBuf::from("/tmp/tmux-1/s"),
+        let named = TmuxSocket::Named {
+            name: "s".into(),
+            display_path: PathBuf::from("/tmp/tmux-1/s"),
         };
-        let args = |ro| {
-            attach_args(&socket, "dev", ro)
+        let path = TmuxSocket::Path(PathBuf::from("/srv/t.sock"));
+        let args = |socket: &TmuxSocket, ro| {
+            attach_args(socket, "dev", ro)
                 .into_iter()
                 .map(|a| a.into_string().unwrap())
                 .collect::<Vec<_>>()
         };
         assert_eq!(
-            args(false),
-            ["-S", "/tmp/tmux-1/s", "attach-session", "-t", "=dev"]
+            args(&named, false),
+            ["-L", "s", "attach-session", "-t", "=dev"]
         );
         assert_eq!(
-            args(true),
-            ["-S", "/tmp/tmux-1/s", "attach-session", "-r", "-t", "=dev"]
+            args(&named, true),
+            ["-L", "s", "attach-session", "-r", "-t", "=dev"]
+        );
+        assert_eq!(
+            args(&path, false),
+            ["-S", "/srv/t.sock", "attach-session", "-t", "=dev"]
         );
     }
 
@@ -1379,6 +1397,16 @@ mod tests {
         assert_eq!(get(&env, "LC_ALL").as_deref(), Some("de_DE.UTF-8"));
     }
 
+    #[test]
+    fn socket_env_keeps_a_set_tmux_tmpdir() {
+        assert_eq!(socket_env(None), None);
+        assert_eq!(socket_env(Some(OsString::new())), None);
+        assert_eq!(
+            socket_env(Some("/run/t".into())),
+            Some(("TMUX_TMPDIR", OsString::from("/run/t")))
+        );
+    }
+
     /// Live tests against a private tmux server (`-L <unique>`, no config),
     /// killed when the test ends. Skipped when tmux is not on `PATH`.
     mod live {
@@ -1389,7 +1417,10 @@ mod tests {
         struct PrivateServer {
             bin: PathBuf,
             name: String,
+            /// The server's `-L` name, as the backend reaches it.
             socket: TmuxSocket,
+            /// The socket file tmux reports, removed on drop.
+            socket_file: PathBuf,
         }
 
         impl PrivateServer {
@@ -1405,10 +1436,9 @@ mod tests {
                 let name = format!("muxr-attach-test-{}-{nanos}", std::process::id());
                 let mut server = Self {
                     bin,
+                    socket: TmuxSocket::named(&name).unwrap(),
                     name,
-                    socket: TmuxSocket {
-                        path: PathBuf::new(),
-                    },
+                    socket_file: PathBuf::new(),
                 };
                 server.tmux(&[
                     "-f",
@@ -1424,7 +1454,7 @@ mod tests {
                     "sh",
                 ]);
                 let path = server.tmux(&["display-message", "-p", "#{socket_path}"]);
-                server.socket.path = PathBuf::from(path);
+                server.socket_file = PathBuf::from(path);
                 Some(server)
             }
 
@@ -1464,8 +1494,8 @@ mod tests {
                     .stderr(Stdio::null())
                     .status();
                 // tmux leaves the socket file behind; it is this test's own.
-                if self.socket.path.file_name().is_some() {
-                    let _ = std::fs::remove_file(&self.socket.path);
+                if self.socket_file.file_name().is_some() {
+                    let _ = std::fs::remove_file(&self.socket_file);
                 }
             }
         }
