@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
 
+use super::tmux::paths::TmuxSocket;
 use crate::cli::BackendKind;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -376,14 +377,15 @@ pub fn probe_herdr() -> bool {
 
 /// Probe whether a usable tmux is installed.
 ///
-/// Passes when `tmux -V` runs and reports 3.5 or newer. A running server is NOT
-/// required: whether `tmux -S <socket> list-sessions` answers is only logged.
-/// A version below the floor logs a warning naming the 3.5a floor and the
-/// version found.
+/// Passes when `tmux -V` runs and reports 3.5 or newer and the socket resolves
+/// and passes [`TmuxSocket::check_socket_path`]. A running server is NOT
+/// required: whether `tmux -L <name>|-S <path> list-sessions` answers is only
+/// logged. A version below the floor logs a warning naming the 3.5a floor and
+/// the version found; a refused socket logs a warning naming the problem.
 ///
 /// **Blocking** — run before the Tokio runtime exists, like the other probes.
 pub fn probe_tmux() -> bool {
-    use super::tmux::paths::{TmuxSocket, tmux_bin, tmux_version};
+    use super::tmux::paths::{tmux_bin, tmux_version};
 
     let version = match tmux_version() {
         Ok(v) => v,
@@ -400,7 +402,13 @@ pub fn probe_tmux() -> bool {
         return false;
     }
 
-    let socket = TmuxSocket::resolve();
+    let socket = match checked_tmux_socket() {
+        Ok(socket) => socket,
+        Err(e) => {
+            log::warn!("probe_tmux: tmux backend disabled: {e:#}");
+            return false;
+        }
+    };
     let answered = std::process::Command::new(tmux_bin())
         .args(socket.base_args())
         .arg("list-sessions")
@@ -411,7 +419,7 @@ pub fn probe_tmux() -> bool {
         .is_ok_and(|s| s.success());
     log::info!(
         "probe_tmux: tmux {version}; server on {} {}",
-        socket.path.display(),
+        socket.display_path().display(),
         if answered {
             "is running"
         } else {
@@ -419,6 +427,23 @@ pub fn probe_tmux() -> bool {
         }
     );
     true
+}
+
+/// The environment's tmux socket, refused when it does not resolve or fails
+/// [`TmuxSocket::check_socket_path`].
+fn checked_tmux_socket() -> Result<TmuxSocket> {
+    let socket = TmuxSocket::resolve()?;
+    socket.check_socket_path()?;
+    Ok(socket)
+}
+
+/// Why a requested tmux backend is unavailable: a refused socket when that is
+/// the cause, otherwise the missing or too-old binary.
+fn tmux_unavailable_reason() -> String {
+    match checked_tmux_socket() {
+        Err(e) => format!("{e:#}"),
+        Ok(_) => "tmux 3.5a or newer was not found on PATH".to_owned(),
+    }
 }
 
 // ── Backend selection ─────────────────────────────────────────────────────────
@@ -458,7 +483,7 @@ pub fn detect_backends(override_kind: Option<BackendKind>) -> Result<Vec<Backend
                 let reason = match kind {
                     BackendKind::Zellij => zellij_unavailable_reason(),
                     BackendKind::Herdr => "probe failed".to_owned(),
-                    BackendKind::Tmux => "tmux 3.5a or newer was not found on PATH".to_owned(),
+                    BackendKind::Tmux => tmux_unavailable_reason(),
                 };
                 bail!("requested backend {kind} not available: {reason}");
             }

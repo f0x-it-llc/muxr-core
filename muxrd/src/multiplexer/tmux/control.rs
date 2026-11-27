@@ -1,6 +1,6 @@
 //! Control-mode client: the `tmux -C` process, framing and notifications.
 //!
-//! [`ControlClient`] runs `tmux -S <socket> -C attach-session -t =<session>` as
+//! [`ControlClient`] runs `tmux -L <name>|-S <path> -C attach-session -t =<session>` as
 //! a child process, writes commands to its stdin and reads its stdout on a
 //! dedicated reader thread. Every method blocks the calling thread for at most
 //! the timeout it is given; the watcher owns one client per session and drives
@@ -1000,7 +1000,7 @@ fn truncate_for_message(line: &str) -> &str {
     &line[..end]
 }
 
-/// The `tmux -S <socket> -C attach-session -t =<session>` invocation.
+/// The `tmux -L <name>|-S <path> -C attach-session -t =<session>` invocation.
 fn attach_command(socket: &TmuxSocket, session: &str) -> Command {
     let mut cmd = Command::new(tmux_bin());
     cmd.args(socket.base_args())
@@ -1064,7 +1064,7 @@ impl ControlClient {
         let context = || {
             format!(
                 "attach tmux control client to session {session:?} on {}",
-                socket.path.display()
+                socket.display_path().display()
             )
         };
         let mut client =
@@ -1761,13 +1761,23 @@ mod tests {
 
     #[test]
     fn attach_command_targets_the_exact_session() {
-        let socket = TmuxSocket {
-            path: "/tmp/t.sock".into(),
+        let args = |socket: &TmuxSocket| {
+            attach_command(socket, "probe")
+                .get_args()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect::<Vec<_>>()
         };
-        let cmd = attach_command(&socket, "probe");
-        let args: Vec<_> = cmd.get_args().map(|a| a.to_string_lossy()).collect();
+        let named = TmuxSocket::Named {
+            name: "default".into(),
+            display_path: "/tmp/tmux-1/default".into(),
+        };
         assert_eq!(
-            args,
+            args(&named),
+            ["-L", "default", "-C", "attach-session", "-t", "=probe"]
+        );
+        let path = TmuxSocket::Path("/tmp/t.sock".into());
+        assert_eq!(
+            args(&path),
             ["-S", "/tmp/t.sock", "-C", "attach-session", "-t", "=probe"]
         );
     }
