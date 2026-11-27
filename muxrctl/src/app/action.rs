@@ -9,6 +9,29 @@
 
 use super::state::San;
 
+/// Text bound for the terminal clipboard. It can be a bearer token, so its
+/// `Debug` never prints the content (action lists are printed in tests and logs).
+#[derive(Clone)]
+pub struct ClipboardText(String);
+
+impl ClipboardText {
+    /// Wrap the text to copy.
+    pub fn new(text: String) -> Self {
+        Self(text)
+    }
+
+    /// The text to write to the clipboard.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for ClipboardText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ClipboardText(<redacted>)")
+    }
+}
+
 /// A side effect for the runner to perform after an update cycle.
 ///
 /// The runner dispatches every variant today; the ones only a later card emits
@@ -116,4 +139,10 @@ pub enum UpdateAction {
     /// file write).  Errors are logged and swallowed — a persistence failure
     /// must never crash the TUI.
     SaveAdvertiseTrust(super::state::cert::AdvertiseTrust),
+
+    /// Write text to the clipboard of the terminal the operator sits at (OSC 52).
+    ///
+    /// Handled synchronously in the runner. The terminal never acknowledges, so
+    /// only a local write failure can be reported.
+    CopyToClipboard(ClipboardText),
 }

@@ -39,6 +39,30 @@ pub struct ConfigSnapshot {
     pub advertise_sans: Vec<String>,
 }
 
+/// What a copy request puts on the terminal clipboard.
+// Constructed by the copy key and button that land after this plumbing.
+#[allow(dead_code)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyTarget {
+    /// The secret of the token minted most recently.
+    MintedToken,
+    /// The pairing URI of the QR overlay.
+    PairingLink,
+    /// The SHA-256 fingerprint of the current certificate.
+    CertFingerprint,
+}
+
+impl CopyTarget {
+    /// Noun used in toasts.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::MintedToken => "Token",
+            Self::PairingLink => "Pairing link",
+            Self::CertFingerprint => "Fingerprint",
+        }
+    }
+}
+
 /// Everything a declared component can ask the app for.
 ///
 /// This is the message type the ratcn runtime is parameterised over: focus
@@ -65,6 +89,9 @@ pub enum UiMsg {
     Devices(DevicesMsg),
     /// Setup wizard.
     Wizard(WizardMsg),
+    /// Put a value on the terminal clipboard.
+    #[allow(dead_code)]
+    Copy(CopyTarget),
 }
 
 /// Everything that can drive a state change.

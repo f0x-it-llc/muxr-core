@@ -19,7 +19,8 @@ muxrd = { path = "../muxrd" }
 # crossterm is re-exported by ratatui; we depend on it directly for KeyEvent /
 # event polling. We poll (no event-stream feature needed).
 ratatui = "0.30"
-crossterm = "0.29"
+# The osc52 feature gates crossterm::clipboard, the terminal-clipboard writer.
+crossterm = { version = "0.29", features = ["osc52"] }
 
 # Interactive component runtime on top of ratatui (focus/hover/event routing,
 # Theme, TextInput-style components). The API is stable within 0.1.x: patch

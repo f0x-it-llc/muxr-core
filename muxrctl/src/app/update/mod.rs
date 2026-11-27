@@ -12,8 +12,8 @@
 
 use ratcn::runtime::{KeyCode, KeyEvent};
 
-use super::action::UpdateAction;
-use super::message::{Message, UiMsg};
+use super::action::{ClipboardText, UpdateAction};
+use super::message::{CopyTarget, Message, UiMsg};
 use super::state::server::ServerMsg;
 use super::state::{AppState, DialogId};
 
@@ -140,6 +140,36 @@ fn handle_ui(state: &mut AppState, msg: UiMsg) -> Vec<UpdateAction> {
         UiMsg::Tokens(msg) => tokens::update(state, msg),
         UiMsg::Devices(msg) => devices::update(state, msg),
         UiMsg::Wizard(msg) => wizard::update(state, msg),
+        UiMsg::Copy(target) => copy(state, target),
+    }
+}
+
+/// Resolve `target` from state and queue the clipboard write. The toast says
+/// "sent", never "copied": OSC 52 has no acknowledgement.
+fn copy(state: &mut AppState, target: CopyTarget) -> Vec<UpdateAction> {
+    use super::state::tokens::QrOverlayPhase;
+
+    let text = match target {
+        CopyTarget::MintedToken => state
+            .tokens
+            .last_minted_secret
+            .as_ref()
+            .map(|(_, secret, _)| secret.clone()),
+        CopyTarget::PairingLink => match state.tokens.qr_overlay.as_ref().map(|o| &o.phase) {
+            Some(QrOverlayPhase::Showing { uri, .. }) => Some(uri.clone()),
+            _ => None,
+        },
+        CopyTarget::CertFingerprint => state.cert.fingerprint.clone(),
+    };
+    match text {
+        Some(text) => {
+            state.toast_ok(format!("{} sent to the terminal clipboard", target.label()));
+            vec![UpdateAction::CopyToClipboard(ClipboardText::new(text))]
+        }
+        None => {
+            state.toast_err(format!("{} is not available to copy", target.label()));
+            Vec::new()
+        }
     }
 }
 
@@ -297,6 +327,71 @@ mod tests {
     use crate::app::state::ServerInfo;
     use crate::app::state::config::ConfigMsg;
     use ratcn::runtime::Modifiers;
+
+    fn showing(uri: &str) -> crate::app::state::tokens::QrOverlay {
+        use crate::app::state::tokens::{QrOverlay, QrOverlayPhase};
+        QrOverlay {
+            phase: QrOverlayPhase::Showing {
+                uri: uri.to_string(),
+                host: "h".into(),
+                port: 1,
+                fingerprint_short: "ab".into(),
+            },
+            seq: 1,
+            baseline_clients: 0,
+            token_name: "t".into(),
+            read_only: false,
+            tick_counter: 0,
+        }
+    }
+
+    fn copy_msg(t: CopyTarget) -> Message {
+        Message::Ui(UiMsg::Copy(t))
+    }
+
+    #[test]
+    fn copy_present_values_emit_one_action_and_ok_toast() {
+        let cases = [
+            (CopyTarget::MintedToken, "secret-1"),
+            (CopyTarget::PairingLink, "muxr://pair?x=1"),
+            (CopyTarget::CertFingerprint, "deadbeef"),
+        ];
+        for (target, value) in cases {
+            let mut state = AppState::new();
+            state.tokens.last_minted_secret = Some(("n".into(), "secret-1".into(), false));
+            state.tokens.qr_overlay = Some(showing("muxr://pair?x=1"));
+            state.cert.fingerprint = Some("deadbeef".into());
+            let actions = update(&mut state, copy_msg(target));
+            assert_eq!(actions.len(), 1);
+            match &actions[0] {
+                UpdateAction::CopyToClipboard(t) => assert_eq!(t.as_str(), value),
+                other => panic!("unexpected action {other:?}"),
+            }
+            assert_eq!(state.ui.toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn copy_absent_values_emit_no_action_and_error_toast() {
+        for target in [
+            CopyTarget::MintedToken,
+            CopyTarget::PairingLink,
+            CopyTarget::CertFingerprint,
+        ] {
+            let mut state = AppState::new();
+            let actions = update(&mut state, copy_msg(target));
+            assert!(actions.is_empty());
+            assert_eq!(state.ui.toasts.len(), 1);
+        }
+    }
+
+    #[test]
+    fn clipboard_action_debug_hides_the_text() {
+        let a = UpdateAction::CopyToClipboard(ClipboardText::new("topsecret".into()));
+        let s = format!("{a:?}");
+        assert!(!s.contains("topsecret"));
+        assert!(s.contains("redacted"));
+    }
 
     pub(crate) fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code)

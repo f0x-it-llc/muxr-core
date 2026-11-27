@@ -43,6 +43,7 @@ use ratcn::runtime::{Event, EventResult, KeyEvent, Ratcn, TabWrap};
 use tokio::sync::mpsc;
 
 use crate::app::{AppState, Message, UiMsg, UpdateAction, update};
+use crate::tui::terminal;
 
 /// Poll cadence / tick interval.
 const TICK: Duration = Duration::from_millis(50);
@@ -130,6 +131,13 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
             // Best-effort send; the channel is only saturated under pathological
             // backpressure, which the per-fill read bound keeps out of reach.
             let _ = tx.try_send(message);
+        }
+
+        // Components (ratcn Input, for one) queue clipboard text the host writes.
+        if let Some(text) = ratcn.take_clipboard()
+            && let Err(e) = terminal::copy_to_clipboard(&text)
+        {
+            log::warn!("clipboard write failed: {e}");
         }
 
         // (5) Wall-clock heartbeat.
@@ -458,6 +466,17 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
             // practice; no async task needed, no message posted back.
             UpdateAction::SaveAdvertiseTrust(trust) => {
                 crate::server::save_advertise_trust(trust.persist_str());
+            }
+
+            // ── Terminal clipboard (OSC 52) ───────────────────────────────────
+            // Synchronous: one short escape sequence. The text is never logged.
+            UpdateAction::CopyToClipboard(text) => {
+                if let Err(e) = terminal::copy_to_clipboard(text.as_str()) {
+                    log::warn!("clipboard write failed: {e}");
+                    let _ = tx.try_send(Message::ActionFailed(
+                        "Could not write to the terminal clipboard".into(),
+                    ));
+                }
             }
 
             // ── Token QR overlay ──────────────────────────────────────────────
