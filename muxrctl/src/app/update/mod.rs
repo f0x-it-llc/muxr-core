@@ -261,9 +261,9 @@ fn clear_loading(state: &mut AppState) {
 /// layer, the wizard) the modal floor turns every key nothing inside it handled
 /// into a consumed one before the runner could deliver it, so a modal answers
 /// its own keys from inside: Esc is the dialog's `on_dismiss`, a dialog's
-/// single-letter shortcuts (n/s/x/r/y/h/g/d) come from the `DialogShortcuts`
-/// wrapper in `tui/components/shortcuts.rs` reading the table in
-/// `app::shortcuts`, and Ctrl-C is turned into [`UiMsg::Quit`] by the same
+/// single-letter shortcuts come from the `DialogShortcuts` wrapper in
+/// `tui/components/shortcuts.rs` reading the table in `app::shortcuts` (the
+/// letters are listed only there), and Ctrl-C is turned into [`UiMsg::Quit`] by the same
 /// wrapper, the QR layer's buttons and the wizard's controls. Ctrl-C here is
 /// therefore the dashboard's, and quits.
 fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {

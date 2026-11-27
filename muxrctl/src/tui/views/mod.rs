@@ -82,7 +82,7 @@ pub fn render(
 /// shortcuts read. `Qr` and `Wizard` paint nothing here: their layers own the
 /// bottom row and carry their own strips.
 fn paint_footer(frame: &mut Frame, state: &AppState, theme: &Theme, area: Rect) {
-    let pairs = crate::app::shortcuts::hint(state.top_dialog());
+    let pairs = crate::app::shortcuts::hint(state.top_dialog(), state);
     if pairs.is_empty() || area.height == 0 {
         return;
     }
@@ -462,8 +462,8 @@ mod tests {
     /// A full 64-hex certificate fingerprint.
     const FINGERPRINT: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
-    /// The Certificate dialog's copy pair as the footer prints it, last and
-    /// whole at 80 columns.
+    /// The Certificate dialog's copy pair as the footer prints it, whole at 80
+    /// columns.
     const CERT_COPY_HINT: &str = "c copy";
 
     /// The Tokens flow's fullscreen layer keeps the whole frame: `render`'s gate
@@ -791,7 +791,8 @@ mod tests {
         harness.key(KeyCode::Char('t'));
         let row = harness.last_row();
         assert!(row.contains("n create"), "{row:?}");
-        assert!(row.contains("Tab moves"), "{row:?}");
+        assert!(row.trim_end().ends_with("Esc closes"), "{row:?}");
+        assert!(!row.contains("Tab") && !row.contains("Enter"), "{row:?}");
 
         harness.key(KeyCode::Esc);
         let row = harness.last_row();
@@ -807,14 +808,134 @@ mod tests {
         harness.key(KeyCode::Esc);
         harness.cert_dialog(Some(FINGERPRINT));
         let row = harness.last_row();
-        assert!(row.trim_end().ends_with(CERT_COPY_HINT), "{row:?}");
+        assert!(row.contains(CERT_COPY_HINT), "{row:?}");
     }
 
     #[test]
     fn the_footer_is_cut_to_a_narrow_frame() {
         let mut harness = Harness::sized(20, 24);
         harness.key(KeyCode::Char('t'));
-        assert!(harness.last_row().starts_with("Tab moves"));
+        assert!(harness.last_row().starts_with("↑↓ select"));
+    }
+
+    #[test]
+    fn a_cut_footer_keeps_esc_after_the_letters_and_loses_tab_and_enter_first() {
+        // "h help  g regenerate  r refresh  c copy  Esc closes" is 51 columns.
+        let mut harness = Harness::sized(51, 24);
+        harness.cert_dialog(Some(FINGERPRINT));
+        let row = harness.last_row();
+        assert!(row.contains("c copy"), "{row:?}");
+        assert!(row.trim_end().ends_with("Esc closes"), "{row:?}");
+        assert!(!row.contains("Tab") && !row.contains("Enter"), "{row:?}");
+    }
+
+    #[test]
+    fn the_tokens_footer_lists_show_qr_and_revoke_only_when_they_work() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('t'));
+        let row = harness.last_row();
+        assert!(row.contains("n create"), "{row:?}");
+        assert!(
+            !row.contains("show QR") && !row.contains("revoke"),
+            "{row:?}"
+        );
+
+        harness.tokens_dialog_with(&["phone"]);
+        harness.state.tokens.last_minted_secret = Some(("phone".into(), "x".into(), false));
+        harness.draw();
+        let row = harness.last_row();
+        assert!(row.contains("show QR") && row.contains("revoke"), "{row:?}");
+    }
+
+    #[test]
+    fn the_form_and_help_footers_name_their_keys() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('c'));
+        let row = harness.last_row();
+        assert!(row.contains("Tab moves"), "{row:?}");
+        assert!(
+            row.contains("Enter submits a field, presses a button"),
+            "{row:?}"
+        );
+        assert!(row.contains("Esc cancels"), "{row:?}");
+
+        harness.key(KeyCode::Esc);
+        harness.cert_dialog(Some(FINGERPRINT));
+        harness.key(KeyCode::Char('h'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::CertHelp));
+        let row = harness.last_row();
+        assert!(row.contains("↑↓ PgUp PgDn scroll"), "{row:?}");
+        assert!(row.trim_end().ends_with("Esc closes"), "{row:?}");
+    }
+
+    #[test]
+    fn y_confirms_the_certificate_regeneration() {
+        let mut harness = Harness::new();
+        harness.cert_dialog(Some(FINGERPRINT));
+        harness.key(KeyCode::Char('g'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::CertRegenConfirm));
+        harness.key(KeyCode::Char('y'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Cert));
+        assert!(
+            harness.state.cert.loading,
+            "the regenerate path did not run"
+        );
+    }
+
+    #[test]
+    fn y_confirms_the_device_removal() {
+        let mut harness = Harness::new();
+        harness.key(KeyCode::Char('d'));
+        harness.feed(Message::DevicesLoaded {
+            devices: vec![crate::server::devices::DeviceRecord {
+                device_name: "pixel".to_string(),
+                platform: "android".to_string(),
+                registered_at: 0,
+                handle_prefix: "abcd1234".to_string(),
+            }],
+            relay_url: None,
+        });
+        harness.state.devices.focused = Some("pixel".to_string());
+        harness.draw();
+        harness.key(KeyCode::Char('x'));
+        assert_eq!(
+            harness.state.top_dialog(),
+            Some(DialogId::DeviceRemoveConfirm)
+        );
+        harness.key(KeyCode::Char('y'));
+        assert_eq!(harness.state.top_dialog(), Some(DialogId::Devices));
+        assert!(harness.state.devices.loading, "the remove path did not run");
+    }
+
+    #[test]
+    fn the_tallest_dialogs_keep_their_bottom_border_above_the_footer() {
+        let mut harness = Harness::new();
+        for open in ['e', 't', 'd', 'c'] {
+            harness.key(KeyCode::Char(open));
+            let screen = harness.screen();
+            let rows: Vec<&str> = screen.lines().collect();
+            let footer = rows.len() - 1;
+            let border = rows[..footer]
+                .iter()
+                .rposition(|row| row.contains('╯') || row.contains('┘'));
+            let Some(border) = border else {
+                panic!("{open}: no bottom border above the footer");
+            };
+            assert_ne!(
+                rows[border], rows[footer],
+                "{open}: border row is the footer"
+            );
+            assert!(
+                !rows[footer].contains('╯') && !rows[footer].contains('┘'),
+                "{open}: the footer row holds a border corner"
+            );
+            let trimmed = rows[border].trim();
+            assert!(
+                trimmed.starts_with('╰') && trimmed.ends_with('╯'),
+                "{open}: the bottom border is cut"
+            );
+            harness.key(KeyCode::Esc);
+        }
     }
 
     #[test]
