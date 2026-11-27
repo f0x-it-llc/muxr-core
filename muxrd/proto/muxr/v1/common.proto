@@ -11,6 +11,7 @@ enum Backend {
   BACKEND_UNSPECIFIED = 0;
   BACKEND_ZELLIJ = 1;
   BACKEND_HERDR = 2;
+  BACKEND_TMUX = 3;
 }
 
 // Answer of every action RPC.

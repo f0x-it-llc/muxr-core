@@ -36,9 +36,13 @@ pub mod detect;
 pub mod events;
 pub(crate) mod herdr;
 pub(crate) mod routing;
+pub mod tmux;
 pub mod types;
 mod zellij;
 
+pub use tmux::agent_state::AgentState;
+pub use tmux::backend::TmuxBackend;
+pub use tmux::watch::spawn_tmux_event_kernel;
 pub use types::{
     ActionAck, AgentMark, AgentSnapshot, AgentStatus, AgentSummary, FullscreenHint, LayoutSnapshot,
     MuxEvent, MuxMouseKind, MuxServerMsg, PaneFullscreenContext, PaneRef, PaneSnapshot, ResizeDir,

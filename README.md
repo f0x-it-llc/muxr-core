@@ -1,6 +1,6 @@
 # Muxr server (muxr-core)
 
-Muxr puts your zellij and herdr terminal sessions, including the ones your coding agents run in, on your iPhone, iPad or Android device. This repository is the server side: `muxrd`, a daemon you run next to zellij or herdr, and `muxrctl`, a terminal UI that sets it up and pairs your phone with a QR code.
+Muxr puts your zellij, herdr and tmux terminal sessions, including the ones your coding agents run in, on your iPhone, iPad or Android device. This repository is the server side: `muxrd`, a daemon you run next to zellij, herdr or tmux, and `muxrctl`, a terminal UI that sets it up and pairs your phone with a QR code.
 
 <a href="https://apps.apple.com/app/muxr-zellij-herdr-client/id6815185967"><img src="website/assets/img/badges/app-store.svg" alt="Download on the App Store" height="44"></a>
 <a href="https://play.google.com/store/apps/details?id=com.it.f0x.muxr"><img src="website/assets/img/badges/google-play.png" alt="Get it on Google Play" height="65"></a>
@@ -9,9 +9,9 @@ Muxr puts your zellij and herdr terminal sessions, including the ones your codin
 
 ## What you get
 
-- Works with [zellij](https://zellij.dev/) and [herdr](https://herdr.dev/); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
+- Works with [zellij](https://zellij.dev/), [herdr](https://herdr.dev/) and [tmux](https://github.com/tmux/tmux); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
 - Browse, open, create, rename and close sessions, tabs and panes from the app.
-- On herdr, an agents list shows the coding agents running in a session, most urgent first.
+- On herdr and tmux, an agents list shows the coding agents running in a session, most urgent first.
 - Pair by scanning a QR code. With a self-signed server the code also pins the server's certificate, so the phone trusts only your server.
 - Per-device tokens, including read-only tokens for a view-only phone.
 - Works with a self-signed certificate, a certificate from a certificate authority, or behind a proxy that handles TLS.
@@ -33,7 +33,7 @@ The server is free to use under PolyForm Shield 1.0.0 (source available: free fo
 
 ## Status
 
-Works with zellij and herdr today. tmux support, push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
+Works with zellij, herdr and tmux today. Push notifications, voice input and desktop apps are coming soon; see the [roadmap](https://muxr.app/roadmap.html).
 
 ## Not the npm package
 
@@ -45,7 +45,7 @@ Two distributed binaries, plus a third workspace crate distributed separately:
 
 | Crate | Binary | What it does |
 |-------|--------|--------------|
-| [`muxrd`](muxrd/) | `muxrd` | gRPC server (protobuf package `muxr.v1`) that relays over a terminal multiplexer — zellij (Unix-domain IPC) or herdr (JSON-API + binary wire sockets). TLS (self-signed, an external CA cert, or plaintext h2c behind a proxy) + per-token auth, read-only tokens, daemonize. |
+| [`muxrd`](muxrd/) | `muxrd` | gRPC server (protobuf package `muxr.v1`) that relays over a terminal multiplexer — zellij (Unix-domain IPC), herdr (JSON-API + binary wire sockets) or tmux (the `tmux` CLI plus control mode). TLS (self-signed, an external CA cert, or plaintext h2c behind a proxy) + per-token auth, read-only tokens, daemonize. |
 | [`muxrctl`](muxrctl/) | `muxrctl` | Terminal UI to install, configure, and pair the server: one live dashboard (daemon, network, certificate, tokens, devices), every action a dialog, a first-run setup wizard (network → certificate → token → start → pair), QR-code device pairing (fingerprint-pinned or system-CA). Links `muxrd` as a library for its pure ops. |
 | [`muxr-notify`](muxr-notify/) | `muxr-notify` | A small, self-hostable push-notification relay (mints device push-handles, forwards `muxrd`'s notify requests to FCM). **Not** part of the release suite above — it ships only as its own Docker image (see [`muxr-notify/README.md`](muxr-notify/README.md)), since a self-hosted relay only delivers push to apps you build yourself (FCM tokens are project-scoped). The dev rig runs an in-container instance (`FCM_MODE=log`) for e2e testing. |
 
@@ -94,9 +94,35 @@ For the **zellij** backend, requires a supported `zellij` binary on `PATH` (0.45
 or newer 0.45.x, or 0.46.x; the server refuses other versions). For the
 **herdr** backend, requires a running `herdr` instance — a separate, unmodified,
 user-installed binary (Apache-2.0). muxrd discovers herdr's wire protocol version at
-runtime rather than pinning one, so it works across herdr releases. muxrd
-auto-detects which backends are available and serves all of them; pass `--backend`
-/ `MUXRD_BACKEND` to restrict to one.
+runtime rather than pinning one, so it works across herdr releases. For the
+**tmux** backend, requires tmux 3.5a or newer on `PATH` (floating panes need 3.7;
+moving a pane between tiled and floating and the running-command signal from shell
+prompt marks (OSC 133) need 3.8; Debian 13 ships 3.5a, while Ubuntu 24.04 ships
+3.4 and is too old). No running tmux server is
+required. muxrd auto-detects which backends are available and serves all of them;
+pass `--backend` / `MUXRD_BACKEND` (for example `--backend tmux`) to restrict to one.
+
+tmux settings, all optional:
+
+- `MUXRD_TMUX_SOCKET`: a `-L` name, or an absolute socket path, for a tmux server
+  that is not on the default `/tmp/tmux-<uid>/default` (or under `$TMUX_TMPDIR`). A name
+  is passed to tmux as `-L`, so tmux checks its socket directory itself; an absolute path
+  is used only if its directory is owned by muxrd's user and closed to group and others
+  (mode 0700).
+- `MUXRD_TMUX_BIN`: the tmux binary to run, default `tmux`.
+- `MUXRD_TMUX_WATCH_MAX`: how many sessions muxrd watches for agent status, default
+  16. `0` turns the watcher off, and with it the agents stream and push
+  notifications on a server that runs only tmux.
+
+Sessions whose names use characters other than letters, digits, `_` and `-` are
+not listed. Three things a tmux user will notice:
+
+- The phone attaches as a normal tmux client, so window size and focus are shared
+  with the other clients of the session.
+- muxrd keeps one control-mode client per session to follow agent status. It shows
+  in `tmux list-clients` and counts toward `session_attached`.
+- A read-only token attaches with `-r`, so it cannot change the session's shared
+  focus.
 
 ## Keys and copying
 
@@ -166,8 +192,9 @@ cargo fmt                # format before committing
 ## Docker dev rig
 
 `docker/` builds a self-contained container running the server against a
-pre-populated Zellij session — or, via the opt-in `herdr` profile, against a herdr
-workspace — useful for on-device testing from a phone on the same network. It
+pre-populated Zellij session — or, via the opt-in `herdr` and `tmux` profiles,
+against a herdr workspace or a tmux session (the `all` profile runs every
+backend) — useful for on-device testing from a phone on the same network. It
 also starts an in-container `muxr-notify` instance (`FCM_MODE=log`, loopback
 only) so push-notification flows are exercisable end-to-end without any
 Firebase setup. See [`docker/README.md`](docker/README.md) and
@@ -210,8 +237,12 @@ anything or moves focus. See "Space-scoped layout reads" in `muxrd/proto/README.
 across all of its spaces, most urgent first (blocked, then done, working, idle),
 with summary counts. It is a read like `GetSpaces` — permitted for read-only
 tokens, never moving focus — and answers an empty list on a backend that reports
-no agents. Servers that can report agents advertise the `"agents"` capability on
-`GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
+no agents. On tmux, agents that print OSC 7501 status reports unprompted (Codex,
+OpenCode 2, Amp) are reported exactly. Agents that wait for the terminal to answer
+a probe first (Claude Code today) are inferred from the running command, recent
+output and the pane title, and are labelled "(inferred)"; tmux releases after 3.8
+answer the probe. Servers that can report agents advertise the `"agents"`
+capability on `GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
 `SessionInfo.agents` on `ListSessions`.
 
 ## Releasing

@@ -13,6 +13,13 @@
 //! resync so a consumer mirroring state can re-read it whole. None is guaranteed
 //! delivery.
 //!
+//! Two kernels feed it: the herdr kernel above and, when tmux is served, the
+//! tmux kernel ([`tmux::watch`](crate::multiplexer::tmux::watch)), both onto the
+//! one bus. Their pane numbers overlap (herdr's registry counts from 1, tmux
+//! uses its raw `%N`), so every pane-naming event carries an [`EventScope`]: the
+//! backend and bare session it belongs to. A consumer keys pane state by scope
+//! and pane, never by pane alone.
+//!
 //! Consumers: the push notifier ([`notify::sender`](crate::notify::sender)) and
 //! the `WatchAgents` stream (`grpc::agent_ops`), each on its own receiver.
 //!
@@ -33,7 +40,11 @@
 //!   is referenced module-qualified (`events::MuxEvent`) rather than re-exported
 //!   flat at the `multiplexer` level.
 
+use std::hash::{Hash, Hasher};
+
 use tokio::sync::broadcast;
+
+use crate::cli::BackendKind;
 
 /// Broadcast-bus capacity. Agent-status transitions are infrequent (human-paced
 /// agent activity) and layout changes are paced by the same human hands, so 256
@@ -44,11 +55,50 @@ pub const EVENT_BUS_CAPACITY: usize = 256;
 
 pub use crate::multiplexer::types::AgentStatus;
 
+/// Where a pane-naming event comes from: the backend that published it and the
+/// bare session name (as `ListSessions` reports it, without the `<backend>:`
+/// prefix) the pane belongs to.
+///
+/// Pane numbers are only unique within one scope: herdr and tmux both number
+/// from small integers, and two tmux sessions share one server's `%N` space but
+/// own different agent rows. herdr always publishes under its single collapsed
+/// session; tmux publishes under the watcher's current session name, so a
+/// rename moves later events to the new name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EventScope {
+    /// Backend whose event kernel published the event.
+    pub backend: BackendKind,
+    /// Bare session name the pane belongs to.
+    pub session: String,
+}
+
+impl EventScope {
+    /// A scope for `session` on `backend`.
+    pub fn new(backend: BackendKind, session: impl Into<String>) -> Self {
+        Self {
+            backend,
+            session: session.into(),
+        }
+    }
+}
+
+// `BackendKind` is not `Hash`; its discriminant is, and it decides equality of
+// the fieldless enum exactly as the derived `PartialEq` does.
+impl Hash for EventScope {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(&self.backend).hash(state);
+        self.session.hash(state);
+    }
+}
+
 /// A pane's agent status changed (or, for a post-reconnect resync, its current
-/// status was observed). Pane ids are muxrd's neutral `u32` (registry-translated);
-/// the herdr `workspace_id` is carried raw for downstream routing/labelling.
+/// status was observed). Pane ids are muxrd's neutral `u32` (registry-translated
+/// for herdr, tmux's own `%N` for tmux), unique only within [`Self::scope`]; the
+/// herdr `workspace_id` is carried raw for downstream routing/labelling.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentStatusChanged {
+    /// Backend and session the pane belongs to.
+    pub scope: EventScope,
     /// Neutral pane id (registry-translated from herdr's opaque `pane_id`).
     pub pane: u32,
     /// herdr workspace id (raw opaque string) the pane belongs to.
@@ -86,7 +136,9 @@ pub struct AgentStatusChanged {
 ///
 /// Modelled on [`AgentStatusChanged`]: the herdr `workspace_id` is carried raw
 /// for routing/labelling, and the tab is muxrd's neutral registry-translated
-/// `u64` so no `herdr::api` shape crosses this seam.
+/// `u64` so no `herdr::api` shape crosses this seam. Only the herdr kernel
+/// publishes it and no consumer reads more than its arrival, so it carries no
+/// [`EventScope`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayoutChanged {
     /// herdr workspace id (raw opaque string) whose tab changed.
@@ -97,11 +149,14 @@ pub struct LayoutChanged {
 
 /// A pane closed or exited, so any agent it ran is gone with it.
 ///
-/// Published by the herdr event kernel for a pane its registry knows; a pane
-/// muxrd never translated has no neutral id to announce and is not published.
+/// Published by the herdr event kernel for a pane its registry knows (a pane
+/// muxrd never translated has no neutral id to announce and is not published),
+/// and by the tmux kernel for a pane whose agent row it had published.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PaneClosed {
-    /// Neutral pane id (registry-translated from herdr's opaque `pane_id`).
+    /// Backend and session the pane belonged to.
+    pub scope: EventScope,
+    /// Neutral pane id, unique only within [`Self::scope`].
     pub pane: u32,
 }
 
@@ -123,8 +178,9 @@ pub enum MuxEvent {
     /// Published once per resync, successful or not, because events pushed
     /// while the agent-status subscription was down are lost either way. A
     /// consumer that mirrors state re-reads it whole; one that only reacts to
-    /// transitions (the push notifier) ignores it. The bus is fed by the one
-    /// kernel serving herdr's single session, so it names nothing.
+    /// transitions (the push notifier) ignores it. It names no scope: only the
+    /// herdr kernel publishes it, and a consumer of another scope that re-reads
+    /// on it merely spends one read.
     Resynced,
 }
 
@@ -136,11 +192,16 @@ pub type EventBus = broadcast::Sender<MuxEvent>;
 mod tests {
     use super::*;
 
+    fn herdr() -> EventScope {
+        EventScope::new(BackendKind::Herdr, "herdr")
+    }
+
     #[test]
     fn bus_delivers_events_to_subscribers() {
         let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let mut rx = tx.subscribe();
         let ev = MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope: herdr(),
             pane: 3,
             workspace_id: "ws-1".into(),
             workspace_name: Some("main".into()),
@@ -166,6 +227,7 @@ mod tests {
             tab: 7,
         });
         let status = MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope: herdr(),
             pane: 2,
             workspace_id: "ws-1".into(),
             workspace_name: None,
@@ -186,7 +248,10 @@ mod tests {
     fn bus_carries_pane_closures_alongside_agent_status() {
         let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let mut rx = tx.subscribe();
-        let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
+        let closed = MuxEvent::PaneClosed(PaneClosed {
+            scope: herdr(),
+            pane: 5,
+        });
         tx.send(closed.clone()).expect("a subscriber exists");
         assert_eq!(rx.try_recv().expect("closure event"), closed);
     }
@@ -195,7 +260,10 @@ mod tests {
     fn bus_carries_the_resync_marker_after_what_the_resync_published() {
         let (tx, _rx0): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         let mut rx = tx.subscribe();
-        let closed = MuxEvent::PaneClosed(PaneClosed { pane: 5 });
+        let closed = MuxEvent::PaneClosed(PaneClosed {
+            scope: herdr(),
+            pane: 5,
+        });
         tx.send(closed.clone()).expect("a subscriber exists");
         tx.send(MuxEvent::Resynced).expect("a subscriber exists");
         assert_eq!(rx.try_recv().expect("closure event"), closed);
@@ -209,6 +277,7 @@ mod tests {
         let (tx, rx): (EventBus, _) = broadcast::channel(EVENT_BUS_CAPACITY);
         drop(rx);
         let ev = MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope: herdr(),
             pane: 1,
             workspace_id: "ws".into(),
             workspace_name: None,
@@ -220,5 +289,18 @@ mod tests {
             synthetic: true,
         });
         assert!(tx.send(ev).is_err(), "no receivers → Err, not a panic");
+    }
+
+    #[test]
+    fn scopes_differ_by_backend_and_by_session() {
+        use std::collections::HashSet;
+        let scopes = [
+            herdr(),
+            EventScope::new(BackendKind::Tmux, "herdr"),
+            EventScope::new(BackendKind::Tmux, "work"),
+        ];
+        let distinct: HashSet<EventScope> = scopes.iter().cloned().collect();
+        assert_eq!(distinct.len(), 3, "each scope keys apart: {scopes:?}");
+        assert!(distinct.contains(&EventScope::new(BackendKind::Tmux, "work")));
     }
 }

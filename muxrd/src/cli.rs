@@ -10,18 +10,20 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 /// Which terminal-multiplexer backend muxrd drives.
 ///
 /// Resolved at `start` time: CLI `--backend` wins over the `MUXRD_BACKEND`
-/// environment variable; absent both, the default is [`BackendKind::Zellij`].
+/// environment variable; absent both, muxrd serves every detected backend.
 ///
-/// `zellij` is the production default and requires a running zellij instance
-/// on the same machine; `herdr` requires a running herdr instance reachable via
-/// its public Unix-domain sockets (set `HERDR_SOCKET_PATH` to override the
-/// XDG-default socket location).
+/// `zellij` requires an installed, supported zellij on the same machine;
+/// `herdr` requires a running herdr instance reachable via its public
+/// Unix-domain sockets (set `HERDR_SOCKET_PATH` to override the XDG-default
+/// socket location); `tmux` requires tmux 3.5a or newer on the same machine.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum BackendKind {
-    /// Drive the local zellij instance via Unix-domain IPC (default).
+    /// Drive the local zellij instance via Unix-domain IPC.
     Zellij,
     /// Drive a running herdr instance via its public JSON-API + wire sockets.
     Herdr,
+    /// Drive a local tmux server through its command line and control mode.
+    Tmux,
 }
 
 impl std::fmt::Display for BackendKind {
@@ -29,6 +31,7 @@ impl std::fmt::Display for BackendKind {
         match self {
             BackendKind::Zellij => write!(f, "zellij"),
             BackendKind::Herdr => write!(f, "herdr"),
+            BackendKind::Tmux => write!(f, "tmux"),
         }
     }
 }
@@ -215,12 +218,13 @@ pub struct StartArgs {
 
     /// Terminal-multiplexer backend to drive.
     ///
-    /// - `zellij` (default): drives the local zellij instance via Unix-domain IPC.
+    /// - `zellij`: drives the local zellij instance via Unix-domain IPC.
     ///   Requires an installed zellij binary of a supported version; a refused start
     ///   names the supported versions.
     /// - `herdr`: drives a running herdr instance via its public JSON-API + wire
     ///   sockets.  Set `HERDR_SOCKET_PATH` to point at the herdr API socket when the
     ///   instance is not at its XDG-default location (`$HOME/.config/herdr/herdr.sock`).
+    /// - `tmux`: a local tmux server, 3.5a or newer.
     ///
     /// CLI wins over the `MUXRD_BACKEND` environment variable.
     #[arg(long, value_enum, value_name = "BACKEND")]

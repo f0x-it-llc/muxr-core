@@ -23,6 +23,15 @@ enum LoginErr {
 }
 
 impl MuxrService {
+    /// Whether a registered push target could ever be notified: the outbound
+    /// notifier consumes the internal event bus, which `bin/muxrd.rs` creates
+    /// only when an event kernel feeds it (herdr, or tmux with its watcher
+    /// on). Without a bus a registration would never be pushed to, so the
+    /// capability and `RegisterPushTarget` both refuse.
+    pub(super) fn push_deliverable(&self) -> bool {
+        self.event_bus.is_some()
+    }
+
     // ── GetVersion ──────────────────────────────────────────────────────────
 
     pub(super) async fn get_version_impl(
@@ -58,14 +67,9 @@ impl MuxrService {
         let mut capabilities = vec!["mouse-input".to_owned()];
         // Additive capability flag — advertised only when push can ACTUALLY
         // deliver: a relay URL is configured (`config::EffectiveConfig::
-        // notify_relay_url`) AND the herdr backend is present. The event kernel
-        // + outbound notifier spawn only in the herdr branch (`bin/muxrd.rs`),
-        // so a zellij-only server that merely has a relay URL configured could
-        // accept registrations it can never fulfil — gate on both so clients
-        // never see "push-notifications" (nor a non-empty
-        // `notification_relay_url`) unless a push would land.
-        let herdr_present = self.backends.get(crate::cli::BackendKind::Herdr).is_some();
-        let push_available = self.notify_relay_url.is_some() && herdr_present;
+        // notify_relay_url`) AND push is deliverable (see
+        // [`MuxrService::push_deliverable`]).
+        let push_available = self.notify_relay_url.is_some() && self.push_deliverable();
         if push_available {
             capabilities.push("push-notifications".to_owned());
         }
@@ -76,7 +80,7 @@ impl MuxrService {
             capabilities.push("agents".to_owned());
         }
         // Additive capability flag — WatchAgents delivers live changes, which
-        // needs the internal event bus (herdr's event kernel feeds it). Without
+        // needs the internal event bus (an event kernel feeds it). Without
         // one the stream only sends its snapshot and ends, so clients poll.
         if self.event_bus.is_some() {
             capabilities.push("agents-stream".to_owned());
@@ -298,11 +302,11 @@ mod tests {
     use crate::multiplexer::{BackendSet, ZellijBackend};
     use std::sync::Arc;
 
-    /// A [`BackendSet`] containing a herdr entry. Push delivery only needs the
-    /// herdr backend to be *present*; `get_version_impl` merely probes for its
-    /// key and calls `backend_version()`, so a trivially-constructable backend
-    /// (here `ZellijBackend`) registered under the `Herdr` kind is a faithful
-    /// stand-in for "herdr detected" without standing up a real herdr relay.
+    /// A [`BackendSet`] containing a herdr entry. `get_version_impl` merely
+    /// probes the set's keys and calls `backend_version()`, so a
+    /// trivially-constructable backend (here `ZellijBackend`) registered under
+    /// the `Herdr` kind is a faithful stand-in for "herdr detected" without
+    /// standing up a real herdr relay.
     fn backends_with_herdr() -> BackendSet {
         BackendSet::new(vec![
             (BackendKind::Zellij, Arc::new(ZellijBackend) as _),
@@ -310,20 +314,45 @@ mod tests {
         ])
     }
 
-    /// No relay configured (the default) → neither the `"push-notifications"`
-    /// capability nor a non-empty `notification_relay_url` is advertised.
-    #[tokio::test]
-    async fn get_version_without_relay_has_no_push_capability() {
-        let service = MuxrService::with_backends(backends_with_herdr());
+    /// A tmux-only [`BackendSet`]: an agents-reporting stand-in under the
+    /// `Tmux` kind (the real backend needs a tmux binary).
+    fn backends_tmux_only() -> BackendSet {
+        BackendSet::single(
+            BackendKind::Tmux,
+            Arc::new(crate::grpc::agent_ops::tests::AgentsBackend::default()),
+        )
+    }
 
-        let info = service
+    /// The bus `bin/muxrd.rs` creates when an event kernel feeds it.
+    fn bus() -> Option<crate::multiplexer::events::EventBus> {
+        Some(tokio::sync::broadcast::channel(4).0)
+    }
+
+    const RELAY: &str = "https://noti.muxr.app";
+
+    async fn version(service: &MuxrService) -> VersionInfo {
+        service
             .get_version_impl(Request::new(Empty {}))
             .await
             .expect("GetVersion must not error")
-            .into_inner();
+            .into_inner()
+    }
+
+    fn has(info: &VersionInfo, capability: &str) -> bool {
+        info.capabilities.iter().any(|c| c == capability)
+    }
+
+    /// No relay configured (the default) → neither the `"push-notifications"`
+    /// capability nor a non-empty `notification_relay_url` is advertised, even
+    /// with a bus.
+    #[tokio::test]
+    async fn get_version_without_relay_has_no_push_capability() {
+        let service = MuxrService::with_backends(backends_with_herdr()).with_event_bus(bus());
+
+        let info = version(&service).await;
 
         assert!(
-            !info.capabilities.iter().any(|c| c == "push-notifications"),
+            !has(&info, "push-notifications"),
             "capabilities should not include push-notifications: {:?}",
             info.capabilities
         );
@@ -333,52 +362,87 @@ mod tests {
         );
     }
 
-    /// A configured relay URL **and** herdr present → both the capability and
-    /// the field are populated.
+    /// herdr-only: a relay URL and herdr's bus → both the capability and the
+    /// field are populated.
     #[tokio::test]
     async fn get_version_with_relay_and_herdr_advertises_push_capability_and_url() {
         let service = MuxrService::with_backends(backends_with_herdr())
-            .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()));
+            .with_event_bus(bus())
+            .with_notify_relay_url(Some(RELAY.to_owned()));
 
-        let info = service
-            .get_version_impl(Request::new(Empty {}))
-            .await
-            .expect("GetVersion must not error")
-            .into_inner();
+        let info = version(&service).await;
 
         assert!(
-            info.capabilities.iter().any(|c| c == "push-notifications"),
+            has(&info, "push-notifications"),
             "capabilities should include push-notifications: {:?}",
             info.capabilities
         );
-        assert_eq!(info.notification_relay_url, "https://noti.muxr.app");
+        assert_eq!(info.notification_relay_url, RELAY);
     }
 
-    /// A relay URL configured but NO herdr backend (zellij-only server) → push
-    /// is unreachable, so neither the capability nor the URL is advertised even
-    /// though a relay is set. This is the M3 fix: don't dangle a capability the
-    /// server can never fulfil.
+    /// tmux-only with the watcher on (a bus) and a relay URL → push, agents
+    /// and the live agent stream are all advertised.
     #[tokio::test]
-    async fn get_version_with_relay_but_no_herdr_does_not_advertise_push() {
-        // `MuxrService::new()` builds a zellij-only backend set.
-        let service =
-            MuxrService::new().with_notify_relay_url(Some("https://noti.muxr.app".to_owned()));
+    async fn tmux_only_with_watcher_and_relay_advertises_push_agents_and_stream() {
+        let service = MuxrService::with_backends(backends_tmux_only())
+            .with_event_bus(bus())
+            .with_notify_relay_url(Some(RELAY.to_owned()));
 
-        let info = service
-            .get_version_impl(Request::new(Empty {}))
-            .await
-            .expect("GetVersion must not error")
-            .into_inner();
+        let info = version(&service).await;
+
+        for capability in ["push-notifications", "agents", "agents-stream"] {
+            assert!(
+                has(&info, capability),
+                "{capability} missing: {:?}",
+                info.capabilities
+            );
+        }
+        assert_eq!(info.notification_relay_url, RELAY);
+    }
+
+    /// tmux-only with the watcher off (`MUXRD_TMUX_WATCH_MAX=0`: no bus) → no
+    /// push and no live stream, even with a relay URL; `ListAgents` still
+    /// answers, so `agents` stays.
+    #[tokio::test]
+    async fn tmux_only_without_watcher_advertises_neither_stream_nor_push() {
+        let service = MuxrService::with_backends(backends_tmux_only())
+            .with_notify_relay_url(Some(RELAY.to_owned()));
+
+        let info = version(&service).await;
+
+        assert!(!has(&info, "push-notifications"), "{:?}", info.capabilities);
+        assert!(!has(&info, "agents-stream"), "{:?}", info.capabilities);
+        assert!(has(&info, "agents"), "{:?}", info.capabilities);
+        assert_eq!(info.notification_relay_url, "");
+    }
+
+    /// Neither herdr nor tmux (zellij-only server) with a relay URL → push is
+    /// unreachable, so neither the capability nor the URL is advertised even
+    /// though a relay is set: don't dangle a capability the server can never
+    /// fulfil.
+    #[tokio::test]
+    async fn get_version_with_relay_but_no_event_source_does_not_advertise_push() {
+        // `MuxrService::new()` builds a zellij-only backend set.
+        let service = MuxrService::new().with_notify_relay_url(Some(RELAY.to_owned()));
+
+        let info = version(&service).await;
 
         assert!(
-            !info.capabilities.iter().any(|c| c == "push-notifications"),
+            !has(&info, "push-notifications"),
             "a zellij-only server must not advertise push even with a relay URL: {:?}",
             info.capabilities
         );
         assert_eq!(
             info.notification_relay_url, "",
-            "notification_relay_url must stay empty without a herdr backend"
+            "notification_relay_url must stay empty without an event source"
         );
+    }
+
+    /// A zellij-only server advertises exactly `mouse-input`.
+    #[tokio::test]
+    async fn zellij_only_server_advertises_exactly_mouse_input() {
+        let service = MuxrService::new().with_notify_relay_url(Some(RELAY.to_owned()));
+        assert_eq!(version(&service).await.capabilities, ["mouse-input"]);
     }
 
     // ── latest_version ───────────────────────────────────────────────────────

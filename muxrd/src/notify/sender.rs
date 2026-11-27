@@ -3,10 +3,10 @@
 //! ## What this is
 //!
 //! A background task that consumes the internal event bus
-//! ([`events`](crate::multiplexer::events)), filters herdr agent
-//! `Blocked`/`Done` transitions, debounces repeats, and POSTs a *minimal*
-//! payload to the configured push relay (`{relay}/v1/notify`) for every
-//! registered device. It prunes devices the relay reports gone (404/410).
+//! ([`events`](crate::multiplexer::events)), filters agent `Blocked`/`Done`
+//! transitions (herdr's and tmux's alike), debounces repeats per scope, pane
+//! and kind, and POSTs a *minimal* payload to the configured push relay
+//! (`{relay}/v1/notify`) for every registered device. It prunes devices the relay reports gone (404/410).
 //!
 //! ## Privacy stance (see `RESEARCH.md` §3)
 //!
@@ -31,12 +31,13 @@ use std::time::{Duration, Instant};
 use tokio::sync::broadcast::{self, error::RecvError};
 use tokio::sync::watch;
 
-use crate::multiplexer::events::{AgentStatus, AgentStatusChanged, EventBus, MuxEvent};
+use crate::multiplexer::events::{AgentStatus, AgentStatusChanged, EventBus, EventScope, MuxEvent};
 use crate::notify::devices::{HANDLE_PREFIX_LEN, PushDeviceStore};
 
-/// Per-(pane, kind) debounce window: suppress an identical trigger within this
-/// span. A `Blocked`→`Done` transition uses a *different* key and is never
-/// suppressed by a recent `Blocked`.
+/// Per-(backend, session, pane, kind) debounce window: suppress an identical
+/// trigger within this span. A `Blocked`→`Done` transition uses a *different*
+/// key and is never suppressed by a recent `Blocked`, nor is a trigger of the
+/// same pane number in another backend or session.
 const DEBOUNCE_WINDOW: Duration = Duration::from_secs(30);
 
 /// Per-request timeout for a single relay POST.
@@ -193,10 +194,15 @@ impl RelayTransport for ReqwestRelay {
 
 // ─── Debounce ──────────────────────────────────────────────────────────────────
 
-/// Per-(pane, kind) monotonic-clock debouncer. Opportunistically pruned on every
-/// decision so the map never grows unbounded for churny panes.
+/// The debounce key: a pane number is only unique within its [`EventScope`]
+/// (herdr and tmux numbers overlap, as do two tmux sessions' rows).
+type DebounceKey = (EventScope, u32, TriggerKind);
+
+/// Per-(backend, session, pane, kind) monotonic-clock debouncer.
+/// Opportunistically pruned on every decision, and of a pane's entries when it
+/// closes, so the map never grows unbounded for churny panes.
 struct Debouncer {
-    last_sent: HashMap<(u32, TriggerKind), Instant>,
+    last_sent: HashMap<DebounceKey, Instant>,
     window: Duration,
 }
 
@@ -208,21 +214,35 @@ impl Debouncer {
         }
     }
 
-    /// Decide whether a `(pane, kind)` trigger should send `now`. Records the
-    /// send time when it returns `true`. Repeats inside `window` are suppressed;
-    /// a different `kind` (the `Blocked`→`Done` transition) is never suppressed
-    /// by a recent send of the other kind.
-    fn should_send(&mut self, pane: u32, kind: TriggerKind, now: Instant) -> bool {
+    /// Decide whether a `(scope, pane, kind)` trigger should send `now`.
+    /// Records the send time when it returns `true`. Repeats inside `window`
+    /// are suppressed; a different `kind` (the `Blocked`→`Done` transition) is
+    /// never suppressed by a recent send of the other kind.
+    fn should_send(
+        &mut self,
+        scope: &EventScope,
+        pane: u32,
+        kind: TriggerKind,
+        now: Instant,
+    ) -> bool {
         // Opportunistic prune: drop entries older than the window.
         self.last_sent
             .retain(|_, &mut t| now.duration_since(t) < self.window);
-        match self.last_sent.get(&(pane, kind)) {
+        let key = (scope.clone(), pane, kind);
+        match self.last_sent.get(&key) {
             Some(&t) if now.duration_since(t) < self.window => false,
             _ => {
-                self.last_sent.insert((pane, kind), now);
+                self.last_sent.insert(key, now);
                 true
             }
         }
+    }
+
+    /// Forget every trigger of `pane` in `scope`: it closed, so whatever runs
+    /// there next is a new agent.
+    fn forget_pane(&mut self, scope: &EventScope, pane: u32) {
+        self.last_sent
+            .retain(|(s, p, _), _| !(*p == pane && s == scope));
     }
 }
 
@@ -338,7 +358,7 @@ async fn handle_event<T: RelayTransport>(
 
     // 3. Debounce (only after we know there is a real device to notify, so the
     //    debounce state reflects actual send decisions).
-    if !debouncer.should_send(ev.pane, kind, Instant::now()) {
+    if !debouncer.should_send(&ev.scope, ev.pane, kind, Instant::now()) {
         log::debug!(
             "notify: debounced {} for pane {} (within {}s)",
             kind.wire(),
@@ -429,9 +449,11 @@ async fn run_notifier<T: RelayTransport>(
                         // layout moving is neither attention-worthy nor
                         // something a push payload could usefully carry.
                     }
-                    Ok(MuxEvent::PaneClosed(_)) => {
+                    Ok(MuxEvent::PaneClosed(closed)) => {
                         // Not a notification source either: a pane going away
-                        // needs nobody's attention.
+                        // needs nobody's attention. Its debounce entries go
+                        // with it, keyed exactly as the triggers were.
+                        debouncer.forget_pane(&closed.scope, closed.pane);
                     }
                     Ok(MuxEvent::Resynced) => {
                         // A marker for consumers that mirror state. Whatever the
@@ -512,8 +534,17 @@ mod tests {
         }
     }
 
+    fn herdr() -> EventScope {
+        EventScope::new(crate::cli::BackendKind::Herdr, "herdr")
+    }
+
+    fn tmux(session: &str) -> EventScope {
+        EventScope::new(crate::cli::BackendKind::Tmux, session)
+    }
+
     fn ev(status: AgentStatus, synthetic: bool) -> AgentStatusChanged {
         AgentStatusChanged {
+            scope: herdr(),
             pane: 7,
             workspace_id: "ws-9".into(),
             workspace_name: Some("main".into()),
@@ -552,9 +583,12 @@ mod tests {
     fn debounce_suppresses_repeat_within_window() {
         let mut d = Debouncer::new(DEBOUNCE_WINDOW);
         let t0 = Instant::now();
-        assert!(d.should_send(1, TriggerKind::Blocked, t0), "first send");
         assert!(
-            !d.should_send(1, TriggerKind::Blocked, t0),
+            d.should_send(&herdr(), 1, TriggerKind::Blocked, t0),
+            "first send"
+        );
+        assert!(
+            !d.should_send(&herdr(), 1, TriggerKind::Blocked, t0),
             "immediate repeat suppressed"
         );
     }
@@ -563,9 +597,9 @@ mod tests {
     fn debounce_does_not_suppress_transition_to_other_kind() {
         let mut d = Debouncer::new(DEBOUNCE_WINDOW);
         let t0 = Instant::now();
-        assert!(d.should_send(1, TriggerKind::Blocked, t0));
+        assert!(d.should_send(&herdr(), 1, TriggerKind::Blocked, t0));
         assert!(
-            d.should_send(1, TriggerKind::Done, t0),
+            d.should_send(&herdr(), 1, TriggerKind::Done, t0),
             "a Done after a recent Blocked is a different key — not suppressed"
         );
     }
@@ -574,11 +608,55 @@ mod tests {
     fn debounce_expires_after_window() {
         let mut d = Debouncer::new(DEBOUNCE_WINDOW);
         let t0 = Instant::now();
-        assert!(d.should_send(1, TriggerKind::Blocked, t0));
+        assert!(d.should_send(&herdr(), 1, TriggerKind::Blocked, t0));
         let later = t0 + DEBOUNCE_WINDOW + Duration::from_secs(1);
         assert!(
-            d.should_send(1, TriggerKind::Blocked, later),
+            d.should_send(&herdr(), 1, TriggerKind::Blocked, later),
             "after the window the same trigger sends again"
+        );
+    }
+
+    #[test]
+    fn debounce_keys_apart_the_same_pane_number_in_other_scopes() {
+        let mut d = Debouncer::new(DEBOUNCE_WINDOW);
+        let t0 = Instant::now();
+        assert!(
+            d.should_send(&herdr(), 1, TriggerKind::Blocked, t0),
+            "herdr"
+        );
+        assert!(
+            d.should_send(&tmux("work"), 1, TriggerKind::Blocked, t0),
+            "tmux's %1 is not herdr's pane 1"
+        );
+        assert!(
+            d.should_send(&tmux("play"), 1, TriggerKind::Blocked, t0),
+            "nor is another tmux session's"
+        );
+        for scope in [herdr(), tmux("work"), tmux("play")] {
+            assert!(
+                !d.should_send(&scope, 1, TriggerKind::Blocked, t0),
+                "a repeat in {scope:?} is suppressed"
+            );
+        }
+    }
+
+    #[test]
+    fn a_closed_pane_forgets_only_its_own_scope() {
+        let mut d = Debouncer::new(DEBOUNCE_WINDOW);
+        let t0 = Instant::now();
+        for scope in [herdr(), tmux("work")] {
+            assert!(d.should_send(&scope, 1, TriggerKind::Blocked, t0));
+            assert!(d.should_send(&scope, 1, TriggerKind::Done, t0));
+        }
+        d.forget_pane(&tmux("work"), 1);
+        assert!(
+            d.should_send(&tmux("work"), 1, TriggerKind::Blocked, t0),
+            "a new agent in the closed pane notifies"
+        );
+        assert!(d.should_send(&tmux("work"), 1, TriggerKind::Done, t0));
+        assert!(
+            !d.should_send(&herdr(), 1, TriggerKind::Blocked, t0),
+            "herdr's pane 1 keeps its debounce"
         );
     }
 
@@ -745,7 +823,10 @@ mod tests {
             "normal".to_owned(),
         ));
         bus.send(MuxEvent::PaneClosed(
-            crate::multiplexer::events::PaneClosed { pane: 4 },
+            crate::multiplexer::events::PaneClosed {
+                scope: herdr(),
+                pane: 4,
+            },
         ))
         .unwrap();
         for status in [
@@ -770,6 +851,33 @@ mod tests {
         let calls = calls.lock().unwrap();
         assert_eq!(calls.len(), 1, "only the blocked pane notifies: {calls:?}");
         assert_eq!(calls[0].1.kind, "agent_blocked");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[tokio::test]
+    async fn the_same_pane_and_kind_from_herdr_and_tmux_both_send() {
+        let path = temp_store_path("scopes");
+        let store = PushDeviceStore::at_path(path.clone());
+        store.upsert(device("phone-a", 'a')).unwrap();
+        let transport = MockTransport::new(SendOutcome::Ok);
+        let calls = transport.calls();
+        let mut d = Debouncer::new(DEBOUNCE_WINDOW);
+
+        let herdr_ev = ev(AgentStatus::Blocked, false);
+        let mut work = herdr_ev.clone();
+        work.scope = tmux("work");
+        let mut play = herdr_ev.clone();
+        play.scope = tmux("play");
+        for e in [&herdr_ev, &work, &play, &work] {
+            handle_event(e, "normal", &mut d, &store, &transport).await;
+        }
+
+        assert_eq!(
+            calls.lock().unwrap().len(),
+            3,
+            "herdr, tmux work and tmux play each send once; work's repeat is \
+             debounced"
+        );
         let _ = std::fs::remove_file(&path);
     }
 

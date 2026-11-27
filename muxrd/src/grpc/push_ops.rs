@@ -4,9 +4,9 @@
 //! RPCs are ADMIN-gated (reject read-only session tokens via
 //! [`reject_if_read_only`]) and do their file I/O on the blocking pool
 //! (`PushDeviceStore` is plain synchronous `std::fs`). `RegisterPushTarget`
-//! additionally rejects when the server has no relay configured
-//! (`failed_precondition`) — a handle with nowhere to send a push is a client
-//! bug, not a legitimate registration.
+//! additionally rejects when the server has no relay configured, or no event
+//! bus for the notifier to consume (`failed_precondition`) — a handle with
+//! nowhere to send a push is a client bug, not a legitimate registration.
 //!
 //! Handles are the sole credential the relay accepts to push to a device:
 //! never logged in full, and `ListPushTargets` returns only an 8-char
@@ -53,13 +53,14 @@ impl MuxrService {
                 "RegisterPushTarget: server has no push-notification relay configured",
             ));
         }
-        // The event kernel + outbound notifier only spawn in the herdr branch
-        // (`bin/muxrd.rs`), so a registration on a zellij-only server can never
-        // deliver a push. Reject it up-front rather than persisting a handle
-        // that will never be notified (matches the GetVersion capability gate).
-        if self.backends.get(crate::cli::BackendKind::Herdr).is_none() {
+        // The outbound notifier consumes the event bus, which exists only when
+        // an event kernel feeds it (herdr, or tmux with its watcher on), so a
+        // registration on any other server can never deliver a push. Reject it
+        // up-front rather than persisting a handle that will never be notified
+        // (matches the GetVersion capability gate).
+        if !self.push_deliverable() {
             return Err(Status::failed_precondition(
-                "push notifications require the herdr backend",
+                "push notifications require a backend that reports agent status (herdr or tmux)",
             ));
         }
 
@@ -207,10 +208,9 @@ mod tests {
         (PushDeviceStore::at_path(path.clone()), path)
     }
 
-    /// A backend set with a herdr entry — RegisterPushTarget now requires the
-    /// herdr backend to be present (only a `get(Herdr)` presence probe is done),
-    /// so a trivially-constructable `ZellijBackend` registered under the `Herdr`
-    /// kind is a faithful stand-in for "herdr detected" in these unit tests.
+    /// A backend set with a herdr entry; a trivially-constructable
+    /// `ZellijBackend` registered under the `Herdr` kind is a faithful
+    /// stand-in for "herdr detected" in these unit tests.
     fn backends_with_herdr() -> BackendSet {
         BackendSet::new(vec![
             (BackendKind::Zellij, Arc::new(ZellijBackend) as _),
@@ -218,12 +218,34 @@ mod tests {
         ])
     }
 
+    /// A tmux-only backend set, with the same kind of stand-in.
+    fn backends_tmux_only() -> BackendSet {
+        BackendSet::single(BackendKind::Tmux, Arc::new(ZellijBackend))
+    }
+
+    /// The bus `bin/muxrd.rs` creates when an event kernel feeds it.
+    fn bus() -> Option<crate::multiplexer::events::EventBus> {
+        Some(tokio::sync::broadcast::channel(4).0)
+    }
+
+    const RELAY: &str = "https://noti.muxr.app";
+
+    /// A herdr server with a relay: herdr's event kernel always has a bus.
     fn service_with_relay() -> (MuxrService, std::path::PathBuf) {
         let (store, path) = temp_store();
         let service = MuxrService::with_backends(backends_with_herdr())
-            .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()))
+            .with_event_bus(bus())
+            .with_notify_relay_url(Some(RELAY.to_owned()))
             .with_push_device_store(store);
         (service, path)
+    }
+
+    fn register_request() -> Request<RegisterPushTargetReq> {
+        writable_request(RegisterPushTargetReq {
+            push_handle: valid_handle('a'),
+            device_name: "phone".to_owned(),
+            platform: "android".to_owned(),
+        })
     }
 
     fn valid_handle(ch: char) -> String {
@@ -320,31 +342,66 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[tokio::test]
-    async fn register_without_herdr_backend_fails_precondition() {
-        // Relay configured, but a zellij-only server (no herdr) can never
-        // deliver a push — RegisterPushTarget must refuse rather than persist a
-        // handle that will never be notified (M3).
+    /// Register on a relay-configured server built from `backends` and `bus`.
+    async fn register_on(
+        backends: BackendSet,
+        bus: Option<crate::multiplexer::events::EventBus>,
+    ) -> Result<Response<ProtoAck>, Status> {
         let (store, path) = temp_store();
-        let service = MuxrService::new() // zellij-only backend set
-            .with_notify_relay_url(Some("https://noti.muxr.app".to_owned()))
+        let service = MuxrService::with_backends(backends)
+            .with_event_bus(bus)
+            .with_notify_relay_url(Some(RELAY.to_owned()))
             .with_push_device_store(store);
-        let req = writable_request(RegisterPushTargetReq {
-            push_handle: valid_handle('a'),
-            device_name: "phone".to_owned(),
-            platform: "android".to_owned(),
-        });
-        let err = service
-            .register_push_target_impl(req)
-            .await
-            .expect_err("no herdr backend must fail precondition");
-        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-        assert!(
-            err.message().contains("herdr"),
-            "message should explain herdr is required: {}",
-            err.message()
-        );
+        let result = service.register_push_target_impl(register_request()).await;
         let _ = std::fs::remove_file(&path);
+        result
+    }
+
+    fn assert_refused_for_no_event_source(result: Result<Response<ProtoAck>, Status>) {
+        let err = result.expect_err("no event bus must fail precondition");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        assert_eq!(
+            err.message(),
+            "push notifications require a backend that reports agent status (herdr or tmux)"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_on_herdr_only_server_succeeds() {
+        let ack = register_on(backends_with_herdr(), bus())
+            .await
+            .expect("herdr feeds the bus: register must succeed")
+            .into_inner();
+        assert!(ack.ok);
+    }
+
+    #[tokio::test]
+    async fn register_on_tmux_only_server_with_watcher_succeeds() {
+        let ack = register_on(backends_tmux_only(), bus())
+            .await
+            .expect("the tmux watcher feeds the bus: register must succeed")
+            .into_inner();
+        assert!(ack.ok);
+    }
+
+    #[tokio::test]
+    async fn register_on_tmux_only_server_without_watcher_fails_precondition() {
+        // `MUXRD_TMUX_WATCH_MAX=0`: tmux is served but nothing feeds a bus.
+        assert_refused_for_no_event_source(register_on(backends_tmux_only(), None).await);
+    }
+
+    #[tokio::test]
+    async fn register_without_an_event_source_fails_precondition() {
+        // Relay configured, but a zellij-only server can never deliver a push
+        // — RegisterPushTarget must refuse rather than persist a handle that
+        // will never be notified.
+        assert_refused_for_no_event_source(
+            register_on(
+                BackendSet::single(BackendKind::Zellij, Arc::new(ZellijBackend)),
+                None,
+            )
+            .await,
+        );
     }
 
     #[tokio::test]

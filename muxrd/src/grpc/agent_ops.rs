@@ -25,6 +25,14 @@
 //! taking the snapshot, so nothing published in between is lost (an event that
 //! the snapshot already reflects is re-sent as an idempotent `changed`).
 //!
+//! - A stream follows one **scope**: the backend and bare session its id
+//!   resolved to (`herdr:herdr` → herdr, `herdr`; `tmux:work` → tmux, `work`).
+//!   An `AgentStatusChanged` or `PaneClosed` whose
+//!   [`EventScope`](crate::multiplexer::events::EventScope) differs in either
+//!   is foreign and ignored outright: it is not applied, marks nothing stale,
+//!   and removes no held row, since pane numbers are only unique within a
+//!   scope. `LayoutChanged`, `Resynced` and a lag carry no scope and behave as
+//!   below for every stream.
 //! - An `AgentStatusChanged` for a pane the stream already holds, whose kind, tab
 //!   and space agree with what it holds, becomes a `changed` at once: the held
 //!   row with the event's status (and title/name when it carries them). That is
@@ -64,9 +72,21 @@
 //! - No bus (a zellij-only server), or a session on a backend without agents:
 //!   the snapshot is sent and the stream ends.
 //!
-//! The bus is fed only by the herdr event kernel and herdr serves a single
-//! sentinel session, so every bus event belongs to the one session an
-//! agents-capable stream can watch.
+//! Two kernels feed the bus: herdr's, which publishes everything under its one
+//! collapsed session (so on a herdr-only server every event is in scope for
+//! the only session a stream can watch), and tmux's, one watcher per tmux
+//! session publishing under that session's current name. A tmux pane moved
+//! between sessions (`join-pane`, `move-window`) converges on both sides: the
+//! old session's watcher publishes its `PaneClosed` under the old name, which
+//! removes the row from that session's streams, and the new session's watcher
+//! takes the pane over and publishes a status event under the new name, which
+//! that session's streams do not hold yet and so re-read, picking up the row
+//! `list_agents` now reports there. A linked pane (one window in two sessions)
+//! has one owning watcher and is listed only under the owner's session, so it
+//! appears, and is updated, only in that session's streams. A stream opened on
+//! a tmux session that is later renamed receives no further deltas, because
+//! the watcher publishes under the new name (and its re-reads of the old name
+//! fail); a client follows the rename by opening a stream on the new id.
 //!
 //! The neutral → proto mapping of status, mark and summary lives in
 //! [`super::helpers`] so `GetLayout` (`PaneMsg.agent`) and `ListSessions`
@@ -84,8 +104,10 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tonic::{Request, Response, Status};
 
-use crate::multiplexer::events::{AgentStatusChanged, MuxEvent};
-use crate::multiplexer::{AgentSnapshot, AgentSummary, UnknownSession, sort_agents};
+use crate::multiplexer::events::{AgentStatusChanged, EventScope, MuxEvent};
+use crate::multiplexer::{
+    AgentSnapshot, AgentSummary, UnknownSession, resolve_session_kind, sort_agents,
+};
 use crate::proto::{AgentEvent, AgentList, AgentMsg, SessionRef, agent_event};
 use crate::relay::TOKEN_RECHECK_INTERVAL;
 
@@ -142,6 +164,9 @@ impl Default for WatchTuning {
 struct Watch {
     /// The session id as the client sent it, for logs only.
     session: String,
+    /// The backend and bare session the id resolved to: only bus events of
+    /// this scope concern the stream.
+    scope: EventScope,
     lister: AgentLister,
     /// The bearer token the auth layer validated at open; `None` fails closed on
     /// the first re-check, as in the relay.
@@ -197,7 +222,7 @@ impl MuxrService {
             .get::<crate::auth::SessionToken>()
             .map(|t| t.0.clone());
         let session = request.into_inner().session;
-        let (backend, bare) = self.resolve_session(&session)?;
+        let (kind, backend, bare) = resolve_session_kind(&self.backends, &session)?;
         log::debug!("WatchAgents: session='{session}'");
 
         // Subscribe FIRST, so nothing published while the snapshot is taken is
@@ -210,6 +235,7 @@ impl MuxrService {
         let validate: TokenValidator = Arc::new(|t: &str| crate::ipc::validate_session_token(t));
         let watch = Watch {
             session,
+            scope: EventScope::new(kind, bare.clone()),
             lister: Arc::new(move || backend.list_agents(&bare)),
             token,
             validate,
@@ -523,8 +549,17 @@ impl WatchState {
     }
 
     /// Fold one bus event in. `false` means the bus closed and the stream ends.
-    fn on_bus(&mut self, session: &str, recv: Result<MuxEvent, RecvError>) -> bool {
+    /// A pane event outside `scope` is another backend's or session's and is
+    /// dropped before it can touch anything (see the module doc).
+    fn on_bus(
+        &mut self,
+        session: &str,
+        scope: &EventScope,
+        recv: Result<MuxEvent, RecvError>,
+    ) -> bool {
         match recv {
+            Ok(MuxEvent::AgentStatusChanged(ev)) if ev.scope != *scope => {}
+            Ok(MuxEvent::PaneClosed(closed)) if closed.scope != *scope => {}
             Ok(MuxEvent::AgentStatusChanged(ev)) => {
                 if let Some(msg) = apply_status(&self.held, &ev) {
                     self.held.insert(msg.pane_id, msg.clone());
@@ -639,7 +674,7 @@ async fn watch_loop(
             }
             () = tokio::time::sleep_until(reread_due), if reread_wanted => st.start_read(&w),
             recv = events.recv() => {
-                if !st.on_bus(&session, recv) {
+                if !st.on_bus(&session, &w.scope, recv) {
                     break 'run Flow::BusClosed;
                 }
             }
@@ -1075,7 +1110,7 @@ pub(super) mod tests {
     #[tokio::test]
     async fn unknown_backend_token_is_invalid_argument() {
         let err = MuxrService::new()
-            .list_agents_impl(session_ref("tmux:dev"))
+            .list_agents_impl(session_ref("screen:dev"))
             .await
             .expect_err("unknown backend token must be rejected");
         assert_eq!(err.code(), tonic::Code::InvalidArgument);
@@ -1145,7 +1180,9 @@ pub(super) mod tests {
     use tokio::time::Instant;
     use tokio_stream::StreamExt;
 
-    use crate::multiplexer::events::{AgentStatusChanged, LayoutChanged, MuxEvent, PaneClosed};
+    use crate::multiplexer::events::{
+        AgentStatusChanged, EventScope, LayoutChanged, MuxEvent, PaneClosed,
+    };
     use crate::proto::{AgentEvent, AgentList, AgentMsg, agent_event::Kind};
 
     use super::{
@@ -1159,13 +1196,30 @@ pub(super) mod tests {
         broadcast::channel(crate::multiplexer::events::EVENT_BUS_CAPACITY).0
     }
 
+    /// The scope of every herdr event: the one collapsed session.
+    fn herdr_scope() -> EventScope {
+        EventScope::new(BackendKind::Herdr, crate::multiplexer::HERDR_SESSION)
+    }
+
+    /// A herdr status event for `pane`, in the space the fake's rows carry.
     fn status_event(
         pane: u32,
         status: AgentStatus,
         kind: Option<&str>,
         tab: Option<u64>,
     ) -> MuxEvent {
+        scoped_status_event(herdr_scope(), pane, status, kind, tab)
+    }
+
+    fn scoped_status_event(
+        scope: EventScope,
+        pane: u32,
+        status: AgentStatus,
+        kind: Option<&str>,
+        tab: Option<u64>,
+    ) -> MuxEvent {
         MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope,
             pane,
             workspace_id: format!("ws-{pane}"),
             workspace_name: None,
@@ -1176,6 +1230,10 @@ pub(super) mod tests {
             tab,
             synthetic: false,
         })
+    }
+
+    fn closed(scope: EventScope, pane: u32) -> MuxEvent {
+        MuxEvent::PaneClosed(PaneClosed { scope, pane })
     }
 
     fn kind(ev: Option<Result<AgentEvent, tonic::Status>>) -> Kind {
@@ -1324,7 +1382,7 @@ pub(super) mod tests {
         };
         assert_eq!(unknown.code(), tonic::Code::NotFound);
         assert_eq!(unknown.message(), "session: no such session");
-        let Err(token) = open(&service, "tmux:dev").await else {
+        let Err(token) = open(&service, "screen:dev").await else {
             panic!("an unknown backend token must not open a stream");
         };
         assert_eq!(token.code(), tonic::Code::InvalidArgument);
@@ -1405,6 +1463,7 @@ pub(super) mod tests {
     ) -> Watch {
         Watch {
             session: "herdr:herdr".to_owned(),
+            scope: herdr_scope(),
             lister: lister_for(inv),
             token: token.map(str::to_owned),
             validate: Arc::new(move |_| Ok(valid.load(Ordering::SeqCst))),
@@ -1598,18 +1657,115 @@ pub(super) mod tests {
         let inv = Inventory::with(two_agents());
         let (bus, mut rx) = started(&inv, QUIET).await;
 
-        bus.send(MuxEvent::PaneClosed(PaneClosed { pane: 3 }))
-            .expect("subscribed");
+        bus.send(closed(herdr_scope(), 3)).expect("subscribed");
         bus.send(MuxEvent::LayoutChanged(LayoutChanged {
             workspace_id: "ws-7".into(),
             tab: 700,
         }))
         .expect("subscribed");
-        bus.send(MuxEvent::PaneClosed(PaneClosed { pane: 7 }))
-            .expect("subscribed");
+        bus.send(closed(herdr_scope(), 7)).expect("subscribed");
 
         assert_eq!(kind(recv(&mut rx).await), Kind::RemovedPaneId(7));
         assert_eq!(inv.calls().len(), 1, "a closure needs no re-read");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tmux_pane_closing_never_removes_the_herdr_row_of_the_same_number() {
+        let inv = Inventory::with(two_agents());
+        let (bus, mut rx) = started(&inv, QUIET).await;
+
+        // tmux's %7 closes; the herdr stream holds herdr's pane 7.
+        bus.send(closed(EventScope::new(BackendKind::Tmux, "work"), 7))
+            .expect("subscribed");
+        // Then a herdr event the stream does act on, to prove the first was
+        // read and dropped rather than still queued.
+        bus.send(closed(herdr_scope(), 9)).expect("subscribed");
+        assert_eq!(kind(recv(&mut rx).await), Kind::RemovedPaneId(9));
+
+        // Pane 7 is still held: its own change takes the fast path.
+        bus.send(status_event(
+            7,
+            AgentStatus::Working,
+            Some("cli-a"),
+            Some(700),
+        ))
+        .expect("subscribed");
+        let msg = changed(recv(&mut rx).await);
+        assert_eq!(msg.pane_id, 7);
+        assert_eq!(msg.status, WireStatus::Working as i32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_foreign_status_event_is_neither_applied_nor_re_read() {
+        let inv = Inventory::with(two_agents());
+        let (bus, mut rx) = started(&inv, QUIET).await;
+
+        // Same pane, kind, tab and space as a held row, other scopes: another
+        // backend, and the same backend's other session.
+        for scope in [
+            EventScope::new(BackendKind::Tmux, "herdr"),
+            EventScope::new(BackendKind::Herdr, "other"),
+        ] {
+            bus.send(scoped_status_event(
+                scope,
+                9,
+                AgentStatus::Blocked,
+                Some("cli-b"),
+                Some(900),
+            ))
+            .expect("subscribed");
+        }
+        // Well past several debounce windows: nothing was marked stale.
+        tokio::time::sleep(QUIET.list_debounce * 5).await;
+        assert_eq!(inv.calls().len(), 1, "the snapshot only, no re-read");
+
+        // The next message is the in-scope closure, not a foreign `changed`.
+        bus.send(closed(herdr_scope(), 7)).expect("subscribed");
+        assert_eq!(kind(recv(&mut rx).await), Kind::RemovedPaneId(7));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_tmux_stream_takes_its_own_sessions_events_on_the_fast_path() {
+        let inv = Inventory::with(two_agents());
+        let tmux = EventScope::new(BackendKind::Tmux, "work");
+        let bus = bus();
+        let w = Watch {
+            session: "tmux:work".to_owned(),
+            scope: tmux.clone(),
+            ..watch(&inv, Some("tok"), true, QUIET)
+        };
+        let mut rx = start_watch(w, Some(bus.subscribe()))
+            .await
+            .expect("the watch starts");
+        let _ = panes_of(&kind(recv(&mut rx).await));
+
+        // herdr's pane 9 and the tmux session "play"'s %9 are not this one.
+        bus.send(status_event(9, AgentStatus::Done, Some("cli-b"), Some(900)))
+            .expect("subscribed");
+        bus.send(scoped_status_event(
+            EventScope::new(BackendKind::Tmux, "play"),
+            9,
+            AgentStatus::Done,
+            Some("cli-b"),
+            Some(900),
+        ))
+        .expect("subscribed");
+        bus.send(scoped_status_event(
+            tmux,
+            9,
+            AgentStatus::Blocked,
+            Some("cli-b"),
+            Some(900),
+        ))
+        .expect("subscribed");
+        let msg = changed(recv(&mut rx).await);
+        assert_eq!(msg.pane_id, 9);
+        assert_eq!(
+            msg.status,
+            WireStatus::Blocked as i32,
+            "the in-scope event is the first applied"
+        );
+        assert_eq!(inv.calls().len(), 1, "applied before any re-read");
     }
 
     #[tokio::test(start_paused = true)]
@@ -1949,8 +2105,7 @@ pub(super) mod tests {
         .expect("the re-read starts");
 
         // While it is out, a closure still goes through at once…
-        bus.send(MuxEvent::PaneClosed(PaneClosed { pane: 7 }))
-            .expect("subscribed");
+        bus.send(closed(herdr_scope(), 7)).expect("subscribed");
         assert_eq!(kind(recv(&mut rx).await), Kind::RemovedPaneId(7));
         // …and the client leaving ends the task without waiting for the backend.
         drop(rx);

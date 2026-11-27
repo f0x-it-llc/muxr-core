@@ -20,6 +20,7 @@ use std::sync::OnceLock;
 
 use anyhow::{Result, bail};
 
+use super::tmux::paths::TmuxSocket;
 use crate::cli::BackendKind;
 
 // ── Constants ──────────────────────────────────────────────────────────────────
@@ -374,6 +375,77 @@ pub fn probe_herdr() -> bool {
     }
 }
 
+/// Probe whether a usable tmux is installed.
+///
+/// Passes when `tmux -V` runs and reports 3.5 or newer and the socket resolves
+/// and passes [`TmuxSocket::check_socket_path`]. A running server is NOT
+/// required: whether `tmux -L <name>|-S <path> list-sessions` answers is only
+/// logged. A version below the floor logs a warning naming the 3.5a floor and
+/// the version found; a refused socket logs a warning naming the problem.
+///
+/// **Blocking** — run before the Tokio runtime exists, like the other probes.
+pub fn probe_tmux() -> bool {
+    use super::tmux::paths::{tmux_bin, tmux_version};
+
+    let version = match tmux_version() {
+        Ok(v) => v,
+        Err(e) => {
+            log::debug!("probe_tmux: {e:#}");
+            return false;
+        }
+    };
+    if !version.meets_floor() {
+        log::warn!(
+            "probe_tmux: tmux {version} is older than the supported floor \
+             (tmux 3.5a); tmux backend disabled"
+        );
+        return false;
+    }
+
+    let socket = match checked_tmux_socket() {
+        Ok(socket) => socket,
+        Err(e) => {
+            log::warn!("probe_tmux: tmux backend disabled: {e:#}");
+            return false;
+        }
+    };
+    let answered = std::process::Command::new(tmux_bin())
+        .args(socket.base_args())
+        .arg("list-sessions")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|s| s.success());
+    log::info!(
+        "probe_tmux: tmux {version}; server on {} {}",
+        socket.display_path().display(),
+        if answered {
+            "is running"
+        } else {
+            "is not running (it starts with the first session)"
+        }
+    );
+    true
+}
+
+/// The environment's tmux socket, refused when it does not resolve or fails
+/// [`TmuxSocket::check_socket_path`].
+fn checked_tmux_socket() -> Result<TmuxSocket> {
+    let socket = TmuxSocket::resolve()?;
+    socket.check_socket_path()?;
+    Ok(socket)
+}
+
+/// Why a requested tmux backend is unavailable: a refused socket when that is
+/// the cause, otherwise the missing or too-old binary.
+fn tmux_unavailable_reason() -> String {
+    match checked_tmux_socket() {
+        Err(e) => format!("{e:#}"),
+        Ok(_) => "tmux 3.5a or newer was not found on PATH".to_owned(),
+    }
+}
+
 // ── Backend selection ─────────────────────────────────────────────────────────
 
 /// Determine which backends are usable at startup.
@@ -384,10 +456,13 @@ pub fn probe_herdr() -> bool {
 ///   its probe passes, or `Err("requested backend {kind} not available: …")`;
 ///   for zellij the reason says what was found and names the supported
 ///   versions.
-/// - `None` — probe all backends in declaration order (zellij first, then
-///   herdr); return the subset that passes.  If **none** pass, returns
-///   `Err("No usable backend: install a supported zellij (…) or start herdr")`,
-///   the parentheses naming the supported versions.
+///   With an explicit kind ONLY that probe runs, and its failure is an error
+///   even when another backend would pass.
+/// - `None` — probe all backends in declaration order (zellij, herdr, tmux);
+///   return the subset that passes.  If **none** pass, returns
+///   `Err("No usable backend: install a supported zellij (…), start herdr, or
+///   install tmux 3.5a or newer")`, the parentheses naming the supported
+///   versions.
 ///
 /// ### Thread safety
 ///
@@ -400,6 +475,7 @@ pub fn detect_backends(override_kind: Option<BackendKind>) -> Result<Vec<Backend
             let ok = match kind {
                 BackendKind::Zellij => probe_zellij(),
                 BackendKind::Herdr => probe_herdr(),
+                BackendKind::Tmux => probe_tmux(),
             };
             if ok {
                 Ok(vec![kind])
@@ -407,6 +483,7 @@ pub fn detect_backends(override_kind: Option<BackendKind>) -> Result<Vec<Backend
                 let reason = match kind {
                     BackendKind::Zellij => zellij_unavailable_reason(),
                     BackendKind::Herdr => "probe failed".to_owned(),
+                    BackendKind::Tmux => tmux_unavailable_reason(),
                 };
                 bail!("requested backend {kind} not available: {reason}");
             }
@@ -419,9 +496,13 @@ pub fn detect_backends(override_kind: Option<BackendKind>) -> Result<Vec<Backend
             if probe_herdr() {
                 available.push(BackendKind::Herdr);
             }
+            if probe_tmux() {
+                available.push(BackendKind::Tmux);
+            }
             if available.is_empty() {
                 bail!(
-                    "No usable backend: install a supported zellij ({}) or start herdr",
+                    "No usable backend: install a supported zellij ({}), start herdr, \
+                     or install tmux 3.5a or newer",
                     supported_zellij_description()
                 );
             }
