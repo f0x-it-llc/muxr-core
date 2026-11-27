@@ -56,6 +56,12 @@ pub enum ControlRequest {
     Shutdown,
     /// Ask the server for its status (version / bind / pid / uptime).
     Status,
+    /// Turn host monitoring on or off at runtime. The choice is persisted to
+    /// the config file (`monitoring` key).
+    SetMonitoring {
+        /// The desired state.
+        enabled: bool,
+    },
 }
 
 /// A response from the running server.
@@ -65,6 +71,9 @@ pub enum ControlResponse {
     Ok,
     /// Status payload (reply to [`ControlRequest::Status`]).
     Status(StatusInfo),
+    /// The request took effect at runtime but a follow-up step failed
+    /// (e.g. persisting `monitoring` to the config file). Carries the message.
+    Error(String),
 }
 
 /// Server status reported over the control socket.
@@ -115,6 +124,11 @@ pub struct StatusInfo {
     /// server (pre-dating this field) still deserialises fine.
     #[serde(default)]
     pub latest_version: Option<String>,
+    /// Whether host monitoring is currently on (read from the live monitor
+    /// handle at query time). `#[serde(default)]` so a message from an older
+    /// server (pre-dating this field) still deserialises fine.
+    #[serde(default)]
+    pub monitoring_enabled: bool,
 }
 
 /// Path to the control socket: `data_dir()/control.sock`.
@@ -202,38 +216,95 @@ fn query_at(path: &Path, req: &ControlRequest, timeout: Duration) -> Result<Cont
 /// Shared shutdown trigger: a oneshot sender consumed on the first `Shutdown`.
 type ShutdownTrigger = Mutex<Option<tokio::sync::oneshot::Sender<()>>>;
 
+/// Persists the `monitoring` choice; [`config::set_monitoring`] in production.
+pub type PersistMonitoring = Box<dyn Fn(bool) -> Result<()> + Send + Sync>;
+
+/// Everything the request handler reads or acts on, so [`handle_request`] can
+/// be driven without a socket.
+pub struct ControlContext {
+    /// The effective server bind address (reported in `Status`).
+    pub bind_addr: String,
+    /// The instant the server began (for `uptime_secs`).
+    pub started_at: Instant,
+    /// Fired the first time a `Shutdown` request arrives.
+    pub shutdown: ShutdownTrigger,
+    /// Per-session attached-client registry (total count in `Status`).
+    pub clients: crate::client_count::SessionClients,
+    /// The active TLS / transport mode reported in `Status`.
+    pub cert_mode: CertMode,
+    /// The resolved push-notification relay URL (or `None` when disabled).
+    pub notify_relay_url: Option<String>,
+    /// Push-device registry; counted afresh on every `Status`.
+    pub push_devices: crate::notify::devices::PushDeviceStore,
+    /// State the daily update check writes; read afresh on every `Status`.
+    pub update: crate::update::UpdateState,
+    /// The host-monitoring switch.
+    pub monitor: crate::monitor::MonitorHandle,
+    /// The tokio runtime to enter before touching `monitor`: the accept loop
+    /// runs on a plain OS thread, and enabling the monitor spawns a task.
+    pub runtime: tokio::runtime::Handle,
+    /// Persists the monitoring choice.
+    pub persist_monitoring: PersistMonitoring,
+}
+
+/// Answer one control request. Callable from any thread: runtime-dependent
+/// work enters [`ControlContext::runtime`] itself.
+pub fn handle_request(req: &ControlRequest, ctx: &ControlContext) -> ControlResponse {
+    match req {
+        ControlRequest::Status => ControlResponse::Status(StatusInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            bind_addr: ctx.bind_addr.clone(),
+            pid: std::process::id(),
+            uptime_secs: ctx.started_at.elapsed().as_secs(),
+            client_count: ctx.clients.total_count(),
+            cert_mode: ctx.cert_mode,
+            notify_relay_url: ctx.notify_relay_url.clone(),
+            push_device_count: ctx.push_devices.count().unwrap_or_else(|e| {
+                log::warn!("control: failed to read push device count: {e:#}");
+                0
+            }),
+            latest_version: ctx.update.latest(),
+            monitoring_enabled: ctx.monitor.is_enabled(),
+        }),
+        ControlRequest::Shutdown => {
+            log::info!("control: shutdown requested");
+            if let Some(tx) = ctx.shutdown.lock().unwrap().take() {
+                let _ = tx.send(());
+            }
+            ControlResponse::Ok
+        }
+        ControlRequest::SetMonitoring { enabled } => {
+            log::info!("control: set monitoring = {enabled}");
+            {
+                let _guard = ctx.runtime.enter();
+                ctx.monitor.set_enabled(*enabled);
+            }
+            match (ctx.persist_monitoring)(*enabled) {
+                Ok(()) => ControlResponse::Ok,
+                Err(e) => {
+                    log::warn!("control: monitoring flipped but not persisted: {e:#}");
+                    ControlResponse::Error(format!(
+                        "monitoring is now {} but could not be saved to the config file: {e:#}",
+                        if *enabled { "on" } else { "off" }
+                    ))
+                }
+            }
+        }
+    }
+}
+
 /// Spawn the control-socket accept loop on a dedicated OS thread.
 ///
-/// `bind_addr` is the effective server bind address (reported in `Status`).
-/// `started_at` is the instant the server began (for `uptime_secs`).
-/// `shutdown_tx` is fired the first time a `Shutdown` request arrives; it should
-/// be the trigger side of a `serve_with_shutdown` future.
-/// `clients` is a cloneable handle to the per-session attached-client registry
-/// used to report the total client count in `Status` responses.
-/// `cert_mode` is the active TLS / transport mode reported in `Status` responses.
-/// `notify_relay_url` is the resolved push-notification relay URL (or `None`
-/// when disabled), reported verbatim in `Status` responses. `push_devices` is
-/// a cheap-to-clone handle to the push-device registry; `push_device_count` is
-/// computed by a **fresh read** of it on every `Status` request (no snapshot
-/// taken at listener-spawn time), so it stays accurate as devices are
-/// registered/removed while the server runs. A read failure (e.g. a corrupt
-/// sidecar) degrades to `0` rather than failing the whole `Status` response.
-/// `update` is the state the daily update check writes; `latest_version` is
-/// likewise read from it on every `Status` request.
+/// `ctx` carries every input of the `Status` reply and the monitoring switch
+/// (see [`ControlContext`]); `push_device_count` and `latest_version` are read
+/// afresh on every `Status` request, so they stay accurate while the server
+/// runs. A push-store read failure degrades to `0` rather than failing the
+/// whole response. `ctx.shutdown` fires the first time a `Shutdown` request
+/// arrives; it should be the trigger side of a `serve_with_shutdown` future.
 ///
 /// The socket is bound up-front (so a `status`/`stop` race right after start
 /// still finds it) and removed by the caller on exit (see [`cleanup`]).
-#[allow(clippy::too_many_arguments)] // each argument is one independent Status input; see doc above
-pub fn spawn_listener(
-    bind_addr: String,
-    started_at: Instant,
-    shutdown_tx: tokio::sync::oneshot::Sender<()>,
-    clients: crate::client_count::SessionClients,
-    cert_mode: CertMode,
-    notify_relay_url: Option<String>,
-    push_devices: crate::notify::devices::PushDeviceStore,
-    update: crate::update::UpdateState,
-) -> Result<()> {
+pub fn spawn_listener(ctx: ControlContext) -> Result<()> {
     let path = socket_path()?;
 
     // Remove any stale socket file from a previous (crashed) run; ipc_bind
@@ -245,9 +316,6 @@ pub fn spawn_listener(
 
     let listener = zellij_utils::consts::ipc_bind(&path)
         .with_context(|| format!("control: bind {}", path.display()))?;
-
-    let trigger: std::sync::Arc<ShutdownTrigger> =
-        std::sync::Arc::new(Mutex::new(Some(shutdown_tx)));
 
     std::thread::Builder::new()
         .name("muxrd-control".to_string())
@@ -267,29 +335,7 @@ pub fn spawn_listener(
                         continue;
                     }
                 };
-                let resp = match req {
-                    ControlRequest::Status => ControlResponse::Status(StatusInfo {
-                        version: env!("CARGO_PKG_VERSION").to_string(),
-                        bind_addr: bind_addr.clone(),
-                        pid: std::process::id(),
-                        uptime_secs: started_at.elapsed().as_secs(),
-                        client_count: clients.total_count(),
-                        cert_mode,
-                        notify_relay_url: notify_relay_url.clone(),
-                        push_device_count: push_devices.count().unwrap_or_else(|e| {
-                            log::warn!("control: failed to read push device count: {e:#}");
-                            0
-                        }),
-                        latest_version: update.latest(),
-                    }),
-                    ControlRequest::Shutdown => {
-                        log::info!("control: shutdown requested");
-                        if let Some(tx) = trigger.lock().unwrap().take() {
-                            let _ = tx.send(());
-                        }
-                        ControlResponse::Ok
-                    }
-                };
+                let resp = handle_request(&req, &ctx);
                 if let Err(e) = write_msg(&mut stream, &resp) {
                     log::warn!("control: failed to write response: {e:#}");
                 }
@@ -317,6 +363,53 @@ mod tests {
     use super::*;
     use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
+    /// A bound throwaway control socket that removes its file on drop, so a
+    /// failing assertion cannot leak it.
+    struct SocketFixture {
+        path: PathBuf,
+        listener: Option<interprocess::local_socket::Listener>,
+    }
+
+    impl SocketFixture {
+        fn bind(tag: &str, secs: u64) -> Self {
+            // Keep the path short (see the sun_path note in the tests below).
+            let path =
+                std::env::temp_dir().join(format!("mxc{}_{tag}{secs}.sock", std::process::id()));
+            let _ = std::fs::remove_file(&path);
+            let listener = zellij_utils::consts::ipc_bind(&path).expect("bind fake control socket");
+            Self {
+                path,
+                listener: Some(listener),
+            }
+        }
+
+        fn take_listener(&mut self) -> interprocess::local_socket::Listener {
+            self.listener.take().expect("listener already taken")
+        }
+    }
+
+    impl Drop for SocketFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+
+    /// A failing assertion inside the fixture's scope must not leave the
+    /// socket file behind.
+    #[test]
+    fn socket_fixture_removes_its_file_when_the_test_panics() {
+        let path = std::sync::Mutex::new(None::<PathBuf>);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let fixture = SocketFixture::bind("leak", 0);
+            *path.lock().unwrap() = Some(fixture.path.clone());
+            assert!(fixture.path.exists(), "fixture should have bound");
+            panic!("deliberate assertion failure inside the fixture");
+        }));
+        assert!(result.is_err());
+        let path = path.lock().unwrap().take().expect("path recorded");
+        assert!(!path.exists(), "socket file leaked after a panic");
+    }
+
     /// A peer that accepts the connection and never reads/replies must not
     /// hang `query_at` forever — the bounded recv timeout must fire and the
     /// call must return `Err` well within a generous margin around the bound.
@@ -332,10 +425,9 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock")
             .as_secs();
-        let sock_path = std::env::temp_dir().join(format!("mxc{}_{secs}.sock", std::process::id()));
-
-        let listener =
-            zellij_utils::consts::ipc_bind(&sock_path).expect("bind fake control socket");
+        let mut fixture = SocketFixture::bind("silent", secs);
+        let sock_path = fixture.path.clone();
+        let listener = fixture.take_listener();
 
         // Accept exactly one connection and hold it open without ever
         // reading or replying — simulating a wedged control thread.
@@ -355,8 +447,6 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "query_at took {elapsed:?}, expected to bail near the {timeout:?} bound"
         );
-
-        let _ = std::fs::remove_file(&sock_path);
     }
 
     /// A path with no socket present must fail fast (no timeout involved).
@@ -441,6 +531,7 @@ mod tests {
             notify_relay_url: Some("https://noti.muxr.app".to_owned()),
             push_device_count: 3,
             latest_version: Some("0.2.6".to_owned()),
+            monitoring_enabled: true,
         };
         let json = serde_json::to_string(&info).expect("serialize");
         let round_tripped: StatusInfo = serde_json::from_str(&json).expect("deserialize");
@@ -448,5 +539,110 @@ mod tests {
         assert_eq!(round_tripped.notify_relay_url, info.notify_relay_url);
         assert_eq!(round_tripped.push_device_count, info.push_device_count);
         assert_eq!(round_tripped.latest_version, Some("0.2.6".to_owned()));
+        assert!(round_tripped.monitoring_enabled);
+    }
+
+    /// A payload from a server one release back — everything except
+    /// `monitoring_enabled` — still deserialises, with monitoring off.
+    #[test]
+    fn status_info_deserializes_from_pre_monitoring_payload() {
+        let previous_json = serde_json::json!({
+            "version": "0.5.5",
+            "bind_addr": "127.0.0.1:50051",
+            "pid": 1234,
+            "uptime_secs": 42,
+            "client_count": 1,
+            "cert_mode": "self_signed",
+            "notify_relay_url": null,
+            "push_device_count": 2,
+            "latest_version": "0.5.6",
+        });
+        let info: StatusInfo =
+            serde_json::from_value(previous_json).expect("0.5.5 StatusInfo must deserialize");
+        assert_eq!(info.latest_version.as_deref(), Some("0.5.6"));
+        assert!(!info.monitoring_enabled);
+    }
+
+    // ── handle_request ────────────────────────────────────────────────────────
+
+    fn test_ctx(
+        rt: &tokio::runtime::Runtime,
+        persist: PersistMonitoring,
+    ) -> (ControlContext, tokio::sync::watch::Sender<bool>) {
+        let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+        let (shutdown_tx, _shutdown_rx) = tokio::sync::oneshot::channel();
+        let ctx = ControlContext {
+            bind_addr: "127.0.0.1:1".to_owned(),
+            started_at: Instant::now(),
+            shutdown: Mutex::new(Some(shutdown_tx)),
+            clients: Default::default(),
+            cert_mode: CertMode::SelfSigned,
+            notify_relay_url: None,
+            // A path that does not exist: counting reads nothing from the
+            // user's data dir.
+            push_devices: crate::notify::devices::PushDeviceStore::at_path(
+                std::env::temp_dir().join("muxrd-control-test-no-such-devices.json"),
+            ),
+            update: Default::default(),
+            monitor: crate::monitor::MonitorHandle::new(stop_rx),
+            runtime: rt.handle().clone(),
+            persist_monitoring: persist,
+        };
+        (ctx, stop_tx)
+    }
+
+    fn status_monitoring(ctx: &ControlContext) -> bool {
+        match handle_request(&ControlRequest::Status, ctx) {
+            ControlResponse::Status(info) => info.monitoring_enabled,
+            other => panic!("unexpected response {other:?}"),
+        }
+    }
+
+    /// Driven from a plain std thread, like the accept loop: enabling must
+    /// enter the supplied runtime rather than panic, and persist the choice.
+    #[test]
+    fn set_monitoring_from_a_plain_thread_flips_persists_and_reports() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let persisted = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
+        let sink = persisted.clone();
+        let (ctx, _stop) = test_ctx(
+            &rt,
+            Box::new(move |v| {
+                sink.lock().unwrap().push(v);
+                Ok(())
+            }),
+        );
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                assert!(!status_monitoring(&ctx));
+                let r = handle_request(&ControlRequest::SetMonitoring { enabled: true }, &ctx);
+                assert!(matches!(r, ControlResponse::Ok), "{r:?}");
+                assert!(status_monitoring(&ctx));
+                let r = handle_request(&ControlRequest::SetMonitoring { enabled: false }, &ctx);
+                assert!(matches!(r, ControlResponse::Ok), "{r:?}");
+                assert!(!status_monitoring(&ctx));
+            })
+            .join()
+            .unwrap();
+        });
+        assert_eq!(*persisted.lock().unwrap(), vec![true, false]);
+    }
+
+    #[test]
+    fn set_monitoring_persist_failure_still_flips_and_reports_an_error() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let (ctx, _stop) = test_ctx(&rt, Box::new(|_| anyhow::bail!("disk full")));
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let r = handle_request(&ControlRequest::SetMonitoring { enabled: true }, &ctx);
+                match r {
+                    ControlResponse::Error(msg) => assert!(msg.contains("disk full"), "{msg}"),
+                    other => panic!("expected Error, got {other:?}"),
+                }
+                assert!(status_monitoring(&ctx), "runtime state must still flip");
+            })
+            .join()
+            .unwrap();
+        });
     }
 }

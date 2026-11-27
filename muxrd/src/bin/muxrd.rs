@@ -646,6 +646,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         cfg.notify_relay_url.clone(),
         cfg.notify_verbosity.clone(),
         cfg.update_check,
+        cfg.monitoring,
     ));
 
     // Foreground cleanup (in daemon mode daemonize owns the pidfile).
@@ -713,7 +714,9 @@ fn cert_identity(
 /// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
 /// `"generic"`) drives the outbound notifier's payload text.
 /// `update_check` decides whether the daily check for a newer release is
-/// spawned (`config::EffectiveConfig::update_check`).
+/// spawned (`config::EffectiveConfig::update_check`). `monitoring` turns the
+/// host monitor on at start (`config::EffectiveConfig::monitoring`); it can be
+/// flipped later over the control socket.
 #[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
 async fn serve(
     addr: std::net::SocketAddr,
@@ -727,6 +730,7 @@ async fn serve(
     notify_relay_url: Option<String>,
     notify_verbosity: String,
     update_check: bool,
+    monitoring: bool,
 ) -> Result<()> {
     install_crypto_provider();
 
@@ -795,7 +799,26 @@ async fn serve(
     // check task that writes it (spawned below, when enabled).
     let update_state = muxrd::update::UpdateState::default();
 
+    // A clone-able shutdown signal: the control-socket oneshot drives
+    // `serve_with_shutdown` exactly as before; when it fires we also flip this
+    // `watch` so long-lived background tasks (the event kernels, the notifier,
+    // the update check, the host monitor) observe the same shutdown and exit
+    // cleanly. Each task takes its own receiver.
+    let (kernel_shutdown_tx, _kernel_shutdown_rx) = tokio::sync::watch::channel(false);
+
+    // One host monitor, disabled until switched on: by config/env here, or at
+    // runtime over the control socket. Enabling spawns the sampler task, so
+    // it happens here, inside the runtime. Off means no task exists at all.
+    let monitor = muxrd::monitor::MonitorHandle::new(kernel_shutdown_tx.subscribe());
+    if monitoring {
+        monitor.set_enabled(true);
+        log::info!("monitoring: enabled");
+    } else {
+        log::info!("monitoring: disabled");
+    }
+
     let service = MuxrService::with_backends(backends)
+        .with_monitor(monitor.clone())
         .with_notify_relay_url(notify_relay_url.clone())
         .with_push_device_store(push_devices.clone())
         .with_event_bus(event_bus.clone())
@@ -816,25 +839,24 @@ async fn serve(
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    // A clone-able shutdown signal: the control-socket oneshot drives
-    // `serve_with_shutdown` exactly as before; when it fires we also flip this
-    // `watch` so long-lived background tasks (the event kernels, the notifier,
-    // the update check) observe the same shutdown and exit cleanly. Each task
-    // takes its own receiver.
-    let (kernel_shutdown_tx, _kernel_shutdown_rx) = tokio::sync::watch::channel(false);
     // Pass the cert_mode + notify_relay_url so `status` can report the active
     // transport mode and push-notification configuration; push_devices lets the
     // listener report a live (not snapshotted) device count.
-    control::spawn_listener(
-        bind_addr.clone(),
-        Instant::now(),
-        shutdown_tx,
-        service.clients(),
+    control::spawn_listener(control::ControlContext {
+        bind_addr: bind_addr.clone(),
+        started_at: Instant::now(),
+        shutdown: std::sync::Mutex::new(Some(shutdown_tx)),
+        clients: service.clients(),
         cert_mode,
         notify_relay_url,
         push_devices,
-        update_state.clone(),
-    )
+        update: update_state.clone(),
+        monitor,
+        // The accept loop runs on a plain OS thread; it enters this runtime
+        // before enabling the monitor.
+        runtime: tokio::runtime::Handle::current(),
+        persist_monitoring: Box::new(muxrd::config::set_monitoring),
+    })
     .context("failed to start control socket")?;
 
     // ── Daily update check ───────────────────────────────────────────────────
@@ -963,6 +985,10 @@ fn cmd_status(_bind_override: Option<&str>) -> Result<()> {
                 Some(url) => println!("  notify    : {url} ({} device(s))", info.push_device_count),
                 None => println!("  notify    : disabled"),
             }
+            println!(
+                "  monitoring: {}",
+                if info.monitoring_enabled { "on" } else { "off" }
+            );
             Ok(())
         }
         Ok(other) => {

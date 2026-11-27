@@ -24,7 +24,7 @@
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Default bind address used when nothing else overrides it.
 pub const DEFAULT_BIND: &str = "127.0.0.1:50051";
@@ -46,6 +46,13 @@ pub const DEFAULT_UPDATE_CHECK: bool = true;
 /// Environment variable that overrides the `update_check` config key.
 pub const UPDATE_CHECK_ENV: &str = "MUXRD_UPDATE_CHECK";
 
+/// Whether host monitoring (the sampler behind `host-vitals`) runs when
+/// nothing overrides it.
+pub const DEFAULT_MONITORING: bool = false;
+
+/// Environment variable that overrides the `monitoring` config key.
+pub const MONITORING_ENV: &str = "MUXRD_MONITORING";
+
 /// The raw on-disk config (all fields optional; missing → use defaults).
 #[derive(Debug, Default, Deserialize, Serialize)]
 struct FileConfig {
@@ -62,6 +69,9 @@ struct FileConfig {
     /// Daily check of github.com for a newer muxrd release. `None` falls back
     /// to [`DEFAULT_UPDATE_CHECK`]; [`UPDATE_CHECK_ENV`] overrides the file.
     update_check: Option<bool>,
+    /// Host monitoring. `None` falls back to [`DEFAULT_MONITORING`];
+    /// [`MONITORING_ENV`] overrides the file.
+    monitoring: Option<bool>,
 }
 
 /// The fully-resolved effective configuration.
@@ -88,6 +98,8 @@ pub struct EffectiveConfig {
     /// Whether the daemon asks github.com once a day for a newer muxrd
     /// release. `false` means it makes no such request at all.
     pub update_check: bool,
+    /// Whether host monitoring is on at start. Off by default.
+    pub monitoring: bool,
 }
 
 impl EffectiveConfig {
@@ -100,7 +112,8 @@ impl EffectiveConfig {
              config_file      = {}\n\
              notify_relay_url = {}\n\
              notify_verbosity = {}\n\
-             update_check     = {}",
+             update_check     = {}\n\
+             monitoring       = {}",
             self.bind_addr,
             self.cert_dir.display(),
             self.log_path.display(),
@@ -108,6 +121,7 @@ impl EffectiveConfig {
             self.notify_relay_url.as_deref().unwrap_or("(disabled)"),
             self.notify_verbosity,
             self.update_check,
+            self.monitoring,
         )
     }
 }
@@ -431,6 +445,21 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
     };
     let update_check = resolve_update_check(update_check_env.as_deref(), file_cfg.update_check)?;
 
+    // monitoring: MUXRD_MONITORING env > config file > default (off).
+    let monitoring_env = match std::env::var(MONITORING_ENV) {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            anyhow::bail!("{MONITORING_ENV} is not valid UTF-8")
+        }
+    };
+    let monitoring = resolve_bool_env(
+        MONITORING_ENV,
+        monitoring_env.as_deref(),
+        file_cfg.monitoring,
+        DEFAULT_MONITORING,
+    )?;
+
     Ok(EffectiveConfig {
         bind_addr,
         cert_dir,
@@ -439,6 +468,7 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
         notify_relay_url,
         notify_verbosity,
         update_check,
+        monitoring,
     })
 }
 
@@ -450,17 +480,27 @@ pub fn resolve(bind_override: Option<&str>) -> Result<EffectiveConfig> {
 /// fallback, so a typo cannot leave the check running against the operator's
 /// intent.
 fn resolve_update_check(env: Option<&str>, file: Option<bool>) -> Result<bool> {
+    resolve_bool_env(UPDATE_CHECK_ENV, env, file, DEFAULT_UPDATE_CHECK)
+}
+
+/// Strict boolean resolution shared by the env-overridable boolean keys:
+/// env (named `var` in errors) > file > `default`. See
+/// [`resolve_update_check`] for the accepted spellings.
+fn resolve_bool_env(
+    var: &str,
+    env: Option<&str>,
+    file: Option<bool>,
+    default: bool,
+) -> Result<bool> {
     let env = env.map(str::trim).filter(|v| !v.is_empty());
     if let Some(raw) = env {
         return match raw.to_ascii_lowercase().as_str() {
             "0" | "false" | "off" | "no" => Ok(false),
             "1" | "true" | "on" | "yes" => Ok(true),
-            _ => anyhow::bail!(
-                "{UPDATE_CHECK_ENV} must be one of 0/false/off/no or 1/true/on/yes, got '{raw}'"
-            ),
+            _ => anyhow::bail!("{var} must be one of 0/false/off/no or 1/true/on/yes, got '{raw}'"),
         };
     }
-    Ok(file.unwrap_or(DEFAULT_UPDATE_CHECK))
+    Ok(file.unwrap_or(default))
 }
 
 /// Normalize + validate a raw `notify_relay_url` value.
@@ -516,15 +556,37 @@ fn resolve_notify_verbosity(raw: Option<&str>) -> Result<String> {
 pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
     // Ensure the file exists (idempotent; writes a template when absent).
     let path = ensure_config_file()?;
+    update_file_config(&path, |cfg| cfg.bind_addr = Some(bind_addr.to_owned()))?;
+    log::info!(
+        "config: set bind_addr = {bind_addr:?} in {}",
+        path.display()
+    );
+    Ok(())
+}
 
-    // Read the current content, falling back to defaults on parse errors so a
-    // corrupted file doesn't block the update.
-    let file_cfg: FileConfig = if path.exists() {
-        let raw = std::fs::read_to_string(&path)
-            .with_context(|| format!("set_bind_addr: read {}", path.display()))?;
+/// Persist `monitoring` into the config file (creating it from the template if
+/// absent), preserving all other fields.
+///
+/// Same atomic whole-struct rewrite as [`set_bind_addr`]. On a file that does
+/// not parse it keeps that behaviour: the file is replaced by defaults plus
+/// the one `monitoring` key.
+pub fn set_monitoring(enabled: bool) -> Result<()> {
+    let path = ensure_config_file()?;
+    update_file_config(&path, |cfg| cfg.monitoring = Some(enabled))?;
+    log::info!("config: set monitoring = {enabled} in {}", path.display());
+    Ok(())
+}
+
+/// Read `path` into a [`FileConfig`] (defaults when absent or unparsable),
+/// apply `mutate`, and write the whole struct back atomically: temp file in
+/// the same directory, `chmod 0600` (Unix), then `rename` over `path`.
+fn update_file_config(path: &Path, mutate: impl FnOnce(&mut FileConfig)) -> Result<()> {
+    let mut file_cfg: FileConfig = if path.exists() {
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("update config: read {}", path.display()))?;
         toml::from_str(&raw).unwrap_or_else(|e| {
             log::warn!(
-                "config: set_bind_addr: failed to parse {}: {e} — overwriting with defaults + new bind_addr",
+                "config: failed to parse {}: {e} — overwriting with defaults + the new key",
                 path.display()
             );
             FileConfig::default()
@@ -532,48 +594,35 @@ pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
     } else {
         FileConfig::default()
     };
+    mutate(&mut file_cfg);
+    let toml_str = toml::to_string_pretty(&file_cfg).context("update config: serialize")?;
 
-    // Update the bind_addr field and serialise.
-    let updated = FileConfig {
-        bind_addr: Some(bind_addr.to_owned()),
-        ..file_cfg
-    };
-    let toml_str = toml::to_string_pretty(&updated).context("set_bind_addr: serialize config")?;
-
-    // Write to a temporary file in the same directory as the target.
     let parent = path
         .parent()
         .context("config file has no parent directory")?;
     let temp_path = parent.join(".config.toml.tmp");
     std::fs::write(&temp_path, &toml_str)
-        .with_context(|| format!("set_bind_addr: write temp file {}", temp_path.display()))?;
+        .with_context(|| format!("update config: write temp file {}", temp_path.display()))?;
 
-    // Restrict permissions on the temp file before renaming (Unix).
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
         std::fs::set_permissions(&temp_path, perms).with_context(|| {
             format!(
-                "set_bind_addr: chmod 0600 temp file {}",
+                "update config: chmod 0600 temp file {}",
                 temp_path.display()
             )
         })?;
     }
 
-    // Atomically rename temp file over the real config (POSIX-atomic on same filesystem).
-    std::fs::rename(&temp_path, &path).with_context(|| {
+    std::fs::rename(&temp_path, path).with_context(|| {
         format!(
-            "set_bind_addr: rename {} to {}",
+            "update config: rename {} to {}",
             temp_path.display(),
             path.display()
         )
     })?;
-
-    log::info!(
-        "config: set bind_addr = {bind_addr:?} in {}",
-        path.display()
-    );
     Ok(())
 }
 
@@ -597,7 +646,10 @@ pub fn ensure_config_file() -> Result<PathBuf> {
              # notify_verbosity = \"{DEFAULT_NOTIFY_VERBOSITY}\" # \"normal\" | \"generic\"\n\
              #\n\
              # Daily check of github.com for a newer muxrd release; set false to disable.\n\
-             # update_check = {DEFAULT_UPDATE_CHECK}\n",
+             # update_check = {DEFAULT_UPDATE_CHECK}\n\
+             #\n\
+             # Host monitoring (CPU/memory/process vitals); off by default.\n\
+             # monitoring = {DEFAULT_MONITORING}\n",
             data_dir.display(),
             data_dir.join("muxrd.log").display(),
         );
@@ -769,6 +821,62 @@ mod tests {
             err.to_string().contains("'normal' or 'generic'"),
             "unexpected error: {err}"
         );
+    }
+
+    // ── monitoring: precedence and the path-taking writer ────────────────────
+
+    #[test]
+    fn monitoring_defaults_to_off() {
+        assert!(!resolve_bool_env(MONITORING_ENV, None, None, DEFAULT_MONITORING).unwrap());
+    }
+
+    #[test]
+    fn monitoring_precedence_and_strict_env() {
+        let r = |env, file| resolve_bool_env(MONITORING_ENV, env, file, DEFAULT_MONITORING);
+        assert!(r(None, Some(true)).unwrap());
+        assert!(!r(Some("0"), Some(true)).unwrap());
+        assert!(r(Some("1"), Some(false)).unwrap());
+        let err = r(Some("maybe"), None).unwrap_err();
+        assert!(err.to_string().contains("MUXRD_MONITORING"), "{err}");
+    }
+
+    fn temp_cfg_path(tag: &str) -> (PathBuf, PathBuf) {
+        let dir = std::env::temp_dir().join(format!("muxrd-cfg-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        (dir.clone(), dir.join("config.toml"))
+    }
+
+    #[test]
+    fn writer_round_trip_preserves_other_keys_on_a_temp_file() {
+        let (dir, path) = temp_cfg_path("rt");
+        update_file_config(&path, |c| c.monitoring = Some(true)).unwrap();
+        update_file_config(&path, |c| c.bind_addr = Some("0.0.0.0:1".into())).unwrap();
+        let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.monitoring, Some(true));
+        assert_eq!(cfg.bind_addr.as_deref(), Some("0.0.0.0:1"));
+        update_file_config(&path, |c| c.monitoring = Some(false)).unwrap();
+        let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.monitoring, Some(false));
+        assert_eq!(cfg.bind_addr.as_deref(), Some("0.0.0.0:1"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn writer_replaces_a_corrupt_file_with_defaults_plus_the_key() {
+        let (dir, path) = temp_cfg_path("corrupt");
+        std::fs::write(&path, "this is = = not toml [[[").unwrap();
+        update_file_config(&path, |c| c.monitoring = Some(true)).unwrap();
+        let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(cfg.monitoring, Some(true));
+        assert_eq!(cfg.bind_addr, None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── update_check: pure-function precedence ───────────────────────────────
