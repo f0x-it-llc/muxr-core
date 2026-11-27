@@ -31,10 +31,13 @@
 //!
 //! Every visible change rewrites the pane's [`AgentRow`]; an
 //! [`AgentStatusChanged`] is published only when the status or kind differs
-//! from the last one published for that pane. Events carry an empty
-//! `workspace_id` (tmux rows have no space), the session name as
-//! `workspace_name` (the push label) and always a kind and a tab, which the
-//! `WatchAgents` fast path requires.
+//! from the last one published for that pane. Every event carries the
+//! [`EventScope`] of the tmux backend and the watcher's current session name
+//! (the one after any rename), which is how consumers sharing the bus with
+//! herdr, or with another session's watcher, tell the panes apart. Status
+//! events also carry an empty `workspace_id` (tmux rows have no space), the
+//! session name as `workspace_name` (the push label) and always a kind and a
+//! tab, which the `WatchAgents` fast path requires.
 //!
 //! # Row ownership
 //!
@@ -47,6 +50,12 @@
 //! it, unless another session holds its row by then, and also when the
 //! backend already removed the row (it does so on pane close and session
 //! kill); a pane that never had an agent row closes silently.
+//!
+//! Events are scoped to the publishing watcher's session, so a moved pane's
+//! events change scope with its owner: the old session's [`PaneClosed`] (under
+//! the old name) and, after the takeover, the new session's status event
+//! (under the new name). A linked pane is published only under its owner's
+//! session, the one whose `list_agents` reports it.
 //!
 //! # Bounds
 //!
@@ -67,7 +76,8 @@ use super::backend::TmuxBackend;
 use super::commands::{PaneRow, SessionRow, Tmux, WindowRow};
 use super::control::{ClientFlag, CommandReply, ControlClient, Notification};
 use super::status::{self, Osc7501Scanner, PaneStatus, Report};
-use crate::multiplexer::events::{AgentStatusChanged, EventBus, MuxEvent, PaneClosed};
+use crate::cli::BackendKind;
+use crate::multiplexer::events::{AgentStatusChanged, EventBus, EventScope, MuxEvent, PaneClosed};
 use crate::multiplexer::types::AgentStatus;
 
 /// Environment variable capping the number of watched sessions.
@@ -927,8 +937,19 @@ fn drop_row(state: &AgentState, bus: &EventBus, session: &str, pane: u32, publis
         Holder::Nobody => {}
     }
     if published {
-        publish(bus, MuxEvent::PaneClosed(PaneClosed { pane }));
+        publish(
+            bus,
+            MuxEvent::PaneClosed(PaneClosed {
+                scope: tmux_scope(session),
+                pane,
+            }),
+        );
     }
+}
+
+/// The scope of an event published by the watcher of `session`.
+fn tmux_scope(session: &str) -> EventScope {
+    EventScope::new(BackendKind::Tmux, session)
 }
 
 /// Write `row` and publish it when its status or kind changed since the last
@@ -973,10 +994,11 @@ fn store(
     publish(
         bus,
         MuxEvent::AgentStatusChanged(AgentStatusChanged {
+            scope: tmux_scope(session),
             pane,
             workspace_id: String::new(),
-            // The session name labels pushes; `WatchAgents` matches on the
-            // (empty) `workspace_id` only.
+            // The session name labels pushes; `WatchAgents` matches the scope,
+            // then the (empty) `workspace_id`.
             workspace_name: Some(session.to_owned()),
             status,
             title,
@@ -1222,6 +1244,14 @@ mod tests {
         }
     }
 
+    /// The closure of `pane` as the watcher of `session` publishes it.
+    fn closed(session: &str, pane: u32) -> MuxEvent {
+        MuxEvent::PaneClosed(PaneClosed {
+            scope: EventScope::new(BackendKind::Tmux, session),
+            pane,
+        })
+    }
+
     fn status_events(events: &[MuxEvent]) -> Vec<&AgentStatusChanged> {
         events
             .iter()
@@ -1316,6 +1346,7 @@ mod tests {
         assert_eq!(events.len(), 1, "{events:?}");
         let ev = status_events(&events)[0];
         assert_eq!(ev.pane, 3);
+        assert_eq!(ev.scope, EventScope::new(BackendKind::Tmux, "s"));
         assert_eq!(ev.status, AgentStatus::Blocked);
         assert!(ev.workspace_id.is_empty());
         assert_eq!(ev.workspace_name.as_deref(), Some("s"), "the push label");
@@ -1432,11 +1463,7 @@ mod tests {
         r.feed(Notification::LayoutChange { window: 1 });
         r.watcher.maybe_relist(Instant::now() + RELIST_GAP);
         let events = r.events();
-        assert_eq!(
-            events,
-            [MuxEvent::PaneClosed(PaneClosed { pane: 5 })],
-            "{events:?}"
-        );
+        assert_eq!(events, [closed("s", 5)], "{events:?}");
         assert!(r.state.rows_for_session("s").is_empty());
         assert!(r.watcher.panes.is_empty());
     }
@@ -1571,7 +1598,7 @@ mod tests {
         });
         assert_eq!(
             r.events(),
-            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })],
+            [closed("s", 3)],
             "the agent exited: its row goes"
         );
         assert!(r.state.rows_for_session("s").is_empty());
@@ -1651,6 +1678,26 @@ mod tests {
     }
 
     #[test]
+    fn events_after_a_rename_carry_tmux_and_the_new_name() {
+        let mut r = rig(&[(3, "bash"), (5, "bash")]);
+        r.feed(report(3, "state=blocked:app=claude"));
+        r.events();
+        r.source.world().sessions = vec![session_row("t")];
+        r.feed(Notification::SessionRenamed { name: "t".into() });
+
+        r.feed(report(3, "state=done:app=claude"));
+        let events = r.events();
+        let ev = status_events(&events)[0];
+        assert_eq!(ev.scope, EventScope::new(BackendKind::Tmux, "t"));
+        assert_eq!(ev.workspace_name.as_deref(), Some("t"));
+        assert!(ev.workspace_id.is_empty());
+
+        r.source.world().panes.retain(|p| p.id != 3);
+        r.watcher.relist(Instant::now()).unwrap();
+        assert_eq!(r.events(), [closed("t", 3)], "closed under the new name");
+    }
+
+    #[test]
     fn another_sessions_rename_is_ignored() {
         // tmux tells every control client about every rename.
         let mut r = rig(&[(3, "bash")]);
@@ -1725,7 +1772,7 @@ mod tests {
         assert!(
             matches!(&events[0], MuxEvent::AgentStatusChanged(ev) if ev.status == AgentStatus::Done)
         );
-        assert_eq!(events[1], MuxEvent::PaneClosed(PaneClosed { pane: 3 }));
+        assert_eq!(events[1], closed("new", 3));
         assert!(state.rows_for_session("new").is_empty());
     }
 
@@ -1883,14 +1930,16 @@ mod tests {
 
         sa.world().panes.clear();
         a.relist(Instant::now()).unwrap();
-        assert_eq!(
-            drain(&mut rx),
-            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]
-        );
+        assert_eq!(drain(&mut rx), [closed("a", 3)]);
         b.tick(Instant::now());
         let events = drain(&mut rx);
         let ev = status_events(&events)[0];
         assert_eq!(ev.workspace_name.as_deref(), Some("b"));
+        assert_eq!(
+            ev.scope,
+            EventScope::new(BackendKind::Tmux, "b"),
+            "the new owner publishes under its own session"
+        );
         assert_eq!(state.rows_for_session("b").len(), 1);
     }
 
@@ -1938,10 +1987,7 @@ mod tests {
 
         sa.world().panes.clear();
         a.relist(Instant::now()).unwrap();
-        assert_eq!(
-            drain(&mut rx),
-            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]
-        );
+        assert_eq!(drain(&mut rx), [closed("a", 3)]);
         b.tick(Instant::now());
         let events = drain(&mut rx);
         assert_eq!(events.len(), 1, "{events:?}");
@@ -1970,7 +2016,7 @@ mod tests {
 
         r.source.world().panes.clear();
         r.watcher.maybe_relist(now + RELIST_GAP);
-        assert_eq!(r.events(), [MuxEvent::PaneClosed(PaneClosed { pane: 3 })]);
+        assert_eq!(r.events(), [closed("s", 3)]);
         r.watcher.tick(now + RELIST_GAP);
         assert!(r.events().is_empty());
     }
@@ -1990,7 +2036,7 @@ mod tests {
         assert_eq!(r.source.world().pane_reads, reads + 1, "listed at once");
         assert_eq!(
             r.events(),
-            [MuxEvent::PaneClosed(PaneClosed { pane: 3 })],
+            [closed("s", 3)],
             "closed, not re-stored as Blocked"
         );
         assert!(r.state.rows_for_session("s").is_empty());
@@ -2021,10 +2067,7 @@ mod tests {
         r.watcher.session_gone();
         assert_eq!(
             r.events(),
-            [
-                MuxEvent::PaneClosed(PaneClosed { pane: 3 }),
-                MuxEvent::PaneClosed(PaneClosed { pane: 5 }),
-            ],
+            [closed("s", 3), closed("s", 5),],
             "the agents, once each; not the plain shell"
         );
     }
