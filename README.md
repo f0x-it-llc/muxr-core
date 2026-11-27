@@ -98,6 +98,25 @@ runtime rather than pinning one, so it works across herdr releases. muxrd
 auto-detects which backends are available and serves all of them; pass `--backend`
 / `MUXRD_BACKEND` to restrict to one.
 
+## Keys and copying
+
+`muxrctl` works from the keyboard alone. Tab and Shift+Tab move between controls, Enter or
+Space presses the focused one, and Esc closes a dialog. Ctrl-C quits from any screen. The
+last line of each screen lists the letters that screen answers to.
+
+`c` copies. It copies the new token in the "New token" dialog, the pairing link on the QR
+screen and on the wizard's Pair step, and the certificate fingerprint in the Certificate
+dialog (`e` on the dashboard).
+
+Copying uses the OSC 52 escape sequence: `muxrctl` asks your terminal to put the text on the
+clipboard of the machine you are sitting at, so it works over SSH. Terminals that do not
+support OSC 52 ignore the request without saying so, and some need a setting to allow it.
+Inside tmux, `set-clipboard` must not be `off`. If nothing arrives, select the text with the
+mouse instead: `muxrctl` captures the mouse, so hold Shift (Option in some macOS terminals)
+while dragging.
+
+A copied token or pairing link is a secret, and it may stay in your clipboard history.
+
 ## TLS modes & deployment
 
 The server resolves its TLS identity by precedence **h2c > external cert > self-signed**:
