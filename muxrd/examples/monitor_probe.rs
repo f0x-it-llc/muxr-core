@@ -481,7 +481,7 @@ impl RealFilesystems {
     }
 }
 
-/// macOS: drop autofs and read-only system-snapshot mounts.
+/// Elsewhere: on macOS drop autofs and read-only system-snapshot mounts; other targets keep all.
 #[cfg(not(target_os = "linux"))]
 struct RealFilesystems;
 
@@ -491,8 +491,14 @@ impl RealFilesystems {
         Self
     }
 
+    #[cfg(target_os = "macos")]
     fn keeps(&self, fs: &str, read_only: bool) -> bool {
         fs != "autofs" && !read_only
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    fn keeps(&self, _fs: &str, _read_only: bool) -> bool {
+        true
     }
 }
 
