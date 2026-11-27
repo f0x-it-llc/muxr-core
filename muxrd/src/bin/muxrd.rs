@@ -480,12 +480,14 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
     }
 
     // ── Construct each detected backend into the ordered BackendSet ──────────
-    // A concrete `Arc<HerdrBackend>` is retained (when present) so `serve()` can
-    // start the herdr event kernel (task 01) sharing the backend's id registries;
-    // the same `Arc` is also stored in the set as `Arc<dyn MuxBackend>`.
+    // The concrete `Arc<HerdrBackend>` and `Arc<TmuxBackend>` are retained (when
+    // present) so `serve()` can start their event kernels: herdr's shares the
+    // backend's id registries, tmux's writes the backend's own agent state. The
+    // same `Arc`s are also stored in the set as `Arc<dyn MuxBackend>`.
     let mut backend_entries: Vec<(BackendKind, Arc<dyn MuxBackend>)> =
         Vec::with_capacity(resolved_kinds.len());
     let mut herdr_backend: Option<Arc<HerdrBackend>> = None;
+    let mut tmux_backend: Option<Arc<TmuxBackend>> = None;
     for kind in &resolved_kinds {
         match kind {
             BackendKind::Zellij => {
@@ -501,7 +503,8 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
             BackendKind::Tmux => {
                 let b = Arc::new(TmuxBackend::from_env()?);
                 log::info!("backend: tmux ({})", b.backend_version());
-                backend_entries.push((BackendKind::Tmux, b));
+                tmux_backend = Some(Arc::clone(&b));
+                backend_entries.push((BackendKind::Tmux, b as Arc<dyn MuxBackend>));
             }
         }
     }
@@ -639,6 +642,7 @@ fn cmd_start(bind_override: Option<&str>, args: StartArgs) -> Result<()> {
         cert_source,
         backends,
         herdr_backend,
+        tmux_backend,
         cfg.notify_relay_url.clone(),
         cfg.notify_verbosity.clone(),
         cfg.update_check,
@@ -696,17 +700,18 @@ fn cert_identity(
 /// - `External`   → load the caller-supplied cert+key; serve over TLS.
 /// - `H2c`        → serve plaintext HTTP/2; **MUST** sit behind a trusted TLS proxy.
 ///
-/// `backends` is the resolved [`BackendSet`] (every detected backend: zellij
-/// and/or herdr), constructed and logged by [`cmd_start`] before the runtime is
-/// entered. `herdr_backend` is the concrete `Arc<HerdrBackend>` when herdr is in
-/// the set (else `None`); it is used only to start the herdr event kernel (task
-/// 01) so it shares the backend's id registries.
+/// `backends` is the resolved [`BackendSet`] (every detected backend: zellij,
+/// herdr and/or tmux), constructed and logged by [`cmd_start`] before the
+/// runtime is entered. `herdr_backend` and `tmux_backend` are the concrete
+/// backends when they are in the set (else `None`); they are used only to start
+/// their event kernels, herdr's sharing the backend's id registries and tmux's
+/// writing the backend's agent state.
 ///
 /// `notify_relay_url` is the resolved push-notification relay URL (or `None`
 /// when disabled); it is advertised via `GetVersion`
 /// (`MuxrService::with_notify_relay_url`) and reported over the control
 /// socket (`StatusInfo::notify_relay_url`). `notify_verbosity` (`"normal"` /
-/// `"generic"`) drives the outbound notifier's payload text (task 05).
+/// `"generic"`) drives the outbound notifier's payload text.
 /// `update_check` decides whether the daily check for a newer release is
 /// spawned (`config::EffectiveConfig::update_check`).
 #[allow(clippy::too_many_arguments)] // config/backend seam plumbed through explicitly; see doc above
@@ -718,6 +723,7 @@ async fn serve(
     cert_source: CertSource,
     backends: BackendSet,
     herdr_backend: Option<Arc<HerdrBackend>>,
+    tmux_backend: Option<Arc<TmuxBackend>>,
     notify_relay_url: Option<String>,
     notify_verbosity: String,
     update_check: bool,
@@ -764,21 +770,26 @@ async fn serve(
     // and the control-socket listener (StatusInfo.push_device_count).
     let push_devices = muxrd::notify::devices::PushDeviceStore::new();
 
-    // The internal agent-event bus exists only when herdr is present (its event
-    // kernel is the sole producer), so it is built once, paired with the herdr
-    // backend it serves: the one value below can never hold a bus without a
-    // kernel to feed it, or the reverse. Created BEFORE the service so
-    // `WatchAgents` subscribes to the very bus the kernel and the notifier use
-    // below; a zellij-only server creates none, and WatchAgents then answers its
-    // empty snapshot and ends. The initial receiver is dropped at once —
-    // publishing with no receiver is a recoverable no-op, exactly as before.
-    let herdr_events: Option<(Arc<HerdrBackend>, muxrd::multiplexer::events::EventBus)> =
-        herdr_backend.map(|backend| {
-            let bus =
-                tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY).0;
-            (backend, bus)
-        });
-    let event_bus = herdr_events.as_ref().map(|(_, bus)| bus.clone());
+    // The internal agent-event bus exists only when an event kernel will feed
+    // it: herdr is present, or tmux is present with its watcher enabled
+    // (`MUXRD_TMUX_WATCH_MAX` above 0). A tmux backend whose watcher is off
+    // has no kernel, so its handle is dropped here (it stays served through
+    // `backends`) and it creates no bus. The bus is built
+    // once and shared by both kernels; created BEFORE the service so
+    // `WatchAgents` subscribes to the very bus the kernels and the notifier use
+    // below. A zellij-only server creates none, and WatchAgents then answers
+    // its empty snapshot and ends. The initial receiver is dropped at once —
+    // publishing with no receiver is a recoverable no-op.
+    let tmux_backend = tmux_backend.filter(|_| {
+        let enabled = muxrd::multiplexer::tmux::watch::watch_max() > 0;
+        if !enabled {
+            log::info!("tmux watcher: disabled (MUXRD_TMUX_WATCH_MAX=0); no live agent status");
+        }
+        enabled
+    });
+    let event_bus: Option<muxrd::multiplexer::events::EventBus> = (herdr_backend.is_some()
+        || tmux_backend.is_some())
+    .then(|| tokio::sync::broadcast::channel(muxrd::multiplexer::events::EVENT_BUS_CAPACITY).0);
 
     // One update state, shared by GetVersion, the control socket and the
     // check task that writes it (spawned below, when enabled).
@@ -787,16 +798,15 @@ async fn serve(
     let service = MuxrService::with_backends(backends)
         .with_notify_relay_url(notify_relay_url.clone())
         .with_push_device_store(push_devices.clone())
-        .with_event_bus(event_bus)
+        .with_event_bus(event_bus.clone())
         .with_update_state(update_state.clone());
 
-    // Retained inputs for the task-05 outbound notifier, spawned in the herdr
-    // branch below AFTER `spawn_listener` consumes the originals. Built only when
-    // herdr is present (the event bus — and hence the notifier — exists only
-    // then), so a zellij-only server allocates nothing here. Capturing
-    // `notify_verbosity` in the closure also keeps the param "used" on the
-    // zellij-only path (no dead-code warning).
-    let notifier_seed = herdr_events.as_ref().map(|_| {
+    // Retained inputs for the outbound notifier, spawned below AFTER
+    // `spawn_listener` consumes the originals. Built only when the event bus
+    // exists (the notifier consumes it), so a server without one allocates
+    // nothing here. Capturing `notify_verbosity` in the closure also keeps the
+    // param "used" on that path (no dead-code warning).
+    let notifier_seed = event_bus.as_ref().map(|_| {
         (
             notify_relay_url.clone(),
             push_devices.clone(),
@@ -806,11 +816,12 @@ async fn serve(
 
     // ── Control socket + graceful shutdown signal ────────────────────────────
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
-    // A clone-able shutdown signal (task 01): the control-socket oneshot drives
+    // A clone-able shutdown signal: the control-socket oneshot drives
     // `serve_with_shutdown` exactly as before; when it fires we also flip this
-    // `watch` so long-lived background tasks (the herdr event kernel) observe the
-    // same shutdown and exit cleanly.
-    let (kernel_shutdown_tx, kernel_shutdown_rx) = tokio::sync::watch::channel(false);
+    // `watch` so long-lived background tasks (the event kernels, the notifier,
+    // the update check) observe the same shutdown and exit cleanly. Each task
+    // takes its own receiver.
+    let (kernel_shutdown_tx, _kernel_shutdown_rx) = tokio::sync::watch::channel(false);
     // Pass the cert_mode + notify_relay_url so `status` can report the active
     // transport mode and push-notification configuration; push_devices lets the
     // listener report a live (not snapshotted) device count.
@@ -829,7 +840,7 @@ async fn serve(
     // ── Daily update check ───────────────────────────────────────────────────
     // Independent of the backend: a zellij-only server checks too. The task
     // makes its first request 30 s after start, so it never delays serving,
-    // and it stops on the same watch signal as the herdr tasks below. A client
+    // and it stops on the same watch signal as the event tasks below. A client
     // build failure is logged and non-fatal.
     if update_check {
         match muxrd::update::spawn_update_check(update_state, kernel_shutdown_tx.subscribe()) {
@@ -840,20 +851,34 @@ async fn serve(
         log::info!("update check: disabled");
     }
 
-    // ── herdr event kernel (task 01) ─────────────────────────────────────────
-    // When a herdr backend is present, spawn the persistent `events.subscribe`
-    // consumer, publishing agent-status transitions onto the process-local
-    // broadcast bus created above. Its consumers are the outbound notifier
-    // (below) and every live `WatchAgents` stream (through the service). A
-    // zellij-only server spawns nothing and has no bus.
-    if let Some((backend, bus)) = &herdr_events {
-        muxrd::multiplexer::spawn_event_kernel(backend.as_ref(), bus.clone(), kernel_shutdown_rx);
+    // ── Event kernels ────────────────────────────────────────────────────────
+    // Each kernel publishes agent-status transitions onto the one bus created
+    // above: herdr's consumes its `events.subscribe` stream, tmux's runs one
+    // control-mode watcher per session. Their consumers are the outbound
+    // notifier (below) and every live `WatchAgents` stream (through the
+    // service). A server without a bus spawns neither.
+    if let Some(bus) = &event_bus {
+        if let Some(backend) = &herdr_backend {
+            muxrd::multiplexer::spawn_event_kernel(
+                backend.as_ref(),
+                bus.clone(),
+                kernel_shutdown_tx.subscribe(),
+            );
+        }
+        if let Some(backend) = &tmux_backend {
+            muxrd::multiplexer::spawn_tmux_event_kernel(
+                backend.as_ref(),
+                backend.agent_state(),
+                bus.clone(),
+                kernel_shutdown_tx.subscribe(),
+            );
+        }
 
-        // ── Outbound push notifier (task 05) ────────────────────────────
-        // Consume the same bus, but only when a relay URL is configured.
-        // A fresh shutdown receiver off the same watch channel winds the
-        // notifier down alongside the kernel. A build failure (reqwest
-        // client) is logged and non-fatal — the daemon still serves.
+        // ── Outbound push notifier ──────────────────────────────────────
+        // Consume the same bus, once, but only when a relay URL is
+        // configured. A fresh shutdown receiver off the same watch channel
+        // winds the notifier down alongside the kernels. A build failure
+        // (reqwest client) is logged and non-fatal — the daemon still serves.
         if let Some((relay_url, store, verbosity)) = notifier_seed {
             match relay_url.as_deref() {
                 Some(url) => {
@@ -870,7 +895,7 @@ async fn serve(
                 None => {
                     log::info!(
                         "notify: relay disabled — outbound notifier not started \
-                         (herdr events still published to the bus)"
+                         (agent events still published to the bus)"
                     );
                 }
             }
@@ -910,7 +935,7 @@ async fn serve(
         .serve_with_shutdown(addr, async move {
             let _ = shutdown_rx.await;
             log::info!("muxrd: graceful shutdown initiated");
-            // Fan the shutdown out to background tasks (herdr event kernel). This
+            // Fan the shutdown out to background tasks (the event kernels). This
             // keeps `serve_with_shutdown`'s own behaviour identical — it still
             // resolves the instant the control-socket oneshot fires.
             let _ = kernel_shutdown_tx.send(true);
