@@ -21,20 +21,24 @@
 //! `resize-pane -Z` change the session's current window and the window's active
 //! pane, which every client attached to the session follows. A tab or pane
 //! switch made by one connection therefore moves every other client of the same
-//! session too, as it does on zellij.
+//! session too.
 //!
 //! **Read-only.** A read-only attach passes `-r`: tmux itself ignores keys from
 //! the client and does not let its size drive the window. The sender also
-//! refuses to write input or mouse reports for it. A resize still reaches the
+//! refuses to write input or mouse reports for it, and, because tmux focus is
+//! shared by the whole session, refuses tab, pane and zoom changes with an
+//! error (the relay then records no view change). A resize still reaches the
 //! pty so the client's own view is redrawn at its size.
 //!
-//! **Process hygiene.** The master fd is close-on-exec and non-blocking; the
-//! child gets the slave as stdin/stdout/stderr and every other descriptor is
-//! closed when it execs. Its environment is built from scratch (terminal type,
-//! locale, colour depth), so nothing from muxrd's own environment or
-//! configuration reaches it. The child is reaped exactly once, by
-//! `send_client_exited` or when the last half is dropped, with `waitpid`
-//! rather than SIGCHLD: SIGHUP first, SIGKILL after one second.
+//! **Process hygiene.** On Linux both pty ends are opened close-on-exec
+//! atomically, so a process another thread spawns meanwhile never inherits
+//! them; the master is also non-blocking. The child gets the slave as
+//! stdin/stdout/stderr and every other descriptor is closed when it execs. Its
+//! environment is built from scratch (terminal type, locale, colour depth), so
+//! nothing from muxrd's own environment or configuration reaches it. On
+//! `send_client_exited` or when the last half is dropped the child gets SIGHUP
+//! at once; a detached reaper thread then waits for it with `waitpid` (not
+//! SIGCHLD), kills it after one second if needed, and reaps it exactly once.
 
 use std::borrow::Cow;
 use std::fs::File;
@@ -332,6 +336,7 @@ impl Pty {
                     if left.is_zero() {
                         bail!("tmux attach: pty write timed out after {WRITE_TIMEOUT:?}");
                     }
+                    // A hangup or error shows up on the next write attempt.
                     sys::poll(self.master.as_fd(), libc::POLLOUT, left.min(READ_POLL))
                         .context("tmux attach: wait for pty space")?;
                 }
@@ -355,9 +360,14 @@ impl Pty {
         Ok(())
     }
 
-    /// Make the client leave and reap it: SIGHUP (what a terminal hangup
-    /// delivers), SIGKILL if it is still running after [`REAP_GRACE`]. Runs at
+    /// Make the client leave: SIGHUP (what a terminal hangup delivers) at once,
+    /// then hand the process to a detached reaper thread that waits up to
+    /// [`REAP_GRACE`], kills it if it is still running and reaps it. The caller
+    /// (a relay task on the async runtime) never waits for the exit. Runs at
     /// most once; later calls find no child.
+    ///
+    /// The reaper owns only the process, never the master: the master closes
+    /// when the last half drops, which is after nothing can read it.
     fn shutdown(&self) {
         self.closed.store(true, Ordering::Release);
         let Some(mut child) = lock(&self.child).take() else {
@@ -380,27 +390,50 @@ impl Pty {
         if let Err(e) = sys::signal(pid, libc::SIGHUP) {
             log::debug!("tmux attach: SIGHUP to {pid} failed: {e}");
         }
-        let deadline = Instant::now() + REAP_GRACE;
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) => {
-                    log::debug!("tmux attach: client {pid} exited ({status})");
-                    return;
+        // The slot lets the caller reap inline if no thread can be started;
+        // whichever side takes the child is the only one that waits for it.
+        let slot = Arc::new(Mutex::new(Some(child)));
+        let reaper_slot = Arc::clone(&slot);
+        let spawned = std::thread::Builder::new()
+            .name("tmux-attach-reap".into())
+            .spawn(move || {
+                if let Some(child) = lock(&reaper_slot).take() {
+                    reap(child);
                 }
-                Ok(None) if Instant::now() < deadline => std::thread::sleep(REAP_STEP),
-                Ok(None) => break,
-                Err(e) => {
-                    log::warn!("tmux attach: cannot wait for client {pid}: {e}");
-                    return;
-                }
+            });
+        if let Err(e) = spawned {
+            log::warn!("tmux attach: cannot start reaper thread ({e}); reaping {pid} inline");
+            if let Some(child) = lock(&slot).take() {
+                reap(child);
             }
         }
-        log::warn!("tmux attach: client {pid} ignored SIGHUP for {REAP_GRACE:?}; killing it");
-        let _ = child.kill();
-        match child.wait() {
-            Ok(status) => log::debug!("tmux attach: client {pid} killed ({status})"),
-            Err(e) => log::warn!("tmux attach: cannot reap client {pid}: {e}"),
+    }
+}
+
+/// Wait up to [`REAP_GRACE`] for a client already sent SIGHUP, SIGKILL it if
+/// it is still running, and reap it.
+fn reap(mut child: Child) {
+    let pid = child.id();
+    let deadline = Instant::now() + REAP_GRACE;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                log::debug!("tmux attach: client {pid} exited ({status})");
+                return;
+            }
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(REAP_STEP),
+            Ok(None) => break,
+            Err(e) => {
+                log::warn!("tmux attach: cannot wait for client {pid}: {e}");
+                return;
+            }
         }
+    }
+    log::warn!("tmux attach: client {pid} ignored SIGHUP for {REAP_GRACE:?}; killing it");
+    let _ = child.kill();
+    match child.wait() {
+        Ok(status) => log::debug!("tmux attach: client {pid} killed ({status})"),
+        Err(e) => log::warn!("tmux attach: cannot reap client {pid}: {e}"),
     }
 }
 
@@ -560,13 +593,19 @@ impl MuxReceiver for TmuxMuxReceiver {
             return None;
         }
         loop {
-            match sys::poll(self.pty.master.as_fd(), libc::POLLIN, READ_POLL) {
-                Ok(true) => {}
-                Ok(false) if self.pty.closed.load(Ordering::Acquire) => {
+            let revents = match sys::poll(self.pty.master.as_fd(), libc::POLLIN, READ_POLL) {
+                Ok(0) if self.pty.closed.load(Ordering::Acquire) => {
                     return self.finish(DEFAULT_EXIT_REASON.to_owned());
                 }
-                Ok(false) => return Some(MuxServerMsg::Other),
+                Ok(0) => return Some(MuxServerMsg::Other),
+                Ok(revents) => revents,
                 Err(e) => return self.finish(format!("tmux attach: poll failed: {e}")),
+            };
+            // A hangup or error with nothing left to read is the end of the
+            // stream; reading would only report it again, and looping on it
+            // would spin.
+            if revents & libc::POLLIN == 0 {
+                return self.finish(exit_reason(&self.tail));
             }
             match (&self.pty.master).read(&mut self.buf) {
                 Ok(0) => return self.finish(exit_reason(&self.tail)),
@@ -649,17 +688,40 @@ fn tmux_pane(pane: PaneRef) -> Result<u32> {
     Ok(pane.id)
 }
 
+/// The error a read-only attach answers a tab, pane or zoom change with.
+const READ_ONLY_FOCUS: &str = "read-only attach cannot change shared tmux focus";
+
+impl TmuxMuxSender {
+    /// Refuse a focus change for a read-only attach. tmux focus belongs to the
+    /// session, so a viewer moving it would move every other client too. An
+    /// error (not a silent `Ok`) keeps the relay from recording a view change
+    /// that never happened.
+    fn refuse_focus(&self, what: &str) -> Result<()> {
+        if self.read_only {
+            log::debug!(
+                "tmux attach [{}]: refusing {what} (read-only attach)",
+                self.session
+            );
+            bail!(READ_ONLY_FOCUS);
+        }
+        Ok(())
+    }
+}
+
 impl MuxSender for TmuxMuxSender {
     fn go_to_tab(&mut self, tab_id: u64) -> Result<()> {
+        self.refuse_focus("window switch")?;
         let window = u32::try_from(tab_id).map_err(|_| anyhow!("tmux window id {tab_id}"))?;
         self.ctl.select_window(window)
     }
 
     fn focus_pane(&mut self, pane: PaneRef) -> Result<()> {
+        self.refuse_focus("pane switch")?;
         self.ctl.select_pane(tmux_pane(pane)?)
     }
 
     fn toggle_fullscreen(&mut self, pane: PaneRef, hint: FullscreenHint) -> Result<()> {
+        self.refuse_focus("zoom toggle")?;
         // tmux zoom has no floating-pane variants, so the hint has nothing to
         // choose between.
         let _ = hint;
@@ -774,8 +836,55 @@ mod sys {
         Ok(())
     }
 
-    /// Open a pty pair sized `rows`×`cols`. Both ends are close-on-exec; the
+    /// Open a pty pair sized `rows`×`cols`. Both ends are opened close-on-exec
+    /// (no window in which another thread's child could inherit them); the
     /// master is non-blocking.
+    #[cfg(target_os = "linux")]
+    pub(super) fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
+        use std::os::fd::AsFd;
+
+        let flags = libc::O_RDWR | libc::O_NOCTTY | libc::O_CLOEXEC;
+        // SAFETY: posix_openpt takes flags only and returns a new descriptor
+        // or -1.
+        let fd = check(unsafe { libc::posix_openpt(flags) })?;
+        // SAFETY: a fresh descriptor nothing else owns, wrapped exactly once.
+        let master = unsafe { OwnedFd::from_raw_fd(fd) };
+        // SAFETY: grantpt and unlockpt take only the master descriptor, which
+        // is live for both calls.
+        check(unsafe { libc::grantpt(master.as_raw_fd()) })?;
+        // SAFETY: as above.
+        check(unsafe { libc::unlockpt(master.as_raw_fd()) })?;
+        let mut name = [0 as libc::c_char; 128];
+        // SAFETY: ptsname_r writes at most `name.len()` bytes, NUL-terminated,
+        // into the live local buffer; the master descriptor is live.
+        let rc = unsafe { libc::ptsname_r(master.as_raw_fd(), name.as_mut_ptr(), name.len()) };
+        if rc != 0 {
+            return Err(io::Error::from_raw_os_error(rc));
+        }
+        // SAFETY: `name` holds the NUL-terminated path ptsname_r just wrote
+        // and outlives the call, which only reads it.
+        let fd = check(unsafe { libc::open(name.as_ptr(), flags) })?;
+        // SAFETY: a fresh descriptor nothing else owns, wrapped exactly once.
+        let slave = unsafe { OwnedFd::from_raw_fd(fd) };
+        set_winsize(master.as_fd(), rows, cols)?;
+        add_fd_flags(
+            master.as_raw_fd(),
+            libc::F_GETFL,
+            libc::F_SETFL,
+            libc::O_NONBLOCK,
+        )?;
+        Ok((master, slave))
+    }
+
+    /// Open a pty pair sized `rows`×`cols`, both ends close-on-exec, the
+    /// master non-blocking.
+    ///
+    /// `openpty` returns descriptors without close-on-exec and has no flag for
+    /// it, so a process another thread spawns between `openpty` and the
+    /// `fcntl` below inherits both ends. If it outlives the client it keeps the
+    /// slave open and delays the master's EIO until it exits. There is no
+    /// portable atomic form on these targets; the window is two syscalls wide.
+    #[cfg(not(target_os = "linux"))]
     pub(super) fn open_pty(rows: u16, cols: u16) -> io::Result<(OwnedFd, OwnedFd)> {
         let mut master: libc::c_int = -1;
         let mut slave: libc::c_int = -1;
@@ -828,13 +937,14 @@ mod sys {
         Ok(())
     }
 
-    /// Wait up to `timeout` for `events` on `fd`. `Ok(false)` on timeout or
-    /// interruption; any returned event (including hangup) is `Ok(true)`.
+    /// Wait up to `timeout` for `events` on `fd` and return the events that
+    /// fired (`revents`, which can include POLLHUP, POLLERR or POLLNVAL); `0`
+    /// on timeout or interruption.
     pub(super) fn poll(
         fd: BorrowedFd<'_>,
         events: libc::c_short,
         timeout: Duration,
-    ) -> io::Result<bool> {
+    ) -> io::Result<libc::c_short> {
         let mut pfd = libc::pollfd {
             fd: fd.as_raw_fd(),
             events,
@@ -844,8 +954,9 @@ mod sys {
         // SAFETY: one pollfd, addressed by a live local, with a count of 1.
         let rc = unsafe { libc::poll(&mut pfd, 1, ms) };
         match check(rc) {
-            Ok(n) => Ok(n > 0),
-            Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(false),
+            Ok(0) => Ok(0),
+            Ok(_) => Ok(pfd.revents),
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => Ok(0),
             Err(e) => Err(e),
         }
     }
@@ -1129,6 +1240,47 @@ mod tests {
     }
 
     #[test]
+    fn read_only_sender_refuses_shared_focus_changes() {
+        let (mut s, _, ctl, _peer) = sender(true);
+        let hint = FullscreenHint {
+            is_floating: false,
+            floating_visible: false,
+            is_focused_floating: false,
+            tab_fullscreen: false,
+            target_is_relay_focus: true,
+        };
+        let errors = [
+            s.go_to_tab(1).unwrap_err(),
+            s.focus_pane(PaneRef::terminal(3)).unwrap_err(),
+            s.toggle_fullscreen(PaneRef::terminal(3), hint).unwrap_err(),
+            s.box_clone().go_to_tab(2).unwrap_err(),
+        ];
+        for e in errors {
+            assert_eq!(e.to_string(), READ_ONLY_FOCUS);
+        }
+        // The layout read is not a focus change and still answers.
+        assert!(s.query_layout_result().unwrap().is_ok());
+        assert_eq!(*lock(&ctl.calls), ["layout work"]);
+    }
+
+    #[test]
+    fn receiver_ends_on_hangup_without_data() {
+        // A pty master whose slave is gone reports POLLHUP with nothing to
+        // read; the receiver must end the stream rather than poll again.
+        let (master, slave) = sys::open_pty(24, 80).unwrap();
+        drop(slave);
+        let pty = Arc::new(Pty::new(master, None));
+        let mut rx = TmuxMuxReceiver::new(pty, Arc::new(ModeState::default()));
+        match rx.recv() {
+            Some(MuxServerMsg::Event(MuxEvent::Exit { reason })) => {
+                assert_eq!(reason, DEFAULT_EXIT_REASON)
+            }
+            other => panic!("expected exit, got {other:?}"),
+        }
+        assert!(rx.recv().is_none());
+    }
+
+    #[test]
     fn closed_sender_refuses_writes() {
         let (mut s, _, _, _peer) = sender(false);
         let mut clone = s.box_clone();
@@ -1232,7 +1384,7 @@ mod tests {
     mod live {
         use super::*;
 
-        const SESSION: &str = "t5";
+        const SESSION: &str = "attach";
 
         struct PrivateServer {
             bin: PathBuf,
@@ -1294,9 +1446,9 @@ mod tests {
             }
 
             fn window_width(&self) -> String {
-                // A pane target needs the trailing colon: a bare `=t5` names
+                // A pane target needs the trailing colon: a bare `=attach` names
                 // no pane and formats as empty.
-                self.tmux(&["display-message", "-p", "-t", "=t5:", "#{window_width}"])
+                self.tmux(&["display-message", "-p", "-t", "=attach:", "#{window_width}"])
             }
         }
 
@@ -1408,8 +1560,12 @@ mod tests {
             assert_eq!(server.window_width(), "120");
 
             // Typed bytes reach the pane.
-            tx.send_input_chars("echo muxr-t5-$((6*7))\r").unwrap();
-            assert!(wait_for(&mut *rx, b"muxr-t5-42", Duration::from_secs(2)));
+            tx.send_input_chars("echo attach-check-$((6*7))\r").unwrap();
+            assert!(wait_for(
+                &mut *rx,
+                b"attach-check-42",
+                Duration::from_secs(2)
+            ));
 
             tx.send_client_exited().unwrap();
             let deadline = Instant::now() + Duration::from_secs(3);
@@ -1451,26 +1607,39 @@ mod tests {
                     wait_for(&mut *rx, b"\x1b[?1049h", Duration::from_secs(2)),
                     "cycle {i}: no screen"
                 );
+                // Closing hands the wait to the reaper thread, so the caller
+                // (a relay task on the async runtime) never blocks on it.
+                let closing = Instant::now();
                 if i.is_multiple_of(2) {
                     tx.send_client_exited().unwrap();
                 }
                 drop(tx);
                 drop(rx);
+                let took = closing.elapsed();
+                assert!(
+                    took < Duration::from_millis(100),
+                    "cycle {i}: close blocked for {took:?}"
+                );
             };
             cycle(0);
             let fds = open_count();
             for i in 1..=100 {
                 cycle(i);
             }
-            assert_eq!(
-                open_count(),
-                fds,
-                "descriptor count changed over 100 cycles"
-            );
+            // Reaping is asynchronous: give the reaper threads their grace.
+            let deadline = Instant::now() + Duration::from_secs(3);
+            while !child_processes().is_empty() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(20));
+            }
             assert!(
                 child_processes().is_empty(),
                 "children left behind: {:?}",
                 child_processes()
+            );
+            assert_eq!(
+                open_count(),
+                fds,
+                "descriptor count changed over 100 cycles"
             );
             // The server saw every client leave.
             let deadline = Instant::now() + Duration::from_secs(2);
