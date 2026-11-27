@@ -8,6 +8,7 @@
 //! Defaults: 30 iterations, 2000 ms apart. Output is plain text, one section per measurement.
 
 use std::collections::HashSet;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -222,10 +223,7 @@ fn print_fields(
     println!(
         "   user/system split   not exposed by sysinfo (Cpu has usage() and frequency() only)"
     );
-    println!(
-        "   /proc/stat present  {}",
-        Path::new("/proc/stat").exists()
-    );
+    print_proc_stat_presence();
     match System::load_average() {
         Ok(l) => println!(
             "   load average        {:.2} {:.2} {:.2}",
@@ -298,10 +296,6 @@ fn print_fields(
     for name in names {
         let n = &networks[name];
         let name = name.to_string_lossy();
-        let physical = Path::new("/sys/class/net")
-            .join(name.as_ref())
-            .join("device")
-            .exists();
         println!(
             "   {:<16} rx={}/{} tx={}/{} addrs={:?} {}",
             name,
@@ -310,11 +304,7 @@ fn print_fields(
             n.transmitted(),
             n.total_transmitted(),
             n.ip_networks().iter().map(|ip| ip.addr).collect::<Vec<_>>(),
-            if cfg!(target_os = "linux") {
-                if physical { "physical" } else { "virtual" }
-            } else {
-                ""
-            }
+            interface_kind(&name)
         );
     }
 
@@ -328,12 +318,11 @@ fn print_fields(
             c.critical()
         );
     }
-    if cfg!(target_os = "macos") {
-        println!(
-            "   source: sysinfo's macOS component feature builds on objc2-io-kit's hidsystem \
-             (IOHID sensors), per its Cargo features"
-        );
-    }
+    #[cfg(target_os = "macos")]
+    println!(
+        "   source: sysinfo's macOS component feature builds on objc2-io-kit's hidsystem \
+         (IOHID sensors), per its Cargo features"
+    );
 
     println!("-- processes");
     sys.refresh_processes_specifics(
@@ -415,14 +404,46 @@ fn print_os_memory() {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn print_os_memory() {}
 
+#[cfg(target_os = "linux")]
+fn print_proc_stat_presence() {
+    println!(
+        "   /proc/stat present  {}",
+        Path::new("/proc/stat").exists()
+    );
+}
+
+#[cfg(not(target_os = "linux"))]
+fn print_proc_stat_presence() {
+    println!("   /proc/stat present  n/a (not Linux)");
+}
+
+/// Linux: an interface with a backing device under /sys/class/net is physical.
+#[cfg(target_os = "linux")]
+fn interface_kind(name: &str) -> &'static str {
+    if Path::new("/sys/class/net")
+        .join(name)
+        .join("device")
+        .exists()
+    {
+        "physical"
+    } else {
+        "virtual"
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn interface_kind(_name: &str) -> &'static str {
+    ""
+}
+
 /// The real-filesystem rule the monitor will use: (mount point, fs type) of the kept rows.
 fn filter_disks(disks: &Disks) -> Vec<(String, String)> {
-    let real = real_filesystems();
+    let real = RealFilesystems::load();
     let mut seen = HashSet::new();
     let mut kept = Vec::new();
     for d in disks.iter() {
         let fs = d.file_system().to_string_lossy().to_string();
-        if d.total_space() == 0 || !keep_fs(&fs, d.is_read_only(), real.as_ref()) {
+        if d.total_space() == 0 || !real.keeps(&fs, d.is_read_only()) {
             continue;
         }
         if !seen.insert(d.name().to_os_string()) {
@@ -433,37 +454,66 @@ fn filter_disks(disks: &Disks) -> Vec<(String, String)> {
     kept
 }
 
-/// Linux: fs types in /proc/filesystems without `nodev`, minus squashfs/nullfs.
-fn real_filesystems() -> Option<HashSet<String>> {
-    let text = std::fs::read_to_string("/proc/filesystems").ok()?;
-    Some(
-        text.lines()
-            .filter(|l| !l.starts_with("nodev"))
-            .map(|l| l.trim().to_string())
-            .filter(|fs| !fs.is_empty() && fs != "squashfs" && fs != "nullfs")
-            .collect(),
-    )
+/// Linux: fs types in /proc/filesystems without `nodev`, minus squashfs/nullfs; zfs is kept.
+/// An unreadable /proc/filesystems keeps every row (the probe reports, it does not hide).
+#[cfg(target_os = "linux")]
+struct RealFilesystems(Option<HashSet<String>>);
+
+#[cfg(target_os = "linux")]
+impl RealFilesystems {
+    fn load() -> Self {
+        let set = std::fs::read_to_string("/proc/filesystems")
+            .ok()
+            .map(|text| {
+                text.lines()
+                    .filter(|l| !l.starts_with("nodev"))
+                    .map(|l| l.trim().to_string())
+                    .filter(|fs| !fs.is_empty() && fs != "squashfs" && fs != "nullfs")
+                    .collect()
+            });
+        Self(set)
+    }
+
+    fn keeps(&self, fs: &str, _read_only: bool) -> bool {
+        self.0
+            .as_ref()
+            .is_none_or(|set| set.contains(fs) || fs == "zfs")
+    }
 }
 
-fn keep_fs(fs: &str, read_only: bool, real: Option<&HashSet<String>>) -> bool {
-    if cfg!(target_os = "macos") {
-        return fs != "autofs" && !read_only;
+/// macOS: drop autofs and read-only system-snapshot mounts.
+#[cfg(not(target_os = "linux"))]
+struct RealFilesystems;
+
+#[cfg(not(target_os = "linux"))]
+impl RealFilesystems {
+    fn load() -> Self {
+        Self
     }
-    match real {
-        Some(set) => set.contains(fs) || fs == "zfs",
-        None => true,
+
+    fn keeps(&self, fs: &str, read_only: bool) -> bool {
+        fs != "autofs" && !read_only
     }
 }
 
 /// Spawns short-lived children until one reuses the first child's pid (or 200 attempts pass),
-/// then reports whether sysinfo's `OnlyIfNotSet` cmd refresh noticed the new process.
+/// then reports whether sysinfo's `OnlyIfNotSet` refresh re-read the new process's name and cmd.
 fn probe_pid_reuse(sys: &mut System) -> anyhow::Result<()> {
     println!("== pid reuse");
     let kind = process_kind(true);
+    let snapshot = |sys: &System, pid: Pid| {
+        sys.process(pid).map(|p| {
+            (
+                p.start_time(),
+                p.name().to_string_lossy().to_string(),
+                p.cmd().to_vec(),
+            )
+        })
+    };
     let mut first = Command::new("sleep").arg("1").spawn()?;
     let pid = Pid::from_u32(first.id());
     sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), true, kind);
-    let before = sys.process(pid).map(|p| (p.start_time(), p.cmd().to_vec()));
+    let before = snapshot(sys, pid);
     first.wait()?;
     let mut reused = None;
     for _ in 0..200 {
@@ -480,8 +530,20 @@ fn probe_pid_reuse(sys: &mut System) -> anyhow::Result<()> {
         return Ok(());
     };
     sys.refresh_processes_specifics(ProcessesToUpdate::Some(&[pid]), false, kind);
-    let after = sys.process(pid).map(|p| (p.start_time(), p.cmd().to_vec()));
+    let after = snapshot(sys, pid);
+    let re_read = match (&before, &after) {
+        (Some(b), Some(a)) => a.0 != b.0 && a.2 != b.2,
+        _ => false,
+    };
     println!("   pid {pid} reused; before = {before:?}, after = {after:?}");
+    println!(
+        "   name/cmd re-read for the new process: {}",
+        if re_read {
+            "yes"
+        } else {
+            "no (stale or missing)"
+        }
+    );
     child.kill()?;
     child.wait()?;
     Ok(())
