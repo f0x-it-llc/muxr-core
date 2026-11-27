@@ -26,9 +26,12 @@ use ratcn::runtime::{
 };
 
 use crate::app::UiMsg;
+use crate::app::message::CopyTarget;
 use crate::app::state::AppState;
 use crate::app::state::DialogId;
 use crate::app::state::tokens::{QrOverlay, QrOverlayPhase, TokensMsg};
+use crate::app::update::tokens::{QR_CLOSE_ID, QR_COPY_ID};
+use crate::tui::components::quit_on_ctrl_c;
 use crate::tui::theme::{palette, styles};
 use crate::tui::widgets::qr::QrWidget;
 
@@ -38,6 +41,10 @@ const INFO_ROWS: u16 = 5;
 /// Columns reserved for the Close control at the right of the bottom strip:
 /// the label plus ratcn's two cells of button padding on each side.
 const CLOSE_WIDTH: u16 = 9;
+
+/// Columns reserved for the Copy link control left of Close: its label and
+/// padding, plus one cell that keeps it apart from Close.
+const COPY_WIDTH: u16 = 14;
 
 /// Declare the QR overlay as a modal layer.
 pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
@@ -53,8 +60,13 @@ pub fn declare(ctx: &mut DeclareCtx<'_, AppState, UiMsg>) {
             // layer has a focus target at all — a modal scope with nothing
             // focusable inside parks focus outside itself, and then no key
             // reaches the layer.
-            let (_, close_area) = split_strip(split(area).1);
-            ctx.component("qr_close", CloseControl::new(), close_area);
+            let (_, copy_area, close_area) = split_strip(split(area).1);
+            ctx.component(QR_CLOSE_ID, CloseControl::close(), close_area);
+            // Declared after Close, so Close stays the layer's default focus.
+            // Only a showing code has a link to copy.
+            if is_showing(ctx.state()) {
+                ctx.component(QR_COPY_ID, CloseControl::copy(), copy_area);
+            }
         },
     );
 }
@@ -80,13 +92,31 @@ fn split_showing(body: Rect) -> (Rect, Rect) {
     (rows[0], rows[1])
 }
 
-/// Split the bottom strip into its caption and the Close control.
-fn split_strip(strip: Rect) -> (Rect, Rect) {
+/// Split the bottom strip into its caption, the Copy link control and the
+/// Close control. The copy slot is reserved in every phase, so the caption
+/// does not shift when the code arrives.
+fn split_strip(strip: Rect) -> (Rect, Rect, Rect) {
     let rows = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(0), Constraint::Length(CLOSE_WIDTH)])
+        .constraints([
+            Constraint::Min(0),
+            Constraint::Length(COPY_WIDTH),
+            Constraint::Length(CLOSE_WIDTH),
+        ])
         .split(strip);
-    (rows[0], rows[1])
+    (rows[0], rows[1], rows[2])
+}
+
+/// Whether the layer is showing a code, the only phase with a link to copy.
+fn is_showing(state: &AppState) -> bool {
+    matches!(
+        state
+            .tokens
+            .qr_overlay
+            .as_ref()
+            .map(|overlay| &overlay.phase),
+        Some(QrOverlayPhase::Showing { .. })
+    )
 }
 
 /// Paint everything except the QR matrix: the opaque base, the phase body, the
@@ -238,7 +268,8 @@ fn paint_failed(ctx: &mut PaintCtx<'_, AppState>, err: &str, area: Rect) {
     );
 }
 
-/// Bottom strip: `Esc close · ro=<on|off> · <token_name>`.
+/// Bottom strip: `Esc close · c copy link · ro=<on|off> · <token_name>`, the
+/// copy hint only while a code is showing.
 fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, area: Rect) {
     let ro_span = if overlay.read_only {
         Span::styled("on", styles::status_warn())
@@ -246,38 +277,59 @@ fn paint_bottom_strip(ctx: &mut PaintCtx<'_, AppState>, overlay: &QrOverlay, are
         Span::styled("off", styles::status_ok())
     };
 
-    let line = Line::from(vec![
+    let mut spans = vec![
         Span::styled(" Esc", styles::accent()),
-        Span::styled(" close  ·  ro=", styles::muted()),
+        Span::styled(" close  ·  ", styles::muted()),
+    ];
+    if matches!(overlay.phase, QrOverlayPhase::Showing { .. }) {
+        spans.push(Span::styled("c", styles::accent()));
+        spans.push(Span::styled(" copy link  ·  ", styles::muted()));
+    }
+    spans.extend([
+        Span::styled("ro=", styles::muted()),
         ro_span,
         Span::styled("  ·  ", styles::muted()),
         Span::styled(overlay.token_name.clone(), styles::accent()),
     ]);
-    ctx.widget(Paragraph::new(line), area);
+    ctx.widget(Paragraph::new(Line::from(spans)), area);
 }
 
-// ── The Close control ─────────────────────────────────────────────────────────
+// ── The strip controls ────────────────────────────────────────────────────────
 
-/// The layer's Close button, which also answers Esc.
+/// One of the strip's buttons (Close, or Copy link), which also answers the
+/// layer's keys: Esc, Ctrl-C (quit) and, while a code is showing, `c`.
 ///
 /// A ratcn [`Dialog`](ratcn::Dialog) owns `on_dismiss`/`dismiss_key`; a
-/// `modal_scope` in ratcn 0.0.3 has neither, and an open modal turns every key
-/// nothing inside it handled into `Consumed` rather than letting it bubble out
-/// to the app. So an Esc routed "through the reducer" would never arrive: the
-/// only place it can be answered is a component inside the layer. Answering it
+/// `modal_scope` has neither, and an open modal turns every key nothing inside
+/// it handled into `Consumed` rather than letting it bubble out to the app. So
+/// an Esc routed "through the reducer" would never arrive: the only place it
+/// can be answered is a component inside the layer. Answering it
 /// here, beside the Enter/Space the button already answers, is what makes the
 /// strip's "Esc close" true — and both emit [`TokensMsg::QrClose`], which never
-/// revokes the token being shown.
+/// revokes the token being shown. Both buttons wear the same keys, so they work
+/// wherever the focus sits among the declared controls. That holds only while
+/// focus is on a declared control: Copy link disappears when the phase leaves
+/// showing, so the reducer moves focus off it to Close at that moment.
 struct CloseControl {
     button: Button<UiMsg>,
 }
 
 impl CloseControl {
-    fn new() -> Self {
+    /// The Close button.
+    fn close() -> Self {
         Self {
             button: Button::new("Close")
                 .ghost()
                 .on_press(|| UiMsg::Tokens(TokensMsg::QrClose)),
+        }
+    }
+
+    /// The Copy link button.
+    fn copy() -> Self {
+        Self {
+            button: Button::new("Copy link")
+                .ghost()
+                .on_press(|| UiMsg::Copy(CopyTarget::PairingLink)),
         }
     }
 }
@@ -298,20 +350,27 @@ impl Component<AppState, UiMsg> for CloseControl {
         ctx: &mut EventCtx<'_>,
     ) -> EventResult<UiMsg> {
         if let Event::Key(key) = event
-            && key.code == KeyCode::Esc
             && !key.modifiers.any()
         {
-            return EventResult::Emit(UiMsg::Tokens(TokensMsg::QrClose));
+            match key.code {
+                KeyCode::Esc => return EventResult::Emit(UiMsg::Tokens(TokensMsg::QrClose)),
+                KeyCode::Char('c') if is_showing(state) => {
+                    return EventResult::Emit(UiMsg::Copy(CopyTarget::PairingLink));
+                }
+                _ => {}
+            }
         }
-        Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx)
+        let result =
+            Component::<AppState, UiMsg>::handle_event(&mut self.button, event, state, ctx);
+        quit_on_ctrl_c(event, result)
     }
 
-    fn scope_options(&self) -> ScopeOptions {
-        Component::<AppState, UiMsg>::scope_options(&self.button)
+    fn scope_options(&self, state: &AppState) -> ScopeOptions {
+        Component::<AppState, UiMsg>::scope_options(&self.button, state)
     }
 
-    fn interaction_area(&self, area: Rect) -> Rect {
-        Component::<AppState, UiMsg>::interaction_area(&self.button, area)
+    fn interaction_area(&self, area: Rect, state: &AppState) -> Rect {
+        Component::<AppState, UiMsg>::interaction_area(&self.button, area, state)
     }
 }
 

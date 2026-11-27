@@ -43,6 +43,19 @@ pub fn init() -> DefaultTerminal {
     terminal
 }
 
+/// Write `text` to the clipboard of the terminal the operator sits at, using
+/// OSC 52.
+///
+/// It goes through the terminal, so it works over SSH. Terminals that do not
+/// support OSC 52 ignore it silently; nothing answers, so success only means
+/// the bytes were written.
+pub fn copy_to_clipboard(text: &str) -> std::io::Result<()> {
+    crossterm::execute!(
+        std::io::stdout(),
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from(text)
+    )
+}
+
 /// Leave the alternate screen and restore the cooked terminal mode on a clean
 /// exit. Best-effort and idempotent (`ratatui::restore` tolerates repeat calls).
 pub fn restore() {
@@ -87,6 +100,16 @@ pub fn install_panic_hook() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn osc52_sequence_is_pinned() {
+        use crossterm::Command;
+        let mut out = String::new();
+        crossterm::clipboard::CopyToClipboard::to_clipboard_from("foo")
+            .write_ansi(&mut out)
+            .unwrap();
+        assert_eq!(out.as_bytes(), b"\x1b]52;c;Zm9v\x1b\\");
+    }
 
     #[test]
     fn install_panic_hook_is_idempotent() {
