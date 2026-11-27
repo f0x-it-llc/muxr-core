@@ -38,6 +38,10 @@ path = "examples/action_client.rs"
 name = "session_client"
 path = "examples/session_client.rs"
 
+[[example]]
+name = "monitor_probe"
+path = "examples/monitor_probe.rs"
+
 # ─── Runtime deps ────────────────────────────────────────────────────────────
 
 [dependencies]
@@ -125,6 +129,10 @@ bytes = "1"
 serde_json = "1"
 libc = "0.2"
 which = "7"
+
+# Host vitals for the opt-in server monitor (src/monitor/). Only the refresh
+# families the monitor reads; no default features (no multithread rayon pool).
+sysinfo = { version = "0.40", default-features = false, features = ["component", "disk", "network", "system", "user"] }
 
 # ─── Dev deps ────────────────────────────────────────────────────────────────
 
