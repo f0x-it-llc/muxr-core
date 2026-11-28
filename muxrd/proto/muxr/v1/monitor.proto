@@ -6,6 +6,8 @@
 // host-vitals capability. Each answers FAILED_PRECONDITION when monitoring is
 // off at call time. Every revision is monotonically increasing for the life
 // of the server process (it survives monitoring being switched off and on).
+// Streams are capped server-wide: at most 16 WatchVitals and 16 WatchProcesses
+// streams are open at once, and the next open answers RESOURCE_EXHAUSTED.
 syntax = "proto3";
 
 package muxr.v1;
@@ -16,10 +18,11 @@ package muxr.v1;
 enum VitalsDetail {
   // Treated as VITALS_DETAIL_SUMMARY.
   VITALS_DETAIL_UNSPECIFIED = 0;
-  // Server-paced (about every 5 s); no core_percent, no temperatures, and
+  // One sample about every 5 s (this stream's own cadence, whatever other
+  // clients ask of the server); no core_percent, no temperatures, and
   // disks holds only the fullest volume by used / total.
   VITALS_DETAIL_SUMMARY = 1;
-  // Every field, at WatchVitalsRequest.interval_ms.
+  // Every field, at this stream's own WatchVitalsRequest.interval_ms.
   VITALS_DETAIL_FULL = 2;
 }
 
@@ -27,9 +30,10 @@ enum VitalsDetail {
 message WatchVitalsRequest {
   // Unspecified = VITALS_DETAIL_SUMMARY; an unknown value is INVALID_ARGUMENT.
   VitalsDetail detail = 1;
-  // FULL only: the sample interval; 0 = the server default (3 s). Clamped by
-  // the server to its own bounds (2 s to 10 s), never rejected. Ignored for
-  // SUMMARY.
+  // FULL only: this stream's own cadence. The stream gets at most one sample
+  // per interval, whatever other clients ask of the server. 0 = the server
+  // default (3 s); anything else is clamped by the server to its own bounds
+  // (2 s to 10 s), never rejected. Ignored for SUMMARY (fixed at 5 s).
   uint32 interval_ms = 2;
 }
 
@@ -43,11 +47,13 @@ message VitalsEvent {
   // The sample; unset only on the disabled event.
   VitalsSample sample = 3;
   // True on the terminal event sent when monitoring is switched off while the
-  // stream is open; the stream then ends with OK.
+  // stream is open; the stream then ends with OK. A stream that ends because
+  // monitoring was switched off always sends exactly one such event first.
   bool disabled = 4;
   // Samples this stream skipped because the client read too slowly, just
-  // before this event's sample; 0 = none skipped. The event still carries the
-  // next current sample.
+  // before this event's sample; 0 = none skipped. The event carries the next
+  // sample the server still had, which may itself be older than the newest
+  // one; later events catch up.
   uint64 lagged = 5;
 }
 
@@ -87,7 +93,7 @@ message LoadAverage {
 }
 
 // Physical memory, partitioned so that used + cache + free = total.
-message Memory {
+message HostMemory {
   // Installed memory in bytes.
   uint64 total_bytes = 1;
   // Bytes in use, cache excluded.
@@ -130,7 +136,7 @@ message NetInterface {
 }
 
 // One temperature sensor reading.
-message Temperature {
+message HostTemperature {
   // Sensor label as the host reports it.
   string label = 1;
   // Degrees Celsius.
@@ -156,7 +162,7 @@ message VitalsSample {
   // Mean core frequency in MHz; unset when unknown.
   optional uint32 cpu_freq_mhz = 8;
   // Physical memory.
-  Memory memory = 9;
+  HostMemory memory = 9;
   // Swap in use, in bytes.
   uint64 swap_used_bytes = 10;
   // Swap size, in bytes.
@@ -171,7 +177,7 @@ message VitalsSample {
   NetInterface net = 15;
   // Sensor readings, the cpu package sensor first when present; empty for
   // SUMMARY.
-  repeated Temperature temperatures = 16;
+  repeated HostTemperature temperatures = 16;
   // Number of processes; unset when the server has not counted them.
   optional uint32 process_count = 17;
   // Number of running processes; unset as for process_count.
@@ -213,7 +219,8 @@ message VitalsHistory {
   uint64 revision = 3;
   // One entry per series with data, all the same length. A series with no
   // data anywhere in the window (one the host cannot provide, such as
-  // CPU_SYSTEM without a cpu split) is omitted, never sent as all NaN.
+  // CPU_SYSTEM without a cpu split) is omitted, never sent as all NaN. On a
+  // fresh daemon most slots are NaN until the rings fill.
   repeated HistorySeries series = 4;
 }
 
@@ -270,15 +277,17 @@ message WatchProcessesRequest {
   // Case-insensitive substring of the name, the user or the decimal pid,
   // never the command line; empty matches every process.
   string filter = 3;
-  // Rows to return; 0 = 50, at most 200.
+  // Rows to return; 0 = 50, above 200 = 200 (clamped, never rejected).
   uint32 limit = 4;
-  // A process to append when it falls outside the cut, matched by pid and
+  // A process to append when it falls outside the cut, matched by pid AND
   // pinned_start_unix_s together; 0 = none.
   uint32 pinned_pid = 5;
-  // Start time of the pinned process, seconds since the Unix epoch.
+  // Start time of the pinned process, seconds since the Unix epoch. Ignored
+  // when pinned_pid is 0.
   int64 pinned_start_unix_s = 6;
-  // Refresh interval in milliseconds; clamped by the server (3 s to 10 s),
-  // 0 = the floor.
+  // This stream's own refresh cadence in milliseconds: it gets at most one
+  // snapshot per interval, whatever other clients ask of the server. Clamped
+  // by the server to 3 s to 10 s, never rejected; 0 = the 3 s floor.
   uint32 interval_ms = 7;
 }
 
@@ -313,8 +322,8 @@ message ProcessRow {
   optional uint32 parent_pid = 2;
   // Process name; never empty.
   string name = 3;
-  // Full command line. Empty for a read-only token, and for any process not
-  // owned by the user muxrd runs as.
+  // Full command line. Always empty for a read-only token; for a full token,
+  // empty for any process not owned by the user muxrd runs as.
   string command = 4;
   // User name, or the numeric uid; empty when the host reports neither.
   string user = 5;
@@ -333,6 +342,9 @@ message ProcessRow {
 }
 
 // One WatchProcesses message: the whole view, replacing the previous one.
+// Read-only tokens see every process's pid, name, user and numbers, with empty
+// command lines; full tokens see command lines only for processes owned by
+// the user muxrd runs as.
 message ProcessSnapshot {
   // Revision of this refresh.
   uint64 revision = 1;
@@ -346,7 +358,9 @@ message ProcessSnapshot {
   // outside the cut.
   repeated ProcessRow rows = 5;
   // True on the terminal message sent when monitoring is switched off while
-  // the stream is open; the stream then ends with OK.
+  // the stream is open; the stream then ends with OK. A stream that ends
+  // because monitoring was switched off always sends exactly one such message
+  // first.
   bool disabled = 6;
 }
 
@@ -366,12 +380,22 @@ enum ProcessSignal {
   PROCESS_SIGNAL_HUP = 4;
 }
 
-// The SignalProcess request.
+// The SignalProcess request. The reply is an ActionAck.
+//
+// Errors: PERMISSION_DENIED for a read-only token; FAILED_PRECONDITION when
+// monitoring is off; INVALID_ARGUMENT for pid 0 or an unspecified signal.
+// Everything else comes back as ActionAck{ok: false} with display-only error
+// text: a target that is not found, has changed since it was listed (start
+// time differs), is not allowed (pid 0 or 1, muxrd itself, a thread id), or is
+// refused by the operating system. A client must treat any ok: false as "not
+// signalled" and must not parse the text. ok: true means the signal was sent,
+// not that the process exited. A full token may signal any process the user
+// muxrd runs as may signal; there is no further restriction.
 message SignalProcessRequest {
   // Process id.
   uint32 pid = 1;
   // The start time ProcessRow.start_unix_s reported; a process whose start
-  // time differs is not signalled.
+  // time differs is not signalled (ok: false).
   int64 start_unix_s = 2;
   // The signal to send.
   ProcessSignal signal = 3;

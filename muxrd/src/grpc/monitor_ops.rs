@@ -9,8 +9,8 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use tokio::sync::{mpsc, oneshot};
-use tokio::time::{Interval, MissedTickBehavior};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, TryAcquireError, mpsc, oneshot};
+use tokio::time::{Instant, Interval, MissedTickBehavior};
 use tonic::{Request, Response, Status};
 
 use crate::monitor::{
@@ -35,6 +35,76 @@ const MAX_PROCESS_FILTER_BYTES: usize = 128;
 /// sampler stalls the stream task, whose subscription then lags (reported in `lagged`) instead
 /// of anything buffering without bound.
 const WATCH_CHANNEL_BOUND: usize = 16;
+
+/// Most `WatchVitals` streams open at once, server-wide; and the same for `WatchProcesses`.
+/// The next open is `resource_exhausted`.
+pub(super) const MAX_WATCH_STREAMS: usize = 16;
+
+/// A stream may send again once this share of its own interval has passed since its last
+/// message (the sampler's tick can land slightly early against a stream's own clock).
+const CADENCE_NUMERATOR: u32 = 9;
+const CADENCE_DENOMINATOR: u32 = 10;
+
+/// The server-wide slots for concurrent watch streams: one pool per rpc. A permit is held for
+/// the life of the stream's task, so closing a stream frees its slot.
+#[derive(Clone, Debug)]
+pub(super) struct WatchSlots {
+    vitals: Arc<Semaphore>,
+    processes: Arc<Semaphore>,
+}
+
+impl Default for WatchSlots {
+    fn default() -> Self {
+        Self {
+            vitals: Arc::new(Semaphore::new(MAX_WATCH_STREAMS)),
+            processes: Arc::new(Semaphore::new(MAX_WATCH_STREAMS)),
+        }
+    }
+}
+
+/// Take one slot from `pool`, or `resource_exhausted` when all [`MAX_WATCH_STREAMS`] are taken.
+fn take_slot(pool: &Arc<Semaphore>, rpc: &str) -> Result<OwnedSemaphorePermit, Status> {
+    match Arc::clone(pool).try_acquire_owned() {
+        Ok(permit) => Ok(permit),
+        Err(TryAcquireError::NoPermits | TryAcquireError::Closed) => {
+            log::info!("{rpc}: {MAX_WATCH_STREAMS} streams already open → resource_exhausted");
+            Err(Status::resource_exhausted(format!(
+                "at most {MAX_WATCH_STREAMS} {rpc} streams may be open at once"
+            )))
+        }
+    }
+}
+
+/// Holds back messages that arrive sooner than ~90 % of the stream's own interval after the
+/// last one sent, so a stream is paced by its own interval whatever other subscribers make
+/// the sampler do.
+struct Cadence {
+    interval: Duration,
+    last_sent: Option<Instant>,
+}
+
+impl Cadence {
+    fn new(interval: Duration) -> Self {
+        Self {
+            interval,
+            last_sent: None,
+        }
+    }
+
+    /// Whether a message arriving now is due; when it is, it counts as sent.
+    fn due(&mut self) -> bool {
+        let now = Instant::now();
+        let min_gap = self.interval * CADENCE_NUMERATOR / CADENCE_DENOMINATOR;
+        if self
+            .last_sent
+            .is_some_and(|t| now.duration_since(t) < min_gap)
+        {
+            return false;
+        }
+        self.last_sent = Some(now);
+        true
+    }
+}
 
 /// The `WatchVitals` response stream type.
 pub(super) type VitalsEventStream =
@@ -76,6 +146,7 @@ impl MuxrService {
             .map(|t| t.0.clone());
         let tier = vitals_tier(request.get_ref())?;
         let handle = self.enabled_monitor("WatchVitals")?;
+        let slot = take_slot(&self.watch_slots.vitals, "WatchVitals")?;
         // Disabled between the check and here: the first item is `Disabled`, so the stream
         // sends its terminal event and ends OK.
         let subscription = handle.subscribe(tier);
@@ -88,6 +159,7 @@ impl MuxrService {
                 validate: Arc::new(|t: &str| crate::ipc::validate_session_token(t)),
             },
             token_recheck: TOKEN_RECHECK_INTERVAL,
+            slot: Some(slot),
         };
         Ok(Response::new(Box::pin(start_vitals_watch(
             watch,
@@ -126,6 +198,7 @@ impl MuxrService {
         let redact = redact_commands(&request, RPC);
         let query = process_query(request.get_ref())?;
         let handle = self.enabled_monitor(RPC)?;
+        let slot = take_slot(&self.watch_slots.processes, RPC)?;
         // Disabled between the check and here: the subscription yields nothing, so the stream
         // sends its terminal snapshot and ends OK.
         let subscription = handle.watch_processes(query.clone());
@@ -138,11 +211,13 @@ impl MuxrService {
         );
         let watch = ProcessWatch {
             redact,
+            interval: query.effective_interval(),
             auth: TokenCheck {
                 token,
                 validate: Arc::new(|t: &str| crate::ipc::validate_session_token(t)),
             },
             token_recheck: TOKEN_RECHECK_INTERVAL,
+            slot: Some(slot),
         };
         Ok(Response::new(Box::pin(start_process_watch(
             watch,
@@ -151,13 +226,14 @@ impl MuxrService {
     }
 
     /// Signal one process named by `(pid, start time)`. MUTATING: read-only tokens are
-    /// refused. A refusal by the monitor is an `ok: false` ack, never a transport error.
+    /// refused with `permission_denied`. A refusal by the monitor is an `ok: false` ack with
+    /// display-only text, never a transport error.
     pub(super) async fn signal_process_impl(
         &self,
         request: Request<SignalProcessRequest>,
     ) -> Result<Response<ProtoAck>, Status> {
-        helpers::reject_if_read_only(&request, "SignalProcess")?;
         const RPC: &str = "SignalProcess";
+        helpers::reject_if_read_only(&request, RPC)?;
         let req = request.into_inner();
         let signal = process_signal(req.signal)?;
         if req.pid == 0 {
@@ -407,7 +483,7 @@ fn sample_msg(s: &monitor::VitalsSample, tier: Tier) -> crate::proto::VitalsSamp
             load_15: l.fifteen,
         }),
         cpu_freq_mhz: s.cpu_freq_mhz.map(|f| u32::try_from(f).unwrap_or(u32::MAX)),
-        memory: Some(crate::proto::Memory {
+        memory: Some(crate::proto::HostMemory {
             total_bytes: s.memory.total,
             used_bytes: s.memory.used,
             cache_bytes: s.memory.cache,
@@ -432,7 +508,7 @@ fn sample_msg(s: &monitor::VitalsSample, tier: Tier) -> crate::proto::VitalsSamp
         } else {
             s.temperatures
                 .iter()
-                .map(|t| crate::proto::Temperature {
+                .map(|t| crate::proto::HostTemperature {
                     label: t.label.clone(),
                     celsius: t.celsius,
                 })
@@ -648,6 +724,8 @@ struct VitalsWatch {
     tier: Tier,
     auth: TokenCheck,
     token_recheck: Duration,
+    /// The stream's slot under [`MAX_WATCH_STREAMS`], released when the loop ends.
+    slot: Option<OwnedSemaphorePermit>,
 }
 
 /// Spawn the loop that forwards `subscription` to a fresh stream.
@@ -678,6 +756,7 @@ async fn vitals_loop(
     let mut recheck = recheck_interval(w.token_recheck).await;
     let mut first = true;
     let mut lagged = 0u64;
+    let mut cadence = Cadence::new(w.tier.interval());
 
     let flow = loop {
         let item = tokio::select! {
@@ -691,6 +770,7 @@ async fn vitals_loop(
             item = subscription.recv() => item,
         };
         let event = match item {
+            VitalsItem::Sample(_) if !cadence.due() => continue,
             VitalsItem::Sample(sample) => {
                 let host = std::mem::take(&mut first).then(|| host_msg(&w.handle.host_info()));
                 VitalsEvent {
@@ -723,6 +803,7 @@ async fn vitals_loop(
         }
     };
     drop(subscription);
+    drop(w.slot);
     match flow {
         Flow::Revoked => {
             log::warn!("{RPC}: token no longer valid — ending stream");
@@ -740,8 +821,12 @@ async fn vitals_loop(
 struct ProcessWatch {
     /// Decided once at open: every row's command line is emptied.
     redact: bool,
+    /// The stream's own refresh interval, which paces what it sends.
+    interval: Duration,
     auth: TokenCheck,
     token_recheck: Duration,
+    /// The stream's slot under [`MAX_WATCH_STREAMS`], released when the loop ends.
+    slot: Option<OwnedSemaphorePermit>,
 }
 
 /// Spawn the loop that forwards `subscription` to a fresh stream.
@@ -771,6 +856,7 @@ async fn process_loop(
 ) {
     const RPC: &str = "WatchProcesses";
     let mut recheck = recheck_interval(w.token_recheck).await;
+    let mut cadence = Cadence::new(w.interval);
 
     let flow = loop {
         let item = tokio::select! {
@@ -793,6 +879,9 @@ async fn process_loop(
                 ended => break ended,
             }
         };
+        if !cadence.due() {
+            continue;
+        }
         let msg = process_snapshot_msg(&snapshot, w.redact);
         match deliver(RPC, &w.auth, &tx, &mut recheck, msg).await {
             Flow::Continue => {}
@@ -800,6 +889,7 @@ async fn process_loop(
         }
     };
     drop(subscription);
+    drop(w.slot);
     match flow {
         Flow::Revoked => {
             log::warn!("{RPC}: token no longer valid — ending stream");
@@ -964,6 +1054,7 @@ mod tests {
                 validate: Arc::new(move |_| Ok(valid.load(Ordering::SeqCst))),
             },
             token_recheck: recheck,
+            slot: None,
         };
         start_vitals_watch(watch, handle.subscribe(tier))
     }
@@ -1756,11 +1847,13 @@ mod tests {
         let flag = Arc::clone(&valid);
         let watch = ProcessWatch {
             redact: false,
+            interval: MIN_PROCESS_INTERVAL,
             auth: TokenCheck {
                 token: Some("tok".into()),
                 validate: Arc::new(move |_| Ok(flag.load(Ordering::SeqCst))),
             },
             token_recheck: Duration::from_secs(1),
+            slot: None,
         };
         let subscription = handle.watch_processes(ProcessQuery::default());
         let mut rx = start_process_watch(watch, subscription);
@@ -2006,5 +2099,147 @@ mod tests {
             refusal_text(SignalRefusal::NotPermitted(libc::EPERM)),
             "permission denied by the operating system"
         );
+    }
+
+    // ── Cadence and stream cap ────────────────────────────────────────────────
+
+    /// The gaps between the arrival times of `n` consecutive messages after the first.
+    async fn vitals_gaps<S>(rx: &mut S, n: usize) -> Vec<Duration>
+    where
+        S: futures::Stream<Item = Result<VitalsEvent, Status>> + Unpin,
+    {
+        let _ = event(rx).await;
+        let mut last = Instant::now();
+        let mut gaps = Vec::new();
+        for _ in 0..n {
+            let _ = event(rx).await;
+            gaps.push(Instant::now() - last);
+            last = Instant::now();
+        }
+        gaps
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_summary_stream_keeps_its_own_cadence_beside_a_fast_full_subscriber() {
+        let (handle, _shutdown) = enabled_monitor();
+        // The sampler runs at 2 s for this subscriber; the summary stream must not follow.
+        let _fast = handle.subscribe(Tier::Full {
+            interval: MIN_FULL_INTERVAL,
+        });
+        let mut rx = open(&service(&handle), VitalsDetail::Summary, 0).await;
+        let gaps = vitals_gaps(&mut rx, 4).await;
+        for gap in gaps {
+            assert!(
+                gap >= Duration::from_millis(4_500) && gap <= Duration::from_millis(6_500),
+                "a summary sample every ~5 s, got a gap of {gap:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_stream_keeps_its_own_interval_beside_a_faster_one() {
+        let (handle, _shutdown) = enabled_monitor();
+        let _fast = handle.subscribe(Tier::Full {
+            interval: MIN_FULL_INTERVAL,
+        });
+        let mut rx = open(&service(&handle), VitalsDetail::Full, 6_000).await;
+        for gap in vitals_gaps(&mut rx, 3).await {
+            assert!(
+                gap >= Duration::from_millis(5_400) && gap <= Duration::from_millis(8_000),
+                "a full sample every ~6 s, got a gap of {gap:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_stream_keeps_its_own_interval_beside_a_faster_one() {
+        let (handle, _shutdown) = process_monitor();
+        let _fast = handle.watch_processes(ProcessQuery {
+            interval: MIN_PROCESS_INTERVAL,
+            ..ProcessQuery::default()
+        });
+        let req = WatchProcessesRequest {
+            interval_ms: 10_000,
+            ..by_pid()
+        };
+        let mut rx = open_processes(&service(&handle), with_flag(req, Some(false))).await;
+        let _ = snapshot(&mut rx).await;
+        let mut last = Instant::now();
+        for _ in 0..3 {
+            let _ = snapshot(&mut rx).await;
+            let gap = Instant::now() - last;
+            last = Instant::now();
+            assert!(
+                gap >= Duration::from_secs(9) && gap <= Duration::from_secs(12),
+                "a snapshot every ~10 s, got a gap of {gap:?}"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_seventeenth_vitals_stream_is_refused_and_a_closed_one_frees_a_slot() {
+        let (handle, _shutdown) = enabled_monitor();
+        let service = service(&handle);
+        let mut open_streams = Vec::new();
+        for _ in 0..MAX_WATCH_STREAMS {
+            open_streams.push(open(&service, VitalsDetail::Summary, 0).await);
+        }
+        let err = service
+            .watch_vitals_impl(vitals_req(VitalsDetail::Summary, 0))
+            .await
+            .err()
+            .expect("the 17th is refused");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+        // The other rpc has its own pool.
+        let (phandle, _pshutdown) = process_monitor();
+        let _ = open_processes(&self::service(&phandle), with_flag(by_pid(), Some(false))).await;
+
+        drop(open_streams.pop());
+        let reopened = tokio::time::timeout(WAIT, async {
+            loop {
+                match service
+                    .watch_vitals_impl(vitals_req(VitalsDetail::Summary, 0))
+                    .await
+                {
+                    Ok(stream) => break stream,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("closing a stream frees its slot");
+        drop(reopened);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_seventeenth_process_stream_is_refused_and_a_closed_one_frees_a_slot() {
+        let (handle, _shutdown) = process_monitor();
+        let service = service(&handle);
+        let mut open_streams = Vec::new();
+        for _ in 0..MAX_WATCH_STREAMS {
+            open_streams.push(open_processes(&service, with_flag(by_pid(), Some(false))).await);
+        }
+        let err = service
+            .watch_processes_impl(with_flag(by_pid(), Some(false)))
+            .await
+            .err()
+            .expect("the 17th is refused");
+        assert_eq!(err.code(), tonic::Code::ResourceExhausted);
+
+        drop(open_streams.pop());
+        let reopened = tokio::time::timeout(WAIT, async {
+            loop {
+                match service
+                    .watch_processes_impl(with_flag(by_pid(), Some(false)))
+                    .await
+                {
+                    Ok(stream) => break stream,
+                    Err(_) => tokio::time::sleep(Duration::from_millis(10)).await,
+                }
+            }
+        })
+        .await
+        .expect("closing a stream frees its slot");
+        drop(reopened);
     }
 }

@@ -3,8 +3,9 @@
 //! Surface: `GetVersion`, `Login` (public, no bearer), `AttachTerminal` (bidi
 //! relay), `ListSessions`/`GetLayout`/`GetSpaces`/`ListAgents` (typed reads),
 //! `WatchAgents` (server-streaming read over the internal event bus), the
-//! host-vitals reads `WatchVitals`/`GetVitalsHistory` (over the monitor handle),
-//! and the pane/tab/session/space mutating ops.
+//! host-vitals RPCs `WatchVitals`/`GetVitalsHistory`/`WatchProcesses`/`SignalProcess`
+//! (over the monitor handle; `SignalProcess` is the mutating one, refused for read-only
+//! tokens), and the pane/tab/session/space mutating ops.
 //!
 //! Auth note: `Login` and `GetVersion` are **public** (no bearer required).
 //! Every other RPC requires a valid bearer token injected by the tower layer in
@@ -112,6 +113,8 @@ pub struct MuxrService {
     /// advertises `"host-vitals"` only while it reports enabled, read at call
     /// time so a runtime flip shows on the next call.
     monitor: Option<crate::monitor::MonitorHandle>,
+    /// The server-wide caps on concurrent `WatchVitals` and `WatchProcesses` streams.
+    watch_slots: monitor_ops::WatchSlots,
 }
 
 impl Default for MuxrService {
@@ -143,6 +146,7 @@ impl MuxrService {
             event_bus: None,
             update: crate::update::UpdateState::default(),
             monitor: None,
+            watch_slots: monitor_ops::WatchSlots::default(),
         }
     }
 
@@ -173,6 +177,7 @@ impl MuxrService {
             event_bus: None,
             update: crate::update::UpdateState::default(),
             monitor: None,
+            watch_slots: monitor_ops::WatchSlots::default(),
         }
     }
 

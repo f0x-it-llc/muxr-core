@@ -263,10 +263,15 @@ hour, `WatchProcesses` streams the host's process table, filtered and sorted on
 the server, and `SignalProcess` sends one signal to one process. Read-only tokens
 may call the first three but not `SignalProcess`, and they get process rows with
 no command lines. A full token sees a command line only for a process owned by
-the user `muxrd` runs as. `SignalProcess` names a process by pid and start time,
-so a recycled pid is not signalled; it refuses pid 0 and 1, `muxrd` itself and
-thread ids, and otherwise whether the signal is delivered is up to the operating
-system. Inside a container, the cpu and memory figures are the host's and the
+the user `muxrd` runs as. `SignalProcess` is refused for a read-only token with
+`PERMISSION_DENIED`. It names a process by pid and start time, so a recycled pid
+is not signalled; a target that is not found, has changed, is pid 0 or 1, `muxrd`
+itself, a thread id, or is refused by the operating system comes back as
+`ok: false` ("not signalled", with display-only text), and `ok: true` means the
+signal was sent, not that the process exited. A full token may signal any process
+the user `muxrd` runs as may signal. Each stream is paced by its own interval, and
+at most 16 `WatchVitals` and 16 `WatchProcesses` streams may be open at once
+(`RESOURCE_EXHAUSTED` beyond that). Inside a container, the cpu and memory figures are the host's and the
 process list shows only the container's own processes; temperatures appear only
 where the container can read the host's sensors.
 

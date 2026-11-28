@@ -137,6 +137,13 @@ field muxr.v1.HostInfo.memory_total_bytes = 9 optional uint64
 field muxr.v1.HostInfo.os_name = 2 optional string
 field muxr.v1.HostInfo.os_version = 3 optional string
 field muxr.v1.HostInfo.physical_cores = 8 optional uint32 oneof=_physical_cores proto3_optional
+field muxr.v1.HostMemory.available_bytes = 5 optional uint64
+field muxr.v1.HostMemory.cache_bytes = 3 optional uint64
+field muxr.v1.HostMemory.free_bytes = 4 optional uint64
+field muxr.v1.HostMemory.total_bytes = 1 optional uint64
+field muxr.v1.HostMemory.used_bytes = 2 optional uint64
+field muxr.v1.HostTemperature.celsius = 2 optional float
+field muxr.v1.HostTemperature.label = 1 optional string
 field muxr.v1.Layout.tabs = 1 repeated message muxr.v1.TabMsg
 field muxr.v1.ListPushTargetsResp.targets = 1 repeated message muxr.v1.PushTargetInfo
 field muxr.v1.LoadAverage.load_1 = 1 optional double
@@ -146,11 +153,6 @@ field muxr.v1.LoginRequest.auth_token = 1 optional string
 field muxr.v1.LoginRequest.remember_me = 2 optional bool
 field muxr.v1.LoginResponse.is_read_only = 2 optional bool
 field muxr.v1.LoginResponse.session_token = 1 optional string
-field muxr.v1.Memory.available_bytes = 5 optional uint64
-field muxr.v1.Memory.cache_bytes = 3 optional uint64
-field muxr.v1.Memory.free_bytes = 4 optional uint64
-field muxr.v1.Memory.total_bytes = 1 optional uint64
-field muxr.v1.Memory.used_bytes = 2 optional uint64
 field muxr.v1.MouseInput.col = 2 optional uint32
 field muxr.v1.MouseInput.kind = 1 optional enum muxr.v1.MouseKind
 field muxr.v1.MouseInput.row = 3 optional uint32
@@ -269,8 +271,6 @@ field muxr.v1.TabMsg.tab_id = 6 optional uint32
 field muxr.v1.TabTarget.connection_id = 3 optional string
 field muxr.v1.TabTarget.session = 1 optional string
 field muxr.v1.TabTarget.tab_id = 2 optional uint64
-field muxr.v1.Temperature.celsius = 2 optional float
-field muxr.v1.Temperature.label = 1 optional string
 field muxr.v1.ToggleFullscreenReq.floating_visible = 3 optional bool
 field muxr.v1.ToggleFullscreenReq.has_floating_hint = 5 optional bool
 field muxr.v1.ToggleFullscreenReq.target = 1 optional message muxr.v1.PaneTarget
@@ -308,13 +308,13 @@ field muxr.v1.VitalsSample.disk_read_bps = 13 optional uint64 oneof=_disk_read_b
 field muxr.v1.VitalsSample.disk_write_bps = 14 optional uint64 oneof=_disk_write_bps proto3_optional
 field muxr.v1.VitalsSample.disks = 12 repeated message muxr.v1.DiskVolume
 field muxr.v1.VitalsSample.load = 7 optional message muxr.v1.LoadAverage
-field muxr.v1.VitalsSample.memory = 9 optional message muxr.v1.Memory
+field muxr.v1.VitalsSample.memory = 9 optional message muxr.v1.HostMemory
 field muxr.v1.VitalsSample.net = 15 optional message muxr.v1.NetInterface
 field muxr.v1.VitalsSample.process_count = 17 optional uint32 oneof=_process_count proto3_optional
 field muxr.v1.VitalsSample.running_count = 18 optional uint32 oneof=_running_count proto3_optional
 field muxr.v1.VitalsSample.swap_total_bytes = 11 optional uint64
 field muxr.v1.VitalsSample.swap_used_bytes = 10 optional uint64
-field muxr.v1.VitalsSample.temperatures = 16 repeated message muxr.v1.Temperature
+field muxr.v1.VitalsSample.temperatures = 16 repeated message muxr.v1.HostTemperature
 field muxr.v1.VitalsSample.unix_ms = 1 optional int64
 field muxr.v1.WatchProcessesRequest.filter = 3 optional string
 field muxr.v1.WatchProcessesRequest.interval_ms = 7 optional uint32
