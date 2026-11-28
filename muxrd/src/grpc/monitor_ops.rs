@@ -1,5 +1,6 @@
-//! Host-vitals RPCs over [`crate::monitor::MonitorHandle`]: `WatchVitals` and `GetVitalsHistory`,
-//! the model → proto mapping, and `WatchProcesses`/`SignalProcess` declared ahead of their card.
+//! Host-vitals RPCs over [`crate::monitor::MonitorHandle`]: `WatchVitals`, `GetVitalsHistory`,
+//! `WatchProcesses` (sorted, filtered and cut on the server; command lines redacted for a
+//! read-only token), the guarded `SignalProcess`, and the model → proto mapping.
 //! Streams mirror `WatchAgents` (bounded channel, token re-check, fatal lane); see `agent_ops`.
 
 use std::future::Future;
@@ -13,8 +14,9 @@ use tokio::time::{Interval, MissedTickBehavior};
 use tonic::{Request, Response, Status};
 
 use crate::monitor::{
-    self, DEFAULT_FULL_INTERVAL, MAX_FULL_INTERVAL, MIN_FULL_INTERVAL, MonitorHandle, Tier,
-    VitalsItem, VitalsSubscription,
+    self, DEFAULT_FULL_INTERVAL, DEFAULT_PROCESS_LIMIT, MAX_FULL_INTERVAL, MAX_PROCESS_LIMIT,
+    MIN_FULL_INTERVAL, MIN_PROCESS_INTERVAL, MonitorHandle, ProcessQuery, ProcessSubscription,
+    SignalRefusal, Tier, VitalsItem, VitalsSubscription,
 };
 use crate::proto::{
     ActionAck as ProtoAck, HistoryRange, HistorySeries, ProcessSnapshot, SeriesKind,
@@ -24,6 +26,10 @@ use crate::proto::{
 use crate::relay::TOKEN_RECHECK_INTERVAL;
 
 use super::MuxrService;
+use super::helpers;
+
+/// Longest `WatchProcesses` filter, in bytes.
+const MAX_PROCESS_FILTER_BYTES: usize = 128;
 
 /// Bound on one `WatchVitals` response channel, as `WatchAgents`' own. A client slower than the
 /// sampler stalls the stream task, whose subscription then lags (reported in `lagged`) instead
@@ -106,20 +112,84 @@ impl MuxrService {
 
     // ── WatchProcesses / SignalProcess ───────────────────────────────────────
 
-    /// Declared on the wire; implemented by the next card.
+    /// Stream the process table through the request's query. A read: permitted for read-only
+    /// tokens, whose rows never carry a command line.
     pub(super) async fn watch_processes_impl(
         &self,
-        _request: Request<WatchProcessesRequest>,
+        request: Request<WatchProcessesRequest>,
     ) -> Result<Response<ProcessSnapshotStream>, Status> {
-        Err(Status::unimplemented("next card"))
+        const RPC: &str = "WatchProcesses";
+        let token = request
+            .extensions()
+            .get::<crate::auth::SessionToken>()
+            .map(|t| t.0.clone());
+        let redact = redact_commands(&request, RPC);
+        let query = process_query(request.get_ref())?;
+        let handle = self.enabled_monitor(RPC)?;
+        // Disabled between the check and here: the subscription yields nothing, so the stream
+        // sends its terminal snapshot and ends OK.
+        let subscription = handle.watch_processes(query.clone());
+        log::info!(
+            "{RPC}: opened (sort {:?}, reverse {}, limit {}, pinned {}, redacted {redact})",
+            query.sort,
+            query.reverse,
+            query.limit,
+            query.pinned.is_some(),
+        );
+        let watch = ProcessWatch {
+            redact,
+            auth: TokenCheck {
+                token,
+                validate: Arc::new(|t: &str| crate::ipc::validate_session_token(t)),
+            },
+            token_recheck: TOKEN_RECHECK_INTERVAL,
+        };
+        Ok(Response::new(Box::pin(start_process_watch(
+            watch,
+            subscription,
+        ))))
     }
 
-    /// Declared on the wire; implemented by the next card.
+    /// Signal one process named by `(pid, start time)`. MUTATING: read-only tokens are
+    /// refused. A refusal by the monitor is an `ok: false` ack, never a transport error.
     pub(super) async fn signal_process_impl(
         &self,
-        _request: Request<SignalProcessRequest>,
+        request: Request<SignalProcessRequest>,
     ) -> Result<Response<ProtoAck>, Status> {
-        Err(Status::unimplemented("next card"))
+        helpers::reject_if_read_only(&request, "SignalProcess")?;
+        const RPC: &str = "SignalProcess";
+        let req = request.into_inner();
+        let signal = process_signal(req.signal)?;
+        if req.pid == 0 {
+            log::info!("{RPC}: pid 0 → invalid_argument");
+            return Err(Status::invalid_argument("pid: must not be 0"));
+        }
+        let handle = self.enabled_monitor(RPC)?;
+        // `None`: switched off since the check (or the blocking lookup panicked, logged there).
+        let Some(result) = handle
+            .signal_process(req.pid, req.start_unix_s, signal)
+            .await
+        else {
+            return Err(monitoring_disabled(RPC));
+        };
+        let pid = req.pid;
+        Ok(Response::new(match result {
+            Ok(()) => {
+                log::info!("{RPC}: sent {signal:?} to pid {pid}");
+                ProtoAck {
+                    ok: true,
+                    ..ProtoAck::default()
+                }
+            }
+            Err(refusal) => {
+                log::info!("{RPC}: {signal:?} to pid {pid} refused: {refusal}");
+                ProtoAck {
+                    ok: false,
+                    error: refusal_text(refusal).to_owned(),
+                    info: String::new(),
+                }
+            }
+        }))
     }
 }
 
@@ -161,6 +231,99 @@ fn history_range(raw: i32) -> Result<monitor::HistoryRange, Status> {
             log::info!("GetVitalsHistory: range {raw} → invalid_argument");
             Err(Status::invalid_argument("range: unspecified or unknown"))
         }
+    }
+}
+
+/// The monitor query a `WatchProcesses` request asks for. Limit 0 is the default and anything
+/// above the ceiling is clamped; an unspecified sort is cpu; pinned pid 0 is none; interval 0 is
+/// the floor, anything else is left for the monitor to clamp. An unknown sort, an oversized
+/// filter or one with control characters is `invalid_argument`.
+fn process_query(req: &WatchProcessesRequest) -> Result<ProcessQuery, Status> {
+    use crate::proto::ProcessSort as Wire;
+    let sort = match Wire::try_from(req.sort) {
+        Ok(Wire::Unspecified | Wire::Cpu) => monitor::ProcessSort::Cpu,
+        Ok(Wire::Memory) => monitor::ProcessSort::Memory,
+        Ok(Wire::Pid) => monitor::ProcessSort::Pid,
+        Ok(Wire::Name) => monitor::ProcessSort::Name,
+        Err(_) => {
+            log::info!(
+                "WatchProcesses: unknown sort {} → invalid_argument",
+                req.sort
+            );
+            return Err(Status::invalid_argument("sort: unknown value"));
+        }
+    };
+    if req.filter.len() > MAX_PROCESS_FILTER_BYTES {
+        log::info!(
+            "WatchProcesses: filter of {} bytes → invalid_argument",
+            req.filter.len()
+        );
+        return Err(Status::invalid_argument(format!(
+            "filter: at most {MAX_PROCESS_FILTER_BYTES} bytes"
+        )));
+    }
+    if req.filter.chars().any(char::is_control) {
+        log::info!("WatchProcesses: filter with control characters → invalid_argument");
+        return Err(Status::invalid_argument(
+            "filter: control characters are not allowed",
+        ));
+    }
+    let limit = match req.limit {
+        0 => DEFAULT_PROCESS_LIMIT,
+        n => n.min(MAX_PROCESS_LIMIT),
+    };
+    let pinned = (req.pinned_pid != 0).then_some((req.pinned_pid, req.pinned_start_unix_s));
+    let interval = match req.interval_ms {
+        0 => MIN_PROCESS_INTERVAL,
+        ms => Duration::from_millis(u64::from(ms)),
+    };
+    Ok(ProcessQuery {
+        sort,
+        reverse: req.reverse,
+        filter: req.filter.clone(),
+        limit,
+        pinned,
+        interval,
+    })
+}
+
+/// Whether a stream's rows lose their command line: a read-only token, or no read-only flag at
+/// all (fail closed — the auth layer always sets it, so its absence is that layer's bug).
+fn redact_commands<T>(request: &Request<T>, rpc: &str) -> bool {
+    if request
+        .extensions()
+        .get::<crate::auth::SessionReadOnly>()
+        .is_none()
+    {
+        log::warn!(
+            "{rpc}: SessionReadOnly extension absent (auth layer bug) → redacting command lines"
+        );
+    }
+    helpers::session_is_read_only(request)
+}
+
+/// The monitor's signal for a wire value; unspecified or unknown is `invalid_argument`.
+fn process_signal(raw: i32) -> Result<monitor::ProcessSignal, Status> {
+    use crate::proto::ProcessSignal as Wire;
+    match Wire::try_from(raw) {
+        Ok(Wire::Term) => Ok(monitor::ProcessSignal::Term),
+        Ok(Wire::Kill) => Ok(monitor::ProcessSignal::Kill),
+        Ok(Wire::Int) => Ok(monitor::ProcessSignal::Int),
+        Ok(Wire::Hup) => Ok(monitor::ProcessSignal::Hup),
+        Ok(Wire::Unspecified) | Err(_) => {
+            log::info!("SignalProcess: signal {raw} → invalid_argument");
+            Err(Status::invalid_argument("signal: unspecified or unknown"))
+        }
+    }
+}
+
+/// The caller's short, generic text for a refusal; the log keeps the detail.
+fn refusal_text(refusal: SignalRefusal) -> &'static str {
+    match refusal {
+        SignalRefusal::NotFound => "process not found",
+        SignalRefusal::Recycled => "process changed since it was listed",
+        SignalRefusal::Forbidden => "not allowed",
+        SignalRefusal::NotPermitted(_) => "permission denied by the operating system",
     }
 }
 
@@ -305,6 +468,57 @@ fn history_msg(view: &monitor::HistoryView) -> VitalsHistory {
                 values: values.clone(),
             })
             .collect(),
+    }
+}
+
+fn process_state_msg(state: monitor::ProcessState) -> crate::proto::ProcessState {
+    use crate::proto::ProcessState as Wire;
+    match state {
+        monitor::ProcessState::Running => Wire::Running,
+        monitor::ProcessState::Sleeping => Wire::Sleeping,
+        monitor::ProcessState::DiskWait => Wire::DiskWait,
+        monitor::ProcessState::Zombie => Wire::Zombie,
+        monitor::ProcessState::Stopped => Wire::Stopped,
+        monitor::ProcessState::Idle => Wire::Idle,
+        monitor::ProcessState::Dead => Wire::Dead,
+        monitor::ProcessState::Unknown => Wire::Unknown,
+    }
+}
+
+/// One process on the wire; `redact` empties its command line.
+fn process_row_msg(row: &monitor::ProcessRow, redact: bool) -> crate::proto::ProcessRow {
+    crate::proto::ProcessRow {
+        pid: row.pid,
+        parent_pid: row.parent_pid,
+        name: row.name.clone(),
+        command: if redact {
+            String::new()
+        } else {
+            row.command.clone()
+        },
+        user: row.user.clone(),
+        cpu_percent: row.cpu_percent,
+        memory_bytes: row.memory_bytes,
+        threads: row.threads,
+        start_unix_s: row.start_unix_s,
+        cpu_time_ms: row.cpu_time_ms,
+        state: process_state_msg(row.state) as i32,
+    }
+}
+
+/// One process view on the wire; `redact` empties every row's command line.
+fn process_snapshot_msg(snap: &monitor::ProcessSnapshot, redact: bool) -> ProcessSnapshot {
+    ProcessSnapshot {
+        revision: snap.revision,
+        unix_ms: to_i64(snap.unix_ms),
+        total: snap.total,
+        running: snap.running,
+        rows: snap
+            .rows
+            .iter()
+            .map(|row| process_row_msg(row, redact))
+            .collect(),
+        disabled: false,
     }
 }
 
@@ -520,6 +734,83 @@ async fn vitals_loop(
     }
 }
 
+// ─── WatchProcesses stream ────────────────────────────────────────────────────
+
+/// Everything one `WatchProcesses` stream needs besides its subscription and channels.
+struct ProcessWatch {
+    /// Decided once at open: every row's command line is emptied.
+    redact: bool,
+    auth: TokenCheck,
+    token_recheck: Duration,
+}
+
+/// Spawn the loop that forwards `subscription` to a fresh stream.
+fn start_process_watch(
+    w: ProcessWatch,
+    subscription: ProcessSubscription,
+) -> WatchStream<ProcessSnapshot> {
+    let (tx, rx) = mpsc::channel(WATCH_CHANNEL_BOUND);
+    let (fatal_tx, fatal_rx) = oneshot::channel();
+    tokio::spawn(process_loop(w, subscription, tx, fatal_tx));
+    WatchStream {
+        rx,
+        fatal: Some(fatal_rx),
+        done: false,
+    }
+}
+
+/// Forward snapshots until the client goes, the token is revoked, or monitoring is switched off
+/// (one `disabled` snapshot, then the stream ends OK). A snapshot the client was too slow for is
+/// replaced by the newest one inside the subscription. The subscription, and with it its
+/// demand, is dropped when this returns.
+async fn process_loop(
+    w: ProcessWatch,
+    mut subscription: ProcessSubscription,
+    tx: mpsc::Sender<ProcessSnapshot>,
+    fatal: oneshot::Sender<Status>,
+) {
+    const RPC: &str = "WatchProcesses";
+    let mut recheck = recheck_interval(w.token_recheck).await;
+
+    let flow = loop {
+        let item = tokio::select! {
+            () = tx.closed() => break Flow::Gone,
+            _ = recheck.tick() => {
+                if !token_still_valid(RPC, &w.auth).await {
+                    break Flow::Revoked;
+                }
+                continue;
+            }
+            item = subscription.recv() => item,
+        };
+        let Some(snapshot) = item else {
+            let terminal = ProcessSnapshot {
+                disabled: true,
+                ..ProcessSnapshot::default()
+            };
+            match deliver(RPC, &w.auth, &tx, &mut recheck, terminal).await {
+                Flow::Continue => break Flow::Disabled,
+                ended => break ended,
+            }
+        };
+        let msg = process_snapshot_msg(&snapshot, w.redact);
+        match deliver(RPC, &w.auth, &tx, &mut recheck, msg).await {
+            Flow::Continue => {}
+            ended => break ended,
+        }
+    };
+    drop(subscription);
+    match flow {
+        Flow::Revoked => {
+            log::warn!("{RPC}: token no longer valid — ending stream");
+            let _ = fatal.send(Status::unauthenticated("session token no longer valid"));
+        }
+        Flow::Gone => log::debug!("{RPC}: client went away — ending stream"),
+        Flow::Disabled => log::info!("{RPC}: monitoring switched off — stream ended"),
+        Flow::Continue => {}
+    }
+}
+
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -532,9 +823,11 @@ mod tests {
 
     use crate::auth::SessionReadOnly;
     use crate::monitor::{
-        DemandLevel, DiskReading, HostSource, InterfaceReading, LoadAverage, Memory, RawReading,
-        ReadSpec, SourceFactory,
+        DemandLevel, DiskReading, HostSource, InterfaceReading, LoadAverage, Memory, RawProcess,
+        RawReading, ReadSpec, SourceFactory,
     };
+    use crate::proto::ProcessSignal as WireSignal;
+    use crate::proto::ProcessSort as WireSort;
 
     use super::*;
 
@@ -719,22 +1012,6 @@ mod tests {
             .await
             .expect_err("refused");
         assert_eq!(err.code(), tonic::Code::FailedPrecondition);
-    }
-
-    #[tokio::test]
-    async fn the_process_rpcs_are_declared_but_unimplemented() {
-        let service = MuxrService::new();
-        let err = service
-            .watch_processes_impl(Request::new(WatchProcessesRequest::default()))
-            .await
-            .err()
-            .expect("unimplemented");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
-        let err = service
-            .signal_process_impl(Request::new(SignalProcessRequest::default()))
-            .await
-            .expect_err("unimplemented");
-        assert_eq!(err.code(), tonic::Code::Unimplemented);
     }
 
     // ── WatchVitals ───────────────────────────────────────────────────────────
@@ -1073,5 +1350,661 @@ mod tests {
             "slots before monitoring are NaN"
         );
         assert!(cpu.iter().any(|v| (v - 25.0).abs() < f32::EPSILON));
+    }
+
+    // ── WatchProcesses ────────────────────────────────────────────────────────
+
+    /// The uid the process fake reports as muxrd's own.
+    const OWN_UID: u32 = 1000;
+
+    /// A scripted process table: pid 2 is ours (its command line shows), pid 3 is root's.
+    struct FakeProcesses;
+
+    impl HostSource for FakeProcesses {
+        fn host_info(&mut self) -> anyhow::Result<monitor::HostInfo> {
+            Ok(monitor::HostInfo::default())
+        }
+
+        fn read(&mut self, _spec: ReadSpec) -> anyhow::Result<RawReading> {
+            Ok(RawReading::default())
+        }
+
+        fn read_processes(&mut self) -> anyhow::Result<Vec<RawProcess>> {
+            Ok(vec![
+                RawProcess {
+                    pid: 2,
+                    parent_pid: Some(1),
+                    start_unix_s: 100,
+                    name: "mine".into(),
+                    cmd: vec!["/usr/bin/mine".into(), "--secret-flag".into()],
+                    uid: Some(OWN_UID),
+                    user: "alice".into(),
+                    cpu_percent: 30.0,
+                    memory_bytes: Some(4_096),
+                    cpu_time_ms: 1_500,
+                    state: monitor::ProcessState::Running,
+                },
+                RawProcess {
+                    pid: 3,
+                    parent_pid: Some(1),
+                    start_unix_s: 200,
+                    name: "sshd".into(),
+                    cmd: vec!["/usr/sbin/sshd".into(), "-D".into()],
+                    uid: Some(0),
+                    user: "root".into(),
+                    cpu_percent: 10.0,
+                    memory_bytes: None,
+                    cpu_time_ms: 20,
+                    state: monitor::ProcessState::Sleeping,
+                },
+            ])
+        }
+
+        fn own_uid(&mut self) -> Option<u32> {
+            Some(OWN_UID)
+        }
+
+        fn read_proc_status(&mut self, pid: u32) -> Option<String> {
+            (pid == 3).then(|| "Name:\tsshd\nThreads:\t4\n".into())
+        }
+    }
+
+    /// An enabled monitor over [`FakeProcesses`]; keep the shutdown sender alive for the test.
+    fn process_monitor() -> (MonitorHandle, watch::Sender<bool>) {
+        let factory: SourceFactory =
+            Arc::new(|| Ok(Box::new(FakeProcesses) as Box<dyn HostSource>));
+        let (shutdown, shutdown_rx) = watch::channel(false);
+        let handle = MonitorHandle::with_source(factory, shutdown_rx);
+        handle.set_enabled(true);
+        (handle, shutdown)
+    }
+
+    fn by_pid() -> WatchProcessesRequest {
+        WatchProcessesRequest {
+            sort: WireSort::Pid as i32,
+            ..WatchProcessesRequest::default()
+        }
+    }
+
+    /// `req` with the read-only flag set to `read_only`, or with no flag at all.
+    fn with_flag<T>(req: T, read_only: Option<bool>) -> Request<T> {
+        let mut req = Request::new(req);
+        if let Some(ro) = read_only {
+            req.extensions_mut().insert(SessionReadOnly(ro));
+        }
+        req
+    }
+
+    async fn open_processes(
+        service: &MuxrService,
+        req: Request<WatchProcessesRequest>,
+    ) -> ProcessSnapshotStream {
+        service
+            .watch_processes_impl(req)
+            .await
+            .expect("the watch opens")
+            .into_inner()
+    }
+
+    async fn recv_snapshot<S>(rx: &mut S) -> Option<Result<ProcessSnapshot, Status>>
+    where
+        S: futures::Stream<Item = Result<ProcessSnapshot, Status>> + Unpin,
+    {
+        tokio::time::timeout(WAIT, rx.next())
+            .await
+            .expect("the stream must answer in time")
+    }
+
+    async fn snapshot<S>(rx: &mut S) -> ProcessSnapshot
+    where
+        S: futures::Stream<Item = Result<ProcessSnapshot, Status>> + Unpin,
+    {
+        recv_snapshot(rx)
+            .await
+            .expect("a snapshot, not the end")
+            .expect("a snapshot, not an error")
+    }
+
+    fn query(req: WatchProcessesRequest) -> Result<ProcessQuery, Status> {
+        process_query(&req)
+    }
+
+    #[tokio::test]
+    async fn the_process_rpcs_fail_precondition_without_a_monitor_handle() {
+        let service = MuxrService::new();
+        let err = service
+            .watch_processes_impl(with_flag(by_pid(), Some(false)))
+            .await
+            .err()
+            .expect("refused");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        let err = service
+            .signal_process_impl(with_flag(
+                signal_req(4242, 0, WireSignal::Term),
+                Some(false),
+            ))
+            .await
+            .expect_err("refused");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[tokio::test]
+    async fn the_process_rpcs_fail_precondition_while_monitoring_is_off() {
+        let (handle, _shutdown) = process_monitor();
+        handle.set_enabled(false);
+        let service = service(&handle);
+        let err = service
+            .watch_processes_impl(with_flag(by_pid(), Some(false)))
+            .await
+            .err()
+            .expect("refused");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+        let err = service
+            .signal_process_impl(with_flag(
+                signal_req(4242, 0, WireSignal::Term),
+                Some(false),
+            ))
+            .await
+            .expect_err("refused");
+        assert_eq!(err.code(), tonic::Code::FailedPrecondition);
+    }
+
+    #[test]
+    fn the_process_query_defaults_and_clamps() {
+        let defaults = query(WatchProcessesRequest::default()).expect("valid");
+        assert_eq!(
+            defaults,
+            ProcessQuery {
+                sort: monitor::ProcessSort::Cpu,
+                reverse: false,
+                filter: String::new(),
+                limit: DEFAULT_PROCESS_LIMIT,
+                pinned: None,
+                interval: MIN_PROCESS_INTERVAL,
+            },
+            "limit 0 = 50, unspecified sort = cpu, pinned pid 0 = none, interval 0 = the floor"
+        );
+        assert_eq!(DEFAULT_PROCESS_LIMIT, 50);
+
+        let clamped = query(WatchProcessesRequest {
+            limit: 1_000,
+            ..WatchProcessesRequest::default()
+        })
+        .expect("valid");
+        assert_eq!(clamped.limit, MAX_PROCESS_LIMIT);
+        assert_eq!(MAX_PROCESS_LIMIT, 200);
+        let kept = query(WatchProcessesRequest {
+            limit: 7,
+            ..WatchProcessesRequest::default()
+        })
+        .expect("valid");
+        assert_eq!(kept.limit, 7);
+
+        let explicit = query(WatchProcessesRequest {
+            sort: WireSort::Name as i32,
+            reverse: true,
+            filter: "ssh".into(),
+            pinned_pid: 3,
+            pinned_start_unix_s: 200,
+            interval_ms: 5_000,
+            ..WatchProcessesRequest::default()
+        })
+        .expect("valid");
+        assert_eq!(explicit.sort, monitor::ProcessSort::Name);
+        assert!(explicit.reverse);
+        assert_eq!(explicit.filter, "ssh");
+        assert_eq!(explicit.pinned, Some((3, 200)), "pinned passed through");
+        assert_eq!(explicit.interval, Duration::from_secs(5));
+
+        for (wire, model) in [
+            (WireSort::Cpu, monitor::ProcessSort::Cpu),
+            (WireSort::Memory, monitor::ProcessSort::Memory),
+            (WireSort::Pid, monitor::ProcessSort::Pid),
+        ] {
+            let q = query(WatchProcessesRequest {
+                sort: wire as i32,
+                ..WatchProcessesRequest::default()
+            })
+            .expect("valid");
+            assert_eq!(q.sort, model);
+        }
+
+        let fast = query(WatchProcessesRequest {
+            interval_ms: 100,
+            ..WatchProcessesRequest::default()
+        })
+        .expect("valid");
+        assert_eq!(
+            fast.effective_interval(),
+            MIN_PROCESS_INTERVAL,
+            "left for the monitor to clamp"
+        );
+    }
+
+    #[test]
+    fn oversized_or_control_character_filters_and_unknown_sorts_are_rejected() {
+        let filter = |f: &str| {
+            query(WatchProcessesRequest {
+                filter: f.into(),
+                ..WatchProcessesRequest::default()
+            })
+        };
+        assert!(filter(&"a".repeat(MAX_PROCESS_FILTER_BYTES)).is_ok());
+        // 43 three-byte characters: 129 bytes, under 128 chars.
+        for bad in [
+            "a".repeat(MAX_PROCESS_FILTER_BYTES + 1),
+            "€".repeat(43),
+            "ss\nh".into(),
+            "\u{1b}[31m".into(),
+            "a\u{7f}".into(),
+            "\u{9b}".into(),
+        ] {
+            let err = filter(&bad).expect_err("rejected");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "{bad:?}");
+        }
+        let err = query(WatchProcessesRequest {
+            sort: 99,
+            ..WatchProcessesRequest::default()
+        })
+        .expect_err("unknown sort");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_request_is_rejected_before_the_stream_opens() {
+        let (handle, _shutdown) = process_monitor();
+        let service = service(&handle);
+        for req in [
+            WatchProcessesRequest {
+                sort: 42,
+                ..WatchProcessesRequest::default()
+            },
+            WatchProcessesRequest {
+                filter: "x\ty".into(),
+                ..WatchProcessesRequest::default()
+            },
+        ] {
+            let err = service
+                .watch_processes_impl(with_flag(req, Some(false)))
+                .await
+                .err()
+                .expect("rejected");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_full_token_sees_the_command_line_of_its_own_uids_rows_only() {
+        let (handle, _shutdown) = process_monitor();
+        let mut rx = open_processes(&service(&handle), with_flag(by_pid(), Some(false))).await;
+        let snap = snapshot(&mut rx).await;
+        assert!(!snap.disabled);
+        assert!(snap.revision > 0);
+        assert!(snap.unix_ms > 0);
+        assert_eq!((snap.total, snap.running), (2, 1));
+        let pids: Vec<_> = snap.rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [2, 3]);
+        assert_eq!(snap.rows[0].command, "/usr/bin/mine --secret-flag");
+        assert_eq!(snap.rows[1].command, "", "another uid's row has none");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_read_only_token_sees_no_command_line_but_everything_else() {
+        let (handle, _shutdown) = process_monitor();
+        let mut rx = open_processes(&service(&handle), with_flag(by_pid(), Some(true))).await;
+        let snap = snapshot(&mut rx).await;
+        assert!(snap.rows.iter().all(|r| r.command.is_empty()));
+        let mine = &snap.rows[0];
+        assert_eq!(
+            (
+                mine.pid,
+                mine.parent_pid,
+                mine.name.as_str(),
+                mine.user.as_str()
+            ),
+            (2, Some(1), "mine", "alice")
+        );
+        assert_eq!(mine.cpu_percent, 30.0);
+        assert_eq!(mine.memory_bytes, Some(4_096));
+        assert_eq!(mine.threads, None, "only the pinned row carries threads");
+        assert_eq!((mine.start_unix_s, mine.cpu_time_ms), (100, 1_500));
+        assert_eq!(mine.state(), crate::proto::ProcessState::Running);
+        let theirs = &snap.rows[1];
+        assert_eq!(
+            (theirs.name.as_str(), theirs.user.as_str()),
+            ("sshd", "root")
+        );
+        assert_eq!(theirs.memory_bytes, None, "a refused figure stays unset");
+        assert_eq!(theirs.state(), crate::proto::ProcessState::Sleeping);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_missing_read_only_flag_redacts_every_command_line() {
+        let (handle, _shutdown) = process_monitor();
+        let mut rx = open_processes(&service(&handle), with_flag(by_pid(), None)).await;
+        let snap = snapshot(&mut rx).await;
+        assert_eq!(snap.rows.len(), 2);
+        assert!(snap.rows.iter().all(|r| r.command.is_empty()));
+        assert_eq!(snap.rows[0].name, "mine");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_limit_and_the_pinned_process_reach_the_monitor() {
+        let (handle, _shutdown) = process_monitor();
+        let service = service(&handle);
+        let pinned = WatchProcessesRequest {
+            limit: 1,
+            pinned_pid: 3,
+            pinned_start_unix_s: 200,
+            ..by_pid()
+        };
+        let mut rx = open_processes(&service, with_flag(pinned, Some(false))).await;
+        let snap = snapshot(&mut rx).await;
+        let pids: Vec<_> = snap.rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [2, 3], "the cut, then the pinned row");
+        assert_eq!(snap.rows[1].threads, Some(4));
+
+        let stale = WatchProcessesRequest {
+            limit: 1,
+            pinned_pid: 3,
+            pinned_start_unix_s: 999,
+            ..by_pid()
+        };
+        let mut rx = open_processes(&service, with_flag(stale, Some(false))).await;
+        let pids: Vec<_> = snapshot(&mut rx).await.rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [2], "another start time is another process");
+
+        let cpu = WatchProcessesRequest {
+            limit: 1,
+            ..WatchProcessesRequest::default()
+        };
+        let mut rx = open_processes(&service, with_flag(cpu, Some(false))).await;
+        let pids: Vec<_> = snapshot(&mut rx).await.rows.iter().map(|r| r.pid).collect();
+        assert_eq!(pids, [2], "the default sort is cpu, highest first");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_process_stream_without_auth_extensions_ends_unauthenticated_at_the_first_recheck() {
+        let (handle, _shutdown) = process_monitor();
+        let opened = Instant::now();
+        let mut rx = open_processes(&service(&handle), Request::new(by_pid())).await;
+        let err = loop {
+            match recv_snapshot(&mut rx)
+                .await
+                .expect("an error, not a silent end")
+            {
+                Ok(snap) => assert!(!snap.rows.is_empty()),
+                Err(status) => break status,
+            }
+        };
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        let after = Instant::now() - opened;
+        assert!(
+            after >= TOKEN_RECHECK_INTERVAL && after < TOKEN_RECHECK_INTERVAL * 2,
+            "ended at the first re-check, {after:?} after open"
+        );
+        assert!(
+            recv_snapshot(&mut rx).await.is_none(),
+            "the stream ends after it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_revoked_token_ends_the_process_stream_unauthenticated() {
+        let (handle, _shutdown) = process_monitor();
+        let valid = Arc::new(AtomicBool::new(true));
+        let flag = Arc::clone(&valid);
+        let watch = ProcessWatch {
+            redact: false,
+            auth: TokenCheck {
+                token: Some("tok".into()),
+                validate: Arc::new(move |_| Ok(flag.load(Ordering::SeqCst))),
+            },
+            token_recheck: Duration::from_secs(1),
+        };
+        let subscription = handle.watch_processes(ProcessQuery::default());
+        let mut rx = start_process_watch(watch, subscription);
+        let _ = snapshot(&mut rx).await;
+        let _ = snapshot(&mut rx).await;
+
+        valid.store(false, Ordering::SeqCst);
+        let err = loop {
+            match recv_snapshot(&mut rx)
+                .await
+                .expect("an error, not a silent end")
+            {
+                Ok(_) => {}
+                Err(status) => break status,
+            }
+        };
+        assert_eq!(err.code(), tonic::Code::Unauthenticated);
+        assert!(
+            recv_snapshot(&mut rx).await.is_none(),
+            "the stream ends after it"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn disabling_mid_stream_sends_one_disabled_snapshot_then_ends_ok() {
+        let (handle, _shutdown) = process_monitor();
+        let mut rx = open_processes(&service(&handle), with_flag(by_pid(), Some(false))).await;
+        let _ = snapshot(&mut rx).await;
+
+        handle.set_enabled(false);
+        let terminal = loop {
+            let snap = snapshot(&mut rx).await;
+            if snap.disabled {
+                break snap;
+            }
+            assert!(
+                !snap.rows.is_empty(),
+                "a snapshot published before the switch"
+            );
+        };
+        assert!(terminal.rows.is_empty());
+        assert_eq!((terminal.revision, terminal.total), (0, 0));
+        assert!(
+            recv_snapshot(&mut rx).await.is_none(),
+            "ends without an error"
+        );
+    }
+
+    // ── SignalProcess ─────────────────────────────────────────────────────────
+
+    /// Kills and reaps the child if a test fails before it does.
+    struct Sleeper(std::process::Child);
+
+    impl Drop for Sleeper {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    impl Sleeper {
+        fn spawn() -> Self {
+            Self(
+                std::process::Command::new("sleep")
+                    .arg("60")
+                    .spawn()
+                    .expect("spawn sleep"),
+            )
+        }
+
+        fn pid(&self) -> u32 {
+            self.0.id()
+        }
+
+        fn alive(&mut self) -> bool {
+            self.0.try_wait().expect("try_wait").is_none()
+        }
+
+        /// Waits (without blocking the runtime) until the child has exited.
+        async fn exited(&mut self) -> std::process::ExitStatus {
+            tokio::time::timeout(Duration::from_secs(10), async {
+                loop {
+                    if let Some(status) = self.0.try_wait().expect("try_wait") {
+                        return status;
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("the child must exit")
+        }
+    }
+
+    /// The start time sysinfo reports for `pid`, as `ProcessRow.start_unix_s` carries it.
+    fn start_time_of(pid: u32) -> i64 {
+        use sysinfo::{Pid, ProcessRefreshKind, ProcessesToUpdate, System};
+        let mut system = System::new().expect("sysinfo");
+        let pid = Pid::from_u32(pid);
+        system.refresh_processes_specifics(
+            ProcessesToUpdate::Some(&[pid]),
+            true,
+            ProcessRefreshKind::nothing(),
+        );
+        let process = system.process(pid).expect("the child is visible");
+        i64::try_from(process.start_time()).expect("a start time")
+    }
+
+    fn signal_req(pid: u32, start_unix_s: i64, signal: WireSignal) -> SignalProcessRequest {
+        SignalProcessRequest {
+            pid,
+            start_unix_s,
+            signal: signal as i32,
+        }
+    }
+
+    async fn signal(
+        service: &MuxrService,
+        req: SignalProcessRequest,
+        read_only: Option<bool>,
+    ) -> Result<ProtoAck, Status> {
+        service
+            .signal_process_impl(with_flag(req, read_only))
+            .await
+            .map(Response::into_inner)
+    }
+
+    #[tokio::test]
+    async fn a_read_only_or_flagless_token_may_not_signal() {
+        let (handle, _shutdown) = process_monitor();
+        let service = service(&handle);
+        let mut child = Sleeper::spawn();
+        let start = start_time_of(child.pid());
+        for read_only in [Some(true), None] {
+            let err = signal(
+                &service,
+                signal_req(child.pid(), start, WireSignal::Kill),
+                read_only,
+            )
+            .await
+            .expect_err("denied");
+            assert_eq!(err.code(), tonic::Code::PermissionDenied, "{read_only:?}");
+        }
+        assert!(child.alive(), "nothing was sent");
+    }
+
+    #[tokio::test]
+    async fn a_wrong_start_time_is_refused_and_the_child_lives() {
+        let (handle, _shutdown) = process_monitor();
+        let mut child = Sleeper::spawn();
+        let start = start_time_of(child.pid());
+        let ack = signal(
+            &service(&handle),
+            signal_req(child.pid(), start + 1, WireSignal::Term),
+            Some(false),
+        )
+        .await
+        .expect("an ack");
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "process changed since it was listed");
+        assert!(ack.info.is_empty());
+        assert!(child.alive());
+    }
+
+    #[tokio::test]
+    async fn the_right_start_time_terminates_the_child() {
+        let (handle, _shutdown) = process_monitor();
+        let mut child = Sleeper::spawn();
+        let start = start_time_of(child.pid());
+        let ack = signal(
+            &service(&handle),
+            signal_req(child.pid(), start, WireSignal::Term),
+            Some(false),
+        )
+        .await
+        .expect("an ack");
+        assert!(ack.ok, "{ack:?}");
+        assert!(ack.error.is_empty() && ack.info.is_empty());
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(child.exited().await.signal(), Some(libc::SIGTERM));
+    }
+
+    #[tokio::test]
+    async fn pid_one_is_not_allowed() {
+        let (handle, _shutdown) = process_monitor();
+        let ack = signal(
+            &service(&handle),
+            signal_req(1, 0, WireSignal::Term),
+            Some(false),
+        )
+        .await
+        .expect("an ack");
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "not allowed");
+    }
+
+    #[tokio::test]
+    async fn a_missing_pid_is_not_found() {
+        let (handle, _shutdown) = process_monitor();
+        let ack = signal(
+            &service(&handle),
+            signal_req(2_000_000_000, 0, WireSignal::Term),
+            Some(false),
+        )
+        .await
+        .expect("an ack");
+        assert!(!ack.ok);
+        assert_eq!(ack.error, "process not found");
+    }
+
+    #[tokio::test]
+    async fn an_unspecified_or_unknown_signal_and_pid_zero_are_invalid() {
+        let (handle, _shutdown) = process_monitor();
+        let service = service(&handle);
+        let mut child = Sleeper::spawn();
+        let start = start_time_of(child.pid());
+        for raw in [WireSignal::Unspecified as i32, 99] {
+            let req = SignalProcessRequest {
+                pid: child.pid(),
+                start_unix_s: start,
+                signal: raw,
+            };
+            let err = signal(&service, req, Some(false))
+                .await
+                .expect_err("rejected");
+            assert_eq!(err.code(), tonic::Code::InvalidArgument, "signal {raw}");
+        }
+        let err = signal(&service, signal_req(0, 0, WireSignal::Term), Some(false))
+            .await
+            .expect_err("rejected");
+        assert_eq!(err.code(), tonic::Code::InvalidArgument);
+        assert!(child.alive());
+    }
+
+    #[test]
+    fn every_refusal_has_a_short_generic_text() {
+        assert_eq!(refusal_text(SignalRefusal::NotFound), "process not found");
+        assert_eq!(
+            refusal_text(SignalRefusal::Recycled),
+            "process changed since it was listed"
+        );
+        assert_eq!(refusal_text(SignalRefusal::Forbidden), "not allowed");
+        assert_eq!(
+            refusal_text(SignalRefusal::NotPermitted(libc::EPERM)),
+            "permission denied by the operating system"
+        );
     }
 }
