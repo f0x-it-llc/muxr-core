@@ -1,0 +1,378 @@
+// Host vitals: the machine muxrd runs on (WatchVitals, GetVitalsHistory,
+// WatchProcesses, SignalProcess). The host-vitals capability gates all four;
+// see proto/README.md#host-vitals.
+//
+// Shared rules. A client must not call these RPCs unless GetVersion lists the
+// host-vitals capability. Each answers FAILED_PRECONDITION when monitoring is
+// off at call time. Every revision is monotonically increasing for the life
+// of the server process (it survives monitoring being switched off and on).
+syntax = "proto3";
+
+package muxr.v1;
+
+// ─── WatchVitals ─────────────────────────────────────────────────────────────
+
+// How much a WatchVitals stream carries, and how often.
+enum VitalsDetail {
+  // Treated as VITALS_DETAIL_SUMMARY.
+  VITALS_DETAIL_UNSPECIFIED = 0;
+  // Server-paced (about every 5 s); no core_percent, no temperatures, and
+  // disks holds only the fullest volume by used / total.
+  VITALS_DETAIL_SUMMARY = 1;
+  // Every field, at WatchVitalsRequest.interval_ms.
+  VITALS_DETAIL_FULL = 2;
+}
+
+// The WatchVitals request.
+message WatchVitalsRequest {
+  // Unspecified = VITALS_DETAIL_SUMMARY; an unknown value is INVALID_ARGUMENT.
+  VitalsDetail detail = 1;
+  // FULL only: the sample interval; 0 = the server default (3 s). Clamped by
+  // the server to its own bounds (2 s to 10 s), never rejected. Ignored for
+  // SUMMARY.
+  uint32 interval_ms = 2;
+}
+
+// One WatchVitals message. Every event but the terminal disabled one carries
+// a sample.
+message VitalsEvent {
+  // The carried sample's revision; 0 on the disabled event.
+  uint64 revision = 1;
+  // Set on the first event of a stream only.
+  HostInfo host = 2;
+  // The sample; unset only on the disabled event.
+  VitalsSample sample = 3;
+  // True on the terminal event sent when monitoring is switched off while the
+  // stream is open; the stream then ends with OK.
+  bool disabled = 4;
+  // Samples this stream skipped because the client read too slowly, just
+  // before this event's sample; 0 = none skipped. The event still carries the
+  // next current sample.
+  uint64 lagged = 5;
+}
+
+// Facts about the host that do not change while monitoring runs. A field the
+// platform does not report is empty or zero.
+message HostInfo {
+  // Host name.
+  string hostname = 1;
+  // Operating system name, e.g. "Arch Linux", "Darwin".
+  string os_name = 2;
+  // Operating system version.
+  string os_version = 3;
+  // Kernel version.
+  string kernel_version = 4;
+  // CPU architecture, e.g. "x86_64", "arm64".
+  string arch = 5;
+  // CPU brand string of the first core.
+  string cpu_brand = 6;
+  // Logical cores (hardware threads).
+  uint32 logical_cores = 7;
+  // Physical cores; unset when the platform does not report them.
+  optional uint32 physical_cores = 8;
+  // Installed memory in bytes.
+  uint64 memory_total_bytes = 9;
+  // Boot time, seconds since the Unix epoch; 0 when unknown.
+  int64 boot_unix_s = 10;
+}
+
+// Load averages.
+message LoadAverage {
+  // Over the last minute.
+  double load_1 = 1;
+  // Over the last 5 minutes.
+  double load_5 = 2;
+  // Over the last 15 minutes.
+  double load_15 = 3;
+}
+
+// Physical memory, partitioned so that used + cache + free = total.
+message Memory {
+  // Installed memory in bytes.
+  uint64 total_bytes = 1;
+  // Bytes in use, cache excluded.
+  uint64 used_bytes = 2;
+  // Reclaimable cache in bytes; 0 where the platform reports none.
+  uint64 cache_bytes = 3;
+  // Unused bytes.
+  uint64 free_bytes = 4;
+  // Bytes available to new work; overlaps cache and free, so it is not part
+  // of the partition.
+  uint64 available_bytes = 5;
+}
+
+// One real filesystem.
+message DiskVolume {
+  // Mount point.
+  string mount = 1;
+  // Filesystem type, e.g. "ext4", "apfs".
+  string fs = 2;
+  // Size in bytes.
+  uint64 total_bytes = 3;
+  // Bytes in use.
+  uint64 used_bytes = 4;
+}
+
+// The host's primary network interface.
+message NetInterface {
+  // Interface name, e.g. "enp5s0", "en0".
+  string name = 1;
+  // Preferred address (IPv4 first); unset when the interface has none.
+  optional string address = 2;
+  // Receive rate in bytes per second; unset until a second reading.
+  optional uint64 rx_bps = 3;
+  // Transmit rate in bytes per second; unset until a second reading.
+  optional uint64 tx_bps = 4;
+  // Bytes received; never goes backwards across a counter reset.
+  uint64 rx_total_bytes = 5;
+  // Bytes transmitted; never goes backwards across a counter reset.
+  uint64 tx_total_bytes = 6;
+}
+
+// One temperature sensor reading.
+message Temperature {
+  // Sensor label as the host reports it.
+  string label = 1;
+  // Degrees Celsius.
+  float celsius = 2;
+}
+
+// One sample of host vitals.
+message VitalsSample {
+  // Wall-clock time of the sample, milliseconds since the Unix epoch.
+  int64 unix_ms = 1;
+  // Total cpu busy share of the whole machine, 0-100.
+  float cpu_percent = 2;
+  // User share of cpu time, 0-100; unset where the host has no split.
+  optional float cpu_user_percent = 3;
+  // System share of cpu time, 0-100; unset where the host has no split.
+  optional float cpu_system_percent = 4;
+  // I/O wait share of cpu time, 0-100; unset where the host has no split.
+  optional float cpu_iowait_percent = 5;
+  // Busy share per logical core, 0-100; empty for SUMMARY.
+  repeated float core_percent = 6;
+  // Load averages; unset when the host reports none.
+  LoadAverage load = 7;
+  // Mean core frequency in MHz; unset when unknown.
+  optional uint32 cpu_freq_mhz = 8;
+  // Physical memory.
+  Memory memory = 9;
+  // Swap in use, in bytes.
+  uint64 swap_used_bytes = 10;
+  // Swap size, in bytes.
+  uint64 swap_total_bytes = 11;
+  // Real filesystems; for SUMMARY only the fullest one (by used / total).
+  repeated DiskVolume disks = 12;
+  // Bytes read per second across the disks; unset until a second reading.
+  optional uint64 disk_read_bps = 13;
+  // Bytes written per second across the disks; unset until a second reading.
+  optional uint64 disk_write_bps = 14;
+  // The primary network interface; unset when the host has no non-loopback one.
+  NetInterface net = 15;
+  // Sensor readings, the cpu package sensor first when present; empty for
+  // SUMMARY.
+  repeated Temperature temperatures = 16;
+  // Number of processes; unset when the server has not counted them.
+  optional uint32 process_count = 17;
+  // Number of running processes; unset as for process_count.
+  optional uint32 running_count = 18;
+}
+
+// ─── GetVitalsHistory ────────────────────────────────────────────────────────
+
+// A history window ending now.
+enum HistoryRange {
+  // Rejected with INVALID_ARGUMENT.
+  HISTORY_RANGE_UNSPECIFIED = 0;
+  // One minute: 30 slots of 2 s.
+  HISTORY_RANGE_1M = 1;
+  // Five minutes: 60 slots of 5 s.
+  HISTORY_RANGE_5M = 2;
+  // Fifteen minutes: 60 slots of 15 s.
+  HISTORY_RANGE_15M = 3;
+  // One hour: 60 slots of 60 s.
+  HISTORY_RANGE_1H = 4;
+}
+
+// The GetVitalsHistory request.
+message VitalsHistoryRequest {
+  // The window to read; unspecified or unknown is INVALID_ARGUMENT.
+  HistoryRange range = 1;
+}
+
+// A fixed-step history window. Slot i of n covers
+// [end_unix_ms - (n - i) * step_ms, end_unix_ms - (n - i - 1) * step_ms);
+// the last slot holds now and may be partial.
+message VitalsHistory {
+  // Width of one slot in milliseconds.
+  uint32 step_ms = 1;
+  // Exclusive end of the newest slot, milliseconds since the Unix epoch; a
+  // multiple of step_ms.
+  int64 end_unix_ms = 2;
+  // Revision of the newest sample recorded; 0 before any sample.
+  uint64 revision = 3;
+  // One entry per series with data, all the same length. A series with no
+  // data anywhere in the window (one the host cannot provide, such as
+  // CPU_SYSTEM without a cpu split) is omitted, never sent as all NaN.
+  repeated HistorySeries series = 4;
+}
+
+// What a HistorySeries measures.
+enum SeriesKind {
+  // Never sent.
+  SERIES_KIND_UNSPECIFIED = 0;
+  // Total cpu busy percentage, 0-100.
+  SERIES_KIND_CPU_TOTAL = 1;
+  // System cpu percentage, 0-100.
+  SERIES_KIND_CPU_SYSTEM = 2;
+  // Memory used as a fraction of total, 0-1.
+  SERIES_KIND_MEMORY_USED_FRACTION = 3;
+  // Network receive rate, bytes per second.
+  SERIES_KIND_NET_RX_BPS = 4;
+  // Network transmit rate, bytes per second.
+  SERIES_KIND_NET_TX_BPS = 5;
+  // Disk read rate, bytes per second.
+  SERIES_KIND_DISK_READ_BPS = 6;
+  // Disk write rate, bytes per second.
+  SERIES_KIND_DISK_WRITE_BPS = 7;
+}
+
+// One series of a history window.
+message HistorySeries {
+  // What the values measure.
+  SeriesKind kind = 1;
+  // One value per slot, oldest first; NaN marks a slot with no data.
+  repeated float values = 2;
+}
+
+// ─── WatchProcesses ──────────────────────────────────────────────────────────
+
+// The column a process list is sorted by.
+enum ProcessSort {
+  // Treated as PROCESS_SORT_CPU.
+  PROCESS_SORT_UNSPECIFIED = 0;
+  // Cpu percentage, highest first.
+  PROCESS_SORT_CPU = 1;
+  // Resident memory, largest first.
+  PROCESS_SORT_MEMORY = 2;
+  // Pid, ascending.
+  PROCESS_SORT_PID = 3;
+  // Name (case-insensitive), ascending.
+  PROCESS_SORT_NAME = 4;
+}
+
+// The WatchProcesses request.
+message WatchProcessesRequest {
+  // Sort column; unspecified = PROCESS_SORT_CPU.
+  ProcessSort sort = 1;
+  // Flip the column's default direction; ties stay by pid ascending.
+  bool reverse = 2;
+  // Case-insensitive substring of the name, the user or the decimal pid,
+  // never the command line; empty matches every process.
+  string filter = 3;
+  // Rows to return; 0 = 50, at most 200.
+  uint32 limit = 4;
+  // A process to append when it falls outside the cut, matched by pid and
+  // pinned_start_unix_s together; 0 = none.
+  uint32 pinned_pid = 5;
+  // Start time of the pinned process, seconds since the Unix epoch.
+  int64 pinned_start_unix_s = 6;
+  // Refresh interval in milliseconds; clamped by the server (3 s to 10 s),
+  // 0 = the floor.
+  uint32 interval_ms = 7;
+}
+
+// A process's scheduler state.
+enum ProcessState {
+  // Never sent.
+  PROCESS_STATE_UNSPECIFIED = 0;
+  // Running or runnable.
+  PROCESS_STATE_RUNNING = 1;
+  // Interruptible sleep.
+  PROCESS_STATE_SLEEPING = 2;
+  // Uninterruptible sleep, typically waiting on I/O.
+  PROCESS_STATE_DISK_WAIT = 3;
+  // Exited, not yet reaped.
+  PROCESS_STATE_ZOMBIE = 4;
+  // Stopped by a signal or a tracer.
+  PROCESS_STATE_STOPPED = 5;
+  // An idle kernel thread.
+  PROCESS_STATE_IDLE = 6;
+  // Dead.
+  PROCESS_STATE_DEAD = 7;
+  // A state the host reported that has no mapping.
+  PROCESS_STATE_UNKNOWN = 8;
+}
+
+// One process. Its identity is (pid, start_unix_s): a recycled pid has a new
+// start time.
+message ProcessRow {
+  // Process id.
+  uint32 pid = 1;
+  // Parent process id; unset when the host reports none.
+  optional uint32 parent_pid = 2;
+  // Process name; never empty.
+  string name = 3;
+  // Full command line. Empty for a read-only token, and for any process not
+  // owned by the user muxrd runs as.
+  string command = 4;
+  // User name, or the numeric uid; empty when the host reports neither.
+  string user = 5;
+  // Share of the whole machine's cpu capacity, 0-100.
+  float cpu_percent = 6;
+  // Resident memory in bytes; unset when the host refuses it.
+  optional uint64 memory_bytes = 7;
+  // Thread count; set only on the pinned row.
+  optional uint32 threads = 8;
+  // Start time, seconds since the Unix epoch.
+  int64 start_unix_s = 9;
+  // Accumulated cpu time in milliseconds.
+  uint64 cpu_time_ms = 10;
+  // Scheduler state.
+  ProcessState state = 11;
+}
+
+// One WatchProcesses message: the whole view, replacing the previous one.
+message ProcessSnapshot {
+  // Revision of this refresh.
+  uint64 revision = 1;
+  // Wall-clock time of the refresh, milliseconds since the Unix epoch.
+  int64 unix_ms = 2;
+  // Every process on the host, before the filter.
+  uint32 total = 3;
+  // Running processes, before the filter.
+  uint32 running = 4;
+  // The filtered, sorted, truncated rows, then the pinned row when it fell
+  // outside the cut.
+  repeated ProcessRow rows = 5;
+  // True on the terminal message sent when monitoring is switched off while
+  // the stream is open; the stream then ends with OK.
+  bool disabled = 6;
+}
+
+// ─── SignalProcess ───────────────────────────────────────────────────────────
+
+// A signal SignalProcess can send.
+enum ProcessSignal {
+  // Rejected with INVALID_ARGUMENT.
+  PROCESS_SIGNAL_UNSPECIFIED = 0;
+  // SIGTERM.
+  PROCESS_SIGNAL_TERM = 1;
+  // SIGKILL.
+  PROCESS_SIGNAL_KILL = 2;
+  // SIGINT.
+  PROCESS_SIGNAL_INT = 3;
+  // SIGHUP.
+  PROCESS_SIGNAL_HUP = 4;
+}
+
+// The SignalProcess request.
+message SignalProcessRequest {
+  // Process id.
+  uint32 pid = 1;
+  // The start time ProcessRow.start_unix_s reported; a process whose start
+  // time differs is not signalled.
+  int64 start_unix_s = 2;
+  // The signal to send.
+  ProcessSignal signal = 3;
+}

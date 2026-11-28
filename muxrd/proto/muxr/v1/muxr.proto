@@ -8,6 +8,7 @@ import "muxr/v1/agent.proto";
 import "muxr/v1/auth.proto";
 import "muxr/v1/common.proto";
 import "muxr/v1/layout.proto";
+import "muxr/v1/monitor.proto";
 import "muxr/v1/pane.proto";
 import "muxr/v1/push.proto";
 import "muxr/v1/session.proto";
@@ -117,4 +118,16 @@ service Muxr {
   rpc ListPushTargets(ListPushTargetsReq) returns (ListPushTargetsResp);
   // Refused for read-only tokens.
   rpc RemovePushTarget(RemovePushTargetReq) returns (ActionAck);
+
+  // Host vitals (capability host-vitals). See proto/README.md#host-vitals.
+
+  // Live samples of the host, the first event carrying HostInfo. Permitted for read-only tokens.
+  rpc WatchVitals(WatchVitalsRequest) returns (stream VitalsEvent);
+  // A fixed-step history window of the host's vitals. Permitted for read-only tokens.
+  rpc GetVitalsHistory(VitalsHistoryRequest) returns (VitalsHistory);
+  // The host's process table, filtered and sorted, refreshed live; command lines are empty for
+  // read-only tokens. Permitted for read-only tokens.
+  rpc WatchProcesses(WatchProcessesRequest) returns (stream ProcessSnapshot);
+  // Sends a signal to one process, identified by pid and start time. Refused for read-only tokens.
+  rpc SignalProcess(SignalProcessRequest) returns (ActionAck);
 }

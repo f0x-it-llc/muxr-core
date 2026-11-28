@@ -20,6 +20,7 @@ the rules that need more than a line and the ones several RPCs share.
 | `muxr/v1/tab.proto` | `NewTabReq`, `RenameTabReq` |
 | `muxr/v1/space.proto` | `Space`, `SpaceList`, `SwitchSpaceReq`, `CreateSpaceReq`, `RenameSpaceReq`, `CloseSpaceReq` |
 | `muxr/v1/agent.proto` | `AgentStatus`, `AgentMark`, `AgentMsg`, `AgentSummary`, `AgentList`, `AgentEvent` |
+| `muxr/v1/monitor.proto` | `VitalsDetail`, `WatchVitalsRequest`, `VitalsEvent`, `HostInfo`, `LoadAverage`, `Memory`, `DiskVolume`, `NetInterface`, `Temperature`, `VitalsSample`, `HistoryRange`, `VitalsHistoryRequest`, `VitalsHistory`, `SeriesKind`, `HistorySeries`, `ProcessSort`, `WatchProcessesRequest`, `ProcessState`, `ProcessRow`, `ProcessSnapshot`, `ProcessSignal`, `SignalProcessRequest` |
 
 ## Compiling
 
@@ -29,7 +30,7 @@ order, skipping names that start with `.`) and compiles them with
 `muxr.v1`, included by `src/lib.rs`. The build also writes a
 `FileDescriptorSet` that the wire-surface test reads.
 
-A client compiles all twelve files with this directory as the include root,
+A client compiles all thirteen files with this directory as the include root,
 for example:
 
 ```sh
@@ -70,7 +71,8 @@ a client can disable the controls the server would refuse.
 A **read-only** token may:
 
 - call every read: `ListSessions`, `GetLayout`, `GetSpaces`, `ListAgents`,
-  `WatchAgents`;
+  `WatchAgents`, `WatchVitals`, `GetVitalsHistory`, `WatchProcesses` (command
+  lines empty, see [Host vitals](#host-vitals));
 - navigate its own view: `GoToTab`, `FocusPane`, `ScrollPane`,
   `SwitchSpace`;
 - `AttachTerminal`, resume hints included (see [Resume hints](#resume-hints)).
@@ -79,7 +81,7 @@ Everything that mutates session content or shared layout is refused with
 `PERMISSION_DENIED`: `WriteToPane`, `ClosePane`, `NewPane`, `RenamePane`,
 `ResizePane`, `TogglePaneFloating`, `TogglePaneFullscreen`, `NewTab`,
 `CloseTab`, `RenameTab`, `RenameSession`, `KillSession`, `CreateSession`,
-`CreateSpace`, `RenameSpace`, `CloseSpace`. `ResizePane` is refused even
+`CreateSpace`, `RenameSpace`, `CloseSpace`, `SignalProcess`. `ResizePane` is refused even
 though it looks like navigation: a resize has no per-connection routing and
 changes the layout every client sees.
 
@@ -110,6 +112,7 @@ ignore values it does not know.
 | `push-notifications` | The server has a notification relay configured; `notification_relay_url` names it. | Push is unsupported. |
 | `agents` | At least one served backend reports agents: `ListAgents` can return entries, and `PaneMsg.agent` and `SessionInfo.agents` may be set. | `ListAgents` answers empty and those fields stay unset. |
 | `agents-stream` | `WatchAgents` delivers live agent changes. | `WatchAgents` sends its one snapshot and ends; poll `ListAgents` instead. |
+| `host-vitals` | Host monitoring is on: `WatchVitals`, `GetVitalsHistory`, `WatchProcesses` and `SignalProcess` are served. Read at call time, so it can appear or vanish between calls. | Do not call those four RPCs; they answer `FAILED_PRECONDITION`. |
 
 `VersionInfo.notification_relay_url` is the relay clients register devices
 with. Empty means the server has no relay configured, and the client must
@@ -386,3 +389,18 @@ ends only when the client goes away or the server stops.
 completion. proto3 cannot tell 0 from unset, and an agent that has never
 completed has no completion counter, so `has_completion_seq` is its
 presence flag: read `completion_seq` only when `has_completion_seq` is true.
+
+## Host vitals
+
+`WatchVitals`, `GetVitalsHistory`, `WatchProcesses` and `SignalProcess`
+(`muxr/v1/monitor.proto`) report on the machine muxrd runs on, and are gated
+by the `host-vitals` capability: a client must not call them unless
+`GetVersion` lists it, and each answers `FAILED_PRECONDITION` when
+monitoring is off at call time; a stream open when monitoring is switched off
+sends one message with `disabled = true` and ends with OK. Every `revision`
+increases monotonically for the life of the server process. The two watches
+and `GetVitalsHistory` are reads, permitted for read-only tokens;
+`SignalProcess` is refused for them with `PERMISSION_DENIED`. A process
+command line is never shown to a read-only token, and a full token sees it
+only for processes owned by the user muxrd runs as; every other row carries
+an empty `command`.
