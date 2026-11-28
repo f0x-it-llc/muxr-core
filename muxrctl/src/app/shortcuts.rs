@@ -151,13 +151,14 @@ pub fn message(id: DialogId, key: char, state: &AppState) -> Option<UiMsg> {
 }
 
 /// The dashboard's own letters, which the reducer's `handle_key` honours.
-const DASHBOARD: [(&str, &str); 8] = [
+const DASHBOARD: [(&str, &str); 9] = [
     ("s", "start/stop"),
-    ("c", "config"),
+    ("c", "cfg"),
     ("e", "cert"),
     ("t", "tokens"),
-    ("d", "devices"),
-    ("w", "wizard"),
+    ("d", "devs"),
+    ("w", "setup"),
+    ("m", "mon"),
     ("r", "refresh"),
     ("q", "quit"),
 ];
@@ -440,12 +441,18 @@ mod tests {
     }
 
     #[test]
-    fn the_dashboard_hint_is_the_eight_keys_in_order() {
+    fn the_dashboard_hint_is_the_nine_keys_in_order() {
         let keys: Vec<_> = hint(None, &AppState::new())
             .into_iter()
             .map(|(k, _)| k)
             .collect();
-        assert_eq!(keys, ["s", "c", "e", "t", "d", "w", "r", "q"]);
+        assert_eq!(keys, ["s", "c", "e", "t", "d", "w", "m", "r", "q"]);
+    }
+
+    #[test]
+    fn monitor_is_on_the_dashboard_exactly_once() {
+        let count = DASHBOARD.iter().filter(|(k, _)| *k == "m").count();
+        assert_eq!(count, 1);
     }
 
     #[test]

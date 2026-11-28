@@ -36,6 +36,7 @@ fn server_info_from(info: StatusInfo) -> ServerInfo {
         notify_relay_url: info.notify_relay_url,
         push_device_count: info.push_device_count,
         latest_version: info.latest_version,
+        monitoring_enabled: info.monitoring_enabled,
     }
 }
 
@@ -302,6 +303,29 @@ pub fn save_advertise_trust(value: &str) {
 pub fn set_bind_addr(addr: &str) -> Result<()> {
     muxrd::config::set_bind_addr(addr)
         .with_context(|| format!("set_bind_addr: failed to write {addr:?}"))
+}
+
+/// The `monitoring` value the resolved config holds (off when it cannot be read).
+pub fn configured_monitoring() -> bool {
+    effective_config().is_ok_and(|c| c.monitoring)
+}
+
+/// Turn host monitoring on or off.
+///
+/// A running daemon is flipped (and persisted) over the control socket; a
+/// stopped one is persisted straight to the config file.
+pub fn set_monitoring(enabled: bool, daemon_running: bool) -> Result<()> {
+    if !daemon_running {
+        return muxrd::config::set_monitoring(enabled)
+            .with_context(|| format!("set_monitoring: failed to write {enabled}"));
+    }
+    match muxrd::control::query(&ControlRequest::SetMonitoring { enabled })
+        .context("set_monitoring: control socket query failed")?
+    {
+        ControlResponse::Ok => Ok(()),
+        ControlResponse::Error(msg) => anyhow::bail!(msg),
+        other => anyhow::bail!("set_monitoring: unexpected reply {other:?}"),
+    }
 }
 
 // ── TLS / cert ────────────────────────────────────────────────────────────────

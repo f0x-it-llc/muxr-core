@@ -62,6 +62,11 @@ pub enum UpdateAction {
     /// Persist `bind_addr` to the config file via [`crate::server::set_bind_addr`].
     SaveBind(String),
 
+    /// Turn host monitoring on (`true`) or off (`false`): over the control
+    /// socket when the daemon runs, in the config file when it is stopped.
+    /// Followed by a status refresh so the row shows the daemon's answer.
+    SetMonitoring(bool),
+
     /// Ensure / regenerate the TLS cert for the given SANs and post `Message::CertEnsured`.
     EnsureCert(Vec<San>),
 

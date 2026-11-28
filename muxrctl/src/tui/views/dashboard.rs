@@ -32,7 +32,7 @@ use crate::app::state::{DialogId, ServerInfo};
 use crate::tui::components::action::{action, destructive};
 
 /// Rows each section body occupies, borders included.
-const DAEMON_ROWS: u16 = 8;
+const DAEMON_ROWS: u16 = 9;
 const SECTION_ROWS: u16 = 4;
 
 /// Declare the dashboard into the base layer.
@@ -187,11 +187,28 @@ fn daemon_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 "  press s to start",
                 Style::default().fg(theme.muted_foreground),
             )),
+            monitoring_field(state.monitoring_configured, true, theme),
         ],
     }
 }
 
-/// The five detail rows of a running daemon.
+/// The Monitoring row: on / off, tagged `(configured)` when no daemon answers.
+fn monitoring_field(enabled: bool, configured: bool, theme: &Theme) -> Line<'static> {
+    let word = if enabled { "on" } else { "off" };
+    let text = if configured {
+        format!("{word} (configured)")
+    } else {
+        word.to_string()
+    };
+    let color = if enabled {
+        theme.primary
+    } else {
+        theme.muted_foreground
+    };
+    field("Monitoring", text, color, theme)
+}
+
+/// The seven detail rows of a running daemon.
 fn running_lines(info: &ServerInfo, theme: &Theme) -> Vec<Line<'static>> {
     vec![
         field("Status", "● Running", theme.primary, theme),
@@ -214,6 +231,7 @@ fn running_lines(info: &ServerInfo, theme: &Theme) -> Vec<Line<'static>> {
             },
             theme,
         ),
+        monitoring_field(info.monitoring_enabled, false, theme),
     ]
 }
 

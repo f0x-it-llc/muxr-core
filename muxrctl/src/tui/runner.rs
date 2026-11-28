@@ -85,6 +85,8 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
             crate::app::state::cert::AdvertiseTrust::from_persist_str(persisted);
     }
 
+    state.monitoring_configured = crate::server::configured_monitoring();
+
     // Seed the dashboard: every section loads once before the first key.
     state.server.loading = true;
     state.config.loading = true;
@@ -359,6 +361,18 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
                     let _ = tx.blocking_send(msg);
                 });
             }
+            UpdateAction::SetMonitoring(enabled) => {
+                let running = state.server.is_running();
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg = match crate::server::set_monitoring(enabled, running) {
+                        Ok(()) => Message::ActionOk(format!("Monitoring {}", on_off(enabled))),
+                        Err(e) => Message::ActionFailed(e.to_string()),
+                    };
+                    let _ = tx.blocking_send(msg);
+                    let _ = tx.blocking_send(Message::StatusLoaded(crate::server::status()));
+                });
+            }
             UpdateAction::EnsureCert(sans) => {
                 let tx = tx.clone();
                 tokio::task::spawn_blocking(move || {
@@ -494,6 +508,11 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
             }
         }
     }
+}
+
+/// `on` / `off` for a toast.
+fn on_off(enabled: bool) -> &'static str {
+    if enabled { "on" } else { "off" }
 }
 
 /// Load config + reachable IPs and return the appropriate `Message`.
