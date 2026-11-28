@@ -90,6 +90,8 @@ pub struct ServerInfo {
     /// than itself; `None` when it is current, has not checked yet, or has
     /// its update check disabled.
     pub latest_version: Option<String>,
+    /// Whether host monitoring is currently on in the running daemon.
+    pub monitoring_enabled: bool,
 }
 
 // ── Dialog identity ───────────────────────────────────────────────────────────
@@ -233,6 +235,13 @@ pub struct AppState {
     /// overlay was since closed (or superseded) is discarded.
     #[allow(dead_code)] // bumped by the tokens card when it opens the overlay.
     pub qr_seq: u64,
+    /// The `monitoring` value the config file holds. The dashboard shows it
+    /// while the daemon is stopped; it follows the daemon's answer while one
+    /// runs and the toggle while one does not.
+    pub monitoring_configured: bool,
+    /// The configured value to restore if a stopped-daemon toggle fails to
+    /// persist; cleared by the next action result.
+    pub monitoring_revert: Option<bool>,
 }
 
 impl AppState {

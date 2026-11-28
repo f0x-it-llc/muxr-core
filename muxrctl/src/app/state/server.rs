@@ -54,6 +54,7 @@ mod tests {
             notify_relay_url: None,
             push_device_count: 0,
             latest_version: None,
+            monitoring_enabled: false,
         }
     }
 
