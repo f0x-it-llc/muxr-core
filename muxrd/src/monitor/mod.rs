@@ -192,13 +192,19 @@ impl MonitorHandle {
         }
     }
 
-    /// Whether the sampler is running (or starting).
+    /// Whether a sampler run exists: it was started and has not been stopped. A run whose
+    /// source fails to open ends itself, after which this reads `false` again.
     pub fn is_enabled(&self) -> bool {
         self.shared.lock().run.is_some()
     }
 
-    /// Start or stop sampling; repeating the current state is a no-op. Enabling must be called
-    /// inside a tokio runtime, and is refused (logged) once the shutdown signal has fired.
+    /// Start or stop sampling; repeating the current state is a no-op.
+    ///
+    /// Enabling needs a tokio runtime: called outside one it logs an error and changes
+    /// nothing. It is also refused (logged) once the shutdown signal has fired. Afterwards
+    /// [`Self::is_enabled`] tells which happened. `true` there means the sampler was started,
+    /// not that its first sample succeeded: a source that cannot be opened ends the run (as a
+    /// disable: subscribers get [`VitalsItem::Disabled`]) and `is_enabled` reads `false` again.
     pub fn set_enabled(&self, enabled: bool) {
         let mut inner = self.shared.lock();
         match (enabled, inner.run.is_some()) {
@@ -207,17 +213,14 @@ impl MonitorHandle {
                     log::debug!("monitor: not enabling during shutdown");
                     return;
                 }
-                inner.generation += 1;
-                let generation = inner.generation;
-                let (tx, _) = broadcast::channel(VITALS_CHANNEL_CAPACITY);
-                let (stop_tx, stop_rx) = watch::channel(false);
-                inner.run = Some(Run {
-                    generation,
-                    tx,
-                    _stop: stop_tx,
-                });
+                // Before any state changes, so a refusal never leaves a run without a task.
+                let Ok(runtime) = tokio::runtime::Handle::try_current() else {
+                    log::error!("monitor: not enabling: no tokio runtime to run the sampler on");
+                    return;
+                };
+                let (generation, stop_rx) = Self::install_run(&mut inner);
                 drop(inner);
-                tokio::spawn(sampler::run(Arc::clone(&self.shared), generation, stop_rx));
+                runtime.spawn(sampler::run(Arc::clone(&self.shared), generation, stop_rx));
                 log::info!("monitor: enabled");
             }
             (false, true) => {
@@ -226,6 +229,21 @@ impl MonitorHandle {
             }
             _ => {}
         }
+    }
+
+    /// Record a fresh run in `inner`; returns its generation and the receiver its task
+    /// watches for the disable.
+    fn install_run(inner: &mut Inner) -> (u64, watch::Receiver<bool>) {
+        inner.generation += 1;
+        let generation = inner.generation;
+        let (tx, _) = broadcast::channel(VITALS_CHANNEL_CAPACITY);
+        let (stop_tx, stop_rx) = watch::channel(false);
+        inner.run = Some(Run {
+            generation,
+            tx,
+            _stop: stop_tx,
+        });
+        (generation, stop_rx)
     }
 
     /// Subscribe to samples at `tier`. The demand lasts until the subscription drops or
@@ -699,5 +717,91 @@ mod tests {
             frequency_reads, 1,
             "~119 s after the prime: one re-read at 60 s"
         );
+    }
+
+    #[test]
+    fn enabling_outside_a_runtime_changes_nothing() {
+        let rig = rig();
+        rig.handle.set_enabled(true);
+        assert!(!rig.handle.is_enabled(), "no runtime: no run recorded");
+        assert_eq!(rig.probe.opened.load(Ordering::SeqCst), 0);
+        // And a later enable inside a runtime still works.
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(async {
+                rig.handle.set_enabled(true);
+                assert!(rig.handle.is_enabled());
+            });
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_source_that_fails_to_open_ends_the_run() {
+        let (_shutdown, shutdown_rx) = watch::channel(false);
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let factory: SourceFactory = Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+            anyhow::bail!("no sysinfo here")
+        });
+        let handle = MonitorHandle::with_source(factory, shutdown_rx);
+        handle.set_enabled(true);
+        assert!(handle.is_enabled(), "started, not yet sampled");
+        let mut sub = handle.subscribe(Tier::Summary);
+        assert_eq!(sub.recv().await, VitalsItem::Disabled);
+        assert!(!handle.is_enabled(), "the failed start-up ended the run");
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert_eq!(handle.demand(), DemandLevel::IDLE, "demand cleared");
+        let mut late = handle.subscribe(Tier::Summary);
+        assert_eq!(late.recv().await, VitalsItem::Disabled);
+    }
+
+    /// Runs `sampler::sample` for a hand-made run whose demand or watcher channel has lost its
+    /// sender, on a paused-clock runtime of its own thread. A sampler that spun on the dead
+    /// channel would never yield, so the wait is bounded in real time from outside.
+    fn sample_with_a_dead_channel(dead_demand: bool) -> MonitorHandle {
+        let rig = rig();
+        let handle = rig.handle.clone();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        let shared = Arc::clone(&handle.shared);
+        std::thread::spawn(move || {
+            let _keep = rig;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .start_paused(true)
+                .build()
+                .unwrap();
+            rt.block_on(async move {
+                let (generation, stop) = MonitorHandle::install_run(&mut shared.lock());
+                let (demand, watchers) = if dead_demand {
+                    let (tx, rx) = watch::channel(DemandLevel::IDLE);
+                    drop(tx);
+                    (rx, shared.processes.watch())
+                } else {
+                    let (tx, rx) = watch::channel(None);
+                    drop(tx);
+                    (shared.demand.watch(), rx)
+                };
+                sampler::sample(Arc::clone(&shared), generation, stop, demand, watchers).await;
+            });
+            let _ = done_tx.send(());
+        });
+        done_rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("the sampler ended instead of spinning on the dead channel");
+        handle
+    }
+
+    #[test]
+    fn a_dead_watcher_channel_ends_the_run_instead_of_spinning() {
+        let handle = sample_with_a_dead_channel(false);
+        assert!(!handle.is_enabled());
+    }
+
+    #[test]
+    fn a_dead_demand_channel_ends_the_run_instead_of_spinning() {
+        let handle = sample_with_a_dead_channel(true);
+        assert!(!handle.is_enabled());
     }
 }

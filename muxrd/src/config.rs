@@ -547,16 +547,18 @@ fn resolve_notify_verbosity(raw: Option<&str>) -> Result<String> {
 /// absent), preserving all other fields.
 ///
 /// Used by `muxrctl`'s Config screen so users can update the bind address
-/// without manually editing TOML.  The write is done atomically: read the
-/// current config → update `bind_addr` → serialize → write to a temp file in
-/// the same directory → `chmod 0600` the temp file (Unix) → `rename` the temp
-/// file over the real config (POSIX-atomic on the same filesystem). This ensures
-/// no crash mid-write leaves a partial or world-readable file, and no other
-/// fields are silently lost.
+/// without manually editing TOML. The write is done atomically and serialised
+/// (see [`update_file_config`]): read the current config → update `bind_addr`
+/// → serialize → write a uniquely named temp file in the same directory →
+/// `chmod 0600` it (Unix) → `rename` it over the real config (POSIX-atomic on
+/// the same filesystem), all under the config writer lock. No crash mid-write
+/// leaves a partial or world-readable file, and no other fields are silently
+/// lost. A file that does not parse is replaced by defaults plus the one
+/// `bind_addr` key: this is the operator's repair path for a broken file.
 pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
     // Ensure the file exists (idempotent; writes a template when absent).
     let path = ensure_config_file()?;
-    update_file_config(&path, |cfg| cfg.bind_addr = Some(bind_addr.to_owned()))?;
+    set_bind_addr_in(&path, bind_addr)?;
     log::info!(
         "config: set bind_addr = {bind_addr:?} in {}",
         path.display()
@@ -564,33 +566,117 @@ pub fn set_bind_addr(bind_addr: &str) -> Result<()> {
     Ok(())
 }
 
+fn set_bind_addr_in(path: &Path, bind_addr: &str) -> Result<()> {
+    update_file_config(path, Unparsable::ReplaceWithDefaults, |cfg| {
+        cfg.bind_addr = Some(bind_addr.to_owned());
+    })
+}
+
 /// Persist `monitoring` into the config file (creating it from the template if
 /// absent), preserving all other fields.
 ///
-/// Same atomic whole-struct rewrite as [`set_bind_addr`]. On a file that does
-/// not parse it keeps that behaviour: the file is replaced by defaults plus
-/// the one `monitoring` key.
+/// Same atomic, serialised whole-struct rewrite as [`set_bind_addr`], with one
+/// difference: this is a runtime path (the control socket), so a file that
+/// does not parse is **refused** — the call returns an error naming the parse
+/// failure and leaves the file untouched, rather than discarding whatever the
+/// operator had in it.
 pub fn set_monitoring(enabled: bool) -> Result<()> {
     let path = ensure_config_file()?;
-    update_file_config(&path, |cfg| cfg.monitoring = Some(enabled))?;
+    set_monitoring_in(&path, enabled)?;
     log::info!("config: set monitoring = {enabled} in {}", path.display());
     Ok(())
 }
 
-/// Read `path` into a [`FileConfig`] (defaults when absent or unparsable),
-/// apply `mutate`, and write the whole struct back atomically: temp file in
-/// the same directory, `chmod 0600` (Unix), then `rename` over `path`.
-fn update_file_config(path: &Path, mutate: impl FnOnce(&mut FileConfig)) -> Result<()> {
+fn set_monitoring_in(path: &Path, enabled: bool) -> Result<()> {
+    update_file_config(path, Unparsable::Refuse, |cfg| {
+        cfg.monitoring = Some(enabled);
+    })
+}
+
+/// What [`update_file_config`] does with a config file that does not parse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Unparsable {
+    /// Return an error naming the parse failure; the file is left untouched.
+    Refuse,
+    /// Replace the file with defaults plus the caller's change (logged).
+    ReplaceWithDefaults,
+}
+
+/// Serialises config writers inside this process; the advisory lock on
+/// `config.toml.lock` serialises them across processes (muxrctl and muxrd).
+static CONFIG_WRITER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Makes every temp file name of this process unique.
+static TEMP_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The advisory-lock sidecar of `path`: `config.toml` → `config.toml.lock`.
+fn config_lock_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(std::ffi::OsStr::to_os_string)
+        .unwrap_or_default();
+    name.push(".lock");
+    path.with_file_name(name)
+}
+
+/// Open `path`'s lock sidecar (0600, created when absent) and take the
+/// exclusive advisory lock; it is released when the returned file drops.
+fn lock_config(path: &Path) -> Result<std::fs::File> {
+    use fs4::fs_std::FileExt;
+    let lock_path = config_lock_path(path);
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options
+        .open(&lock_path)
+        .with_context(|| format!("update config: open lock {}", lock_path.display()))?;
+    FileExt::lock_exclusive(&file)
+        .with_context(|| format!("update config: lock {}", lock_path.display()))?;
+    Ok(file)
+}
+
+/// Read `path` into a [`FileConfig`] (defaults when absent; an unparsable file
+/// is handled per `on_unparsable`), apply `mutate`, and write the whole struct
+/// back atomically: a temp file unique to this call (pid + counter) in the
+/// same directory, `chmod 0600` (Unix), then `rename` over `path`.
+///
+/// The whole read-modify-write runs under a process-wide mutex and an
+/// exclusive advisory lock on the sibling `config.toml.lock`, so two writers
+/// (two threads, or muxrctl and muxrd) never lose each other's keys.
+fn update_file_config(
+    path: &Path,
+    on_unparsable: Unparsable,
+    mutate: impl FnOnce(&mut FileConfig),
+) -> Result<()> {
+    // A poisoned mutex guards no data: the file lock below is the real state.
+    let _writer = CONFIG_WRITER
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _file_lock = lock_config(path)?;
+
     let mut file_cfg: FileConfig = if path.exists() {
         let raw = std::fs::read_to_string(path)
             .with_context(|| format!("update config: read {}", path.display()))?;
-        toml::from_str(&raw).unwrap_or_else(|e| {
-            log::warn!(
-                "config: failed to parse {}: {e} — overwriting with defaults + the new key",
-                path.display()
-            );
-            FileConfig::default()
-        })
+        match toml::from_str(&raw) {
+            Ok(cfg) => cfg,
+            Err(e) => match on_unparsable {
+                Unparsable::Refuse => anyhow::bail!(
+                    "update config: {} does not parse, left unchanged: {e}",
+                    path.display()
+                ),
+                Unparsable::ReplaceWithDefaults => {
+                    log::warn!(
+                        "config: failed to parse {}: {e} — overwriting with defaults + the new key",
+                        path.display()
+                    );
+                    FileConfig::default()
+                }
+            },
+        }
     } else {
         FileConfig::default()
     };
@@ -600,15 +686,27 @@ fn update_file_config(path: &Path, mutate: impl FnOnce(&mut FileConfig)) -> Resu
     let parent = path
         .parent()
         .context("config file has no parent directory")?;
-    let temp_path = parent.join(".config.toml.tmp");
-    std::fs::write(&temp_path, &toml_str)
+    let unique = TEMP_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temp_path = parent.join(format!(".config.toml.{}.{unique}.tmp", std::process::id()));
+    let written = write_temp_and_rename(&temp_path, path, &toml_str);
+    if written.is_err() {
+        // Best effort: never leave a stray temp file behind.
+        let _ = std::fs::remove_file(&temp_path);
+    }
+    written
+}
+
+/// Write `contents` to `temp_path`, tighten it to 0600 (Unix) and rename it
+/// over `path`.
+fn write_temp_and_rename(temp_path: &Path, path: &Path, contents: &str) -> Result<()> {
+    std::fs::write(temp_path, contents)
         .with_context(|| format!("update config: write temp file {}", temp_path.display()))?;
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&temp_path, perms).with_context(|| {
+        std::fs::set_permissions(temp_path, perms).with_context(|| {
             format!(
                 "update config: chmod 0600 temp file {}",
                 temp_path.display()
@@ -616,7 +714,7 @@ fn update_file_config(path: &Path, mutate: impl FnOnce(&mut FileConfig)) -> Resu
         })?;
     }
 
-    std::fs::rename(&temp_path, path).with_context(|| {
+    std::fs::rename(temp_path, path).with_context(|| {
         format!(
             "update config: rename {} to {}",
             temp_path.display(),
@@ -850,12 +948,12 @@ mod tests {
     #[test]
     fn writer_round_trip_preserves_other_keys_on_a_temp_file() {
         let (dir, path) = temp_cfg_path("rt");
-        update_file_config(&path, |c| c.monitoring = Some(true)).unwrap();
-        update_file_config(&path, |c| c.bind_addr = Some("0.0.0.0:1".into())).unwrap();
+        set_monitoring_in(&path, true).unwrap();
+        set_bind_addr_in(&path, "0.0.0.0:1").unwrap();
         let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg.monitoring, Some(true));
         assert_eq!(cfg.bind_addr.as_deref(), Some("0.0.0.0:1"));
-        update_file_config(&path, |c| c.monitoring = Some(false)).unwrap();
+        set_monitoring_in(&path, false).unwrap();
         let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(cfg.monitoring, Some(false));
         assert_eq!(cfg.bind_addr.as_deref(), Some("0.0.0.0:1"));
@@ -869,14 +967,73 @@ mod tests {
     }
 
     #[test]
-    fn writer_replaces_a_corrupt_file_with_defaults_plus_the_key() {
+    fn set_bind_addr_replaces_a_corrupt_file_with_defaults_plus_the_key() {
         let (dir, path) = temp_cfg_path("corrupt");
         std::fs::write(&path, "this is = = not toml [[[").unwrap();
-        update_file_config(&path, |c| c.monitoring = Some(true)).unwrap();
+        set_bind_addr_in(&path, "0.0.0.0:7").unwrap();
         let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(cfg.monitoring, Some(true));
-        assert_eq!(cfg.bind_addr, None);
+        assert_eq!(cfg.bind_addr.as_deref(), Some("0.0.0.0:7"));
+        assert_eq!(cfg.monitoring, None);
+        assert_eq!(cfg.cert_dir, None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn set_monitoring_refuses_a_corrupt_file_and_leaves_its_bytes_alone() {
+        let (dir, path) = temp_cfg_path("refuse");
+        let corrupt = b"bind_addr = \"0.0.0.0:9\"\nthis is = = not toml [[[\n";
+        std::fs::write(&path, corrupt).unwrap();
+        let err = set_monitoring_in(&path, true).expect_err("a corrupt file is refused");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("does not parse"), "{msg}");
+        assert!(msg.contains(&path.display().to_string()), "{msg}");
+        assert_eq!(std::fs::read(&path).unwrap(), corrupt, "file untouched");
+        // No temp file left behind either.
+        let stray: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(stray.is_empty(), "{stray:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn concurrent_writers_flipping_different_keys_both_survive() {
+        let (dir, path) = temp_cfg_path("race");
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                for i in 0..50 {
+                    set_monitoring_in(&path, i % 2 == 0).unwrap();
+                }
+            });
+            s.spawn(|| {
+                for i in 0..50 {
+                    set_bind_addr_in(&path, &format!("127.0.0.1:{}", 40_000 + i)).unwrap();
+                }
+            });
+        });
+        let cfg: FileConfig = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        // Each thread's last write is what survives: neither key was lost.
+        assert_eq!(cfg.monitoring, Some(false), "49 is odd: the last flip");
+        assert_eq!(cfg.bind_addr.as_deref(), Some("127.0.0.1:40049"));
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n != "config.toml" && n != "config.toml.lock")
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_lock_file_is_a_sibling_of_the_config_file() {
+        assert_eq!(
+            config_lock_path(Path::new("/x/muxrd/config.toml")),
+            Path::new("/x/muxrd/config.toml.lock")
+        );
     }
 
     // ── update_check: pure-function precedence ───────────────────────────────

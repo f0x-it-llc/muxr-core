@@ -119,6 +119,12 @@ pub trait HostSource: Send + 'static {
         Ok(Vec::new())
     }
 
+    /// muxrd's own uid as the process source sees it: only rows of this uid keep their command
+    /// line. `None` (the default, or unknown) keeps none.
+    fn own_uid(&mut self) -> Option<u32> {
+        None
+    }
+
     /// The text of `/proc/<pid>/status`, for a pinned pid; `None` off Linux or on a read error.
     fn read_proc_status(&mut self, _pid: u32) -> Option<String> {
         None
@@ -557,19 +563,61 @@ pub struct SysinfoSource {
 struct ProcessSource {
     sys: System,
     users: Users,
-    /// Start time per pid at the previous refresh, to spot a recycled pid.
-    starts: HashMap<u32, u64>,
+    /// muxrd's own uid, read once when the source opens. Only processes of this uid have their
+    /// command line read; `None` (unknown) reads none.
+    own_uid: Option<u32>,
+    /// Start time and reported name per pid at the previous refresh, to spot a recycled pid or
+    /// an exec (same start time, new name).
+    seen: HashMap<u32, (u64, String)>,
 }
 
-/// Cpu and memory every refresh; name, command line and user once per process.
-fn process_kind(identity: UpdateKind) -> ProcessRefreshKind {
+/// Cpu, memory and the owning user every refresh; never the command line, which is read
+/// separately and only for muxrd's own processes (see [`ProcessSource::read`]).
+fn process_kind() -> ProcessRefreshKind {
     ProcessRefreshKind::nothing()
         .with_cpu()
         .with_memory()
-        .with_cmd(identity)
-        .with_user(identity)
+        // Every refresh: the uid decides whether a command line may be read at all.
+        .with_user(UpdateKind::Always)
         // Skips enumerating every thread as a process (Linux).
         .without_tasks()
+}
+
+/// The command line alone, for the pids it is (re-)read for.
+fn cmd_kind() -> ProcessRefreshKind {
+    ProcessRefreshKind::nothing()
+        .with_cmd(UpdateKind::Always)
+        .without_tasks()
+}
+
+/// muxrd's own uid, from a single-pid sysinfo refresh of this process.
+fn own_uid(sys: &mut System) -> Option<u32> {
+    let pid = sysinfo::get_current_pid().ok()?;
+    sys.refresh_processes_specifics(
+        ProcessesToUpdate::Some(&[pid]),
+        false,
+        ProcessRefreshKind::nothing()
+            .with_user(UpdateKind::Always)
+            .without_tasks(),
+    );
+    sys.process(pid)?.user_id().map(|uid| **uid)
+}
+
+/// The name `pid` has now. sysinfo keeps the name it first saw for a pid, which for a child
+/// seen between fork and exec is its parent's; on Linux `/proc/<pid>/comm` is current.
+#[cfg(target_os = "linux")]
+fn current_name(pid: Pid, process: &sysinfo::Process) -> String {
+    std::fs::read_to_string(format!("/proc/{}/comm", pid.as_u32()))
+        .ok()
+        .map(|comm| comm.trim_end_matches('\n').to_owned())
+        .filter(|comm| !comm.is_empty())
+        .unwrap_or_else(|| process.name().to_string_lossy().into_owned())
+}
+
+/// Elsewhere sysinfo's name is all there is.
+#[cfg(not(target_os = "linux"))]
+fn current_name(_pid: Pid, process: &sysinfo::Process) -> String {
+    process.name().to_string_lossy().into_owned()
 }
 
 fn process_state(status: ProcessStatus) -> ProcessState {
@@ -589,50 +637,63 @@ fn process_state(status: ProcessStatus) -> ProcessState {
 
 impl ProcessSource {
     fn new() -> anyhow::Result<Self> {
+        let mut sys = System::new().context("open sysinfo's process handle")?;
+        let own_uid = own_uid(&mut sys);
+        if own_uid.is_none() {
+            log::warn!("monitor: could not read muxrd's own uid; no command line will be read");
+        }
         Ok(Self {
-            sys: System::new().context("open sysinfo's process handle")?,
+            sys,
             users: Users::new_with_refreshed_list().context("read the user list")?,
-            starts: HashMap::new(),
+            own_uid,
+            seen: HashMap::new(),
         })
+    }
+
+    /// Whether `process` runs as muxrd's own uid: only then is its command line read.
+    fn owns(&self, process: &sysinfo::Process) -> bool {
+        self.own_uid
+            .is_some_and(|own| process.user_id().is_some_and(|uid| **uid == own))
     }
 
     fn read(&mut self) -> Vec<RawProcess> {
         // Process percentages are relative to the cpu counters of this same `System`.
         self.sys
             .refresh_cpu_specifics(CpuRefreshKind::nothing().with_usage());
-        self.sys.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            process_kind(UpdateKind::OnlyIfNotSet),
-        );
-        // A pid whose start time changed is a new process: read its identity afresh.
-        let recycled: Vec<Pid> = self
+        self.sys
+            .refresh_processes_specifics(ProcessesToUpdate::All, true, process_kind());
+        let names: HashMap<Pid, String> = self
+            .sys
+            .processes()
+            .iter()
+            .map(|(pid, p)| (*pid, current_name(*pid, p)))
+            .collect();
+        // Own processes whose command line is unread, whose pid was recycled, or that exec'd
+        // (a new name for the same start time): read it now. Other uids' never are.
+        let stale_cmd: Vec<Pid> = self
             .sys
             .processes()
             .iter()
             .filter(|(pid, p)| {
-                self.starts
-                    .get(&pid.as_u32())
-                    .is_some_and(|start| *start != p.start_time())
+                self.owns(p)
+                    && (p.cmd().is_empty()
+                        || self.seen.get(&pid.as_u32()).is_some_and(|(start, name)| {
+                            *start != p.start_time() || names.get(*pid) != Some(name)
+                        }))
             })
             .map(|(pid, _)| *pid)
             .collect();
-        if !recycled.is_empty() {
+        if !stale_cmd.is_empty() {
             self.sys.refresh_processes_specifics(
-                ProcessesToUpdate::Some(&recycled),
+                ProcessesToUpdate::Some(&stale_cmd),
                 false,
-                process_kind(UpdateKind::Always),
+                cmd_kind(),
             );
         }
-        self.starts = self
-            .sys
-            .processes()
-            .iter()
-            .map(|(pid, p)| (pid.as_u32(), p.start_time()))
-            .collect();
 
         let cores = self.sys.cpus().len().max(1) as f32;
-        self.sys
+        let table: Vec<RawProcess> = self
+            .sys
             .processes()
             .iter()
             .map(|(pid, p)| {
@@ -641,12 +702,21 @@ impl ProcessSource {
                     pid: pid.as_u32(),
                     parent_pid: p.parent().map(Pid::as_u32),
                     start_unix_s: i64::try_from(p.start_time()).unwrap_or(i64::MAX),
-                    name: p.name().to_string_lossy().into_owned(),
-                    cmd: p
-                        .cmd()
-                        .iter()
-                        .map(|a| a.to_string_lossy().into_owned())
-                        .collect(),
+                    name: names
+                        .get(pid)
+                        .cloned()
+                        .unwrap_or_else(|| p.name().to_string_lossy().into_owned()),
+                    // A command line read while the process was ours is not shown once it
+                    // is not.
+                    cmd: if self.owns(p) {
+                        p.cmd()
+                            .iter()
+                            .map(|a| a.to_string_lossy().into_owned())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    uid: p.user_id().map(|uid| **uid),
                     user: p.user_id().map_or_else(String::new, |uid| {
                         self.users
                             .get_user_by_id(uid)
@@ -660,7 +730,14 @@ impl ProcessSource {
                     state: process_state(p.status()),
                 }
             })
-            .collect()
+            .collect();
+        self.seen = self
+            .sys
+            .processes()
+            .iter()
+            .filter_map(|(pid, p)| Some((pid.as_u32(), (p.start_time(), names.get(pid)?.clone()))))
+            .collect();
+        table
     }
 }
 
@@ -849,6 +926,10 @@ impl HostSource for SysinfoSource {
         Ok(source.read())
     }
 
+    fn own_uid(&mut self) -> Option<u32> {
+        self.procs.as_ref().and_then(|source| source.own_uid)
+    }
+
     #[cfg(target_os = "linux")]
     fn read_proc_status(&mut self, pid: u32) -> Option<String> {
         std::fs::read_to_string(format!("/proc/{pid}/status")).ok()
@@ -906,12 +987,26 @@ fn wait_for(level: DemandLevel, processes: Option<Duration>) -> Duration {
 
 /// The sampling task for run `generation`: open the source, prime it, then sample at the demand
 /// level's interval until the run is dropped, the daemon shuts down, or the source fails hard.
-pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::Receiver<bool>) {
+pub(super) async fn run(shared: Arc<Shared>, generation: u64, stop: watch::Receiver<bool>) {
+    let demand = shared.demand.watch();
+    let watchers = shared.processes.watch();
+    sample(shared, generation, stop, demand, watchers).await;
+}
+
+/// [`run`] over the given demand and process-watcher receivers. Both senders live in `Shared`,
+/// so neither should ever close; if one does, the run ends rather than spin on it.
+pub(super) async fn sample(
+    shared: Arc<Shared>,
+    generation: u64,
+    mut stop: watch::Receiver<bool>,
+    mut demand: watch::Receiver<DemandLevel>,
+    mut watchers: watch::Receiver<Option<Duration>>,
+) {
     let mut shutdown = shared.shutdown.clone();
-    let mut demand = shared.demand.watch();
-    let mut watchers = shared.processes.watch();
     let mut tracker = ProcessTracker::default();
     let mut procs_open = false;
+    // Whether the current process table has had its priming refresh (see below).
+    let mut procs_primed = false;
     let origin = Instant::now();
     let mono_ms = || u64::try_from(origin.elapsed().as_millis()).unwrap_or(u64::MAX);
 
@@ -961,20 +1056,30 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
             biased;
             end = ended(&mut stop, &mut shutdown) => return finish(&shared, generation, end),
             changed = demand.changed() => {
-                // The registry outlives every run (it lives in `Shared`), so this never errs.
-                if changed.is_ok() && primed {
+                // The registry outlives every run (it lives in `Shared`), so this should never
+                // err; if it does, it would be ready forever: end the run instead of spinning.
+                if changed.is_err() {
+                    log::error!("monitor: demand channel closed; stopping the sampler");
+                    return shared.end_run(generation);
+                }
+                if primed {
                     let level = *demand.borrow_and_update();
                     next = last_read + wait_for(level, shared.processes.interval());
                 }
                 continue;
             }
             changed = watchers.changed() => {
+                if changed.is_err() {
+                    log::error!("monitor: process watcher channel closed; stopping the sampler");
+                    return shared.end_run(generation);
+                }
                 let interval = *watchers.borrow_and_update();
-                if changed.is_ok() && primed {
+                if primed {
                     next = last_read + wait_for(*demand.borrow(), interval);
                 }
                 if interval.is_none() && procs_open {
                     procs_open = false;
+                    procs_primed = false;
                     tracker.clear();
                     source.release_processes();
                 }
@@ -993,6 +1098,7 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
         let pinned = shared.processes.pinned_pids();
         if pinned.is_none() && procs_open {
             procs_open = false;
+            procs_primed = false;
             tracker.clear();
             source.release_processes();
         }
@@ -1028,7 +1134,14 @@ pub(super) async fn run(shared: Arc<Shared>, generation: u64, mut stop: watch::R
             match reading.processes {
                 Ok(raw) => {
                     proc_warned = false;
-                    let table = tracker.ingest(raw);
+                    let table = tracker.ingest(raw, reading.own_uid);
+                    if !procs_primed {
+                        // A fresh process table reads 0 % cpu everywhere: sysinfo needs two
+                        // refreshes. This one only primes it; the next, soon, is published.
+                        procs_primed = true;
+                        next = next.min(last_read + PRIME_DELAY);
+                        return Some(table);
+                    }
                     let threads: HashMap<u32, u32> = reading
                         .statuses
                         .iter()
@@ -1488,6 +1601,15 @@ mod tests {
             .find(|p| p.pid == std::process::id())
             .expect("this process is listed");
         assert!(!me.name.is_empty() && !me.cmd.is_empty() && !me.user.is_empty());
+        let own = source.own_uid().expect("this process's uid");
+        assert_eq!(me.uid, Some(own));
+        assert!(
+            table
+                .iter()
+                .filter(|p| p.uid != Some(own))
+                .all(|p| p.cmd.is_empty()),
+            "no other uid's command line is read"
+        );
         assert!(me.memory_bytes.is_some_and(|m| m > 0));
         assert!((0.0..=100.0).contains(&me.cpu_percent));
         let status = source.read_proc_status(std::process::id()).unwrap();

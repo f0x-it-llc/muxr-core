@@ -3,6 +3,10 @@
 //!
 //! The expensive refresh runs only while a [`ProcessSubscription`] is alive, on the sampler's
 //! `spawn_blocking` path; everything here is pure bookkeeping over what the host source returns.
+//!
+//! Command lines are shown only for processes running as muxrd's own uid; every other row
+//! carries an empty one (the host source does not even read them, and [`ProcessTracker`] drops
+//! any that arrive). The filter never matches command lines either way.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -25,8 +29,11 @@ pub struct RawProcess {
     pub start_unix_s: i64,
     /// May be empty (the refresh raced the exec, or the host hides it).
     pub name: String,
-    /// The command line's arguments; empty when not (yet) readable.
+    /// The command line's arguments; empty when not (yet) readable, and for any uid but
+    /// muxrd's own.
     pub cmd: Vec<String>,
+    /// The owning (real) uid; `None` when unknown. Decides whether `cmd` may be shown.
+    pub uid: Option<u32>,
     /// User name, else the numeric uid, else empty.
     pub user: String,
     /// Percent of the whole machine's cpu capacity.
@@ -37,10 +44,12 @@ pub struct RawProcess {
     pub state: ProcessState,
 }
 
-/// One refresh: the process table and the `/proc/<pid>/status` text of each pinned pid.
+/// One refresh: the process table, the `/proc/<pid>/status` text of each pinned pid, and
+/// muxrd's own uid (whose rows alone keep their command line).
 pub(super) struct ProcessReading {
     pub(super) processes: anyhow::Result<Vec<RawProcess>>,
     pub(super) statuses: Vec<(u32, Option<String>)>,
+    pub(super) own_uid: Option<u32>,
 }
 
 /// Refresh the process table and read the status of each of `pinned`. Blocking.
@@ -53,6 +62,7 @@ pub(super) fn collect(source: &mut dyn HostSource, pinned: &[u32]) -> ProcessRea
     ProcessReading {
         processes,
         statuses,
+        own_uid: source.own_uid(),
     }
 }
 
@@ -95,6 +105,13 @@ fn display_name(raw: &RawProcess) -> String {
         .map_or_else(|| "<unknown>".to_owned(), str::to_owned)
 }
 
+/// The host reports a name for the process, and not the cached one. An empty report (the
+/// refresh raced the exec) never replaces a known identity.
+fn renamed(known: &Identity, process: &RawProcess) -> bool {
+    let reported = process.name.trim();
+    !reported.is_empty() && reported != known.name
+}
+
 /// The refreshed table in display form, before any query is applied.
 #[derive(Debug, Default)]
 pub(crate) struct ProcessTable {
@@ -104,8 +121,10 @@ pub(crate) struct ProcessTable {
 }
 
 /// Keeps name, command line and user per `(pid, start time)`, so a recycled pid never shows its
-/// predecessor's identity. An empty command line is re-read on later refreshes. Lives in the
-/// sampler task; cleared when the last process subscription goes.
+/// predecessor's identity. The cached identity is replaced when its command line was empty and
+/// is now readable, or when the host reports a different name for the same `(pid, start time)`
+/// (the process exec'd: a child seen between fork and exec first carries its parent's name).
+/// Lives in the sampler task; cleared when the last process subscription goes.
 #[derive(Debug, Default)]
 pub(crate) struct ProcessTracker {
     cache: HashMap<(u32, i64), Identity>,
@@ -117,15 +136,24 @@ impl ProcessTracker {
     }
 
     /// Fold one refresh into the cache and return the table. Entries of vanished processes go.
-    pub(crate) fn ingest(&mut self, raw: Vec<RawProcess>) -> ProcessTable {
+    /// Rows whose uid is not `own_uid` (muxrd's) lose their command line; with no `own_uid`,
+    /// every row does.
+    pub(crate) fn ingest(&mut self, raw: Vec<RawProcess>, own_uid: Option<u32>) -> ProcessTable {
         let mut live: HashMap<(u32, i64), Identity> = HashMap::with_capacity(raw.len());
         let mut rows = Vec::with_capacity(raw.len());
         let mut running = 0;
-        for process in raw {
+        for mut process in raw {
+            if own_uid.is_none() || process.uid != own_uid {
+                process.cmd.clear();
+            }
             let key = (process.pid, process.start_unix_s);
             let identity = match self.cache.remove(&key) {
-                // Known process whose command line was empty and is now readable: re-read all.
-                Some(known) if known.command.is_empty() && !process.cmd.is_empty() => {
+                // Known process whose command line was empty and is now readable, or that
+                // exec'd (the host names it differently now): take the new identity whole.
+                Some(known)
+                    if (known.command.is_empty() && !process.cmd.is_empty())
+                        || renamed(&known, &process) =>
+                {
                     Identity::from_raw(&process)
                 }
                 Some(known) => known,
@@ -417,6 +445,9 @@ mod tests {
     };
     use tokio::sync::watch as tokio_watch;
 
+    /// The uid the fakes report as muxrd's own.
+    const OWN_UID: u32 = 1000;
+
     fn raw(pid: u32, start: i64, name: &str) -> RawProcess {
         RawProcess {
             pid,
@@ -424,6 +455,7 @@ mod tests {
             start_unix_s: start,
             name: name.into(),
             cmd: vec![format!("/usr/bin/{name}"), "--secret-flag".into()],
+            uid: Some(OWN_UID),
             user: "alice".into(),
             cpu_percent: 0.0,
             memory_bytes: Some(0),
@@ -439,7 +471,7 @@ mod tests {
     }
 
     fn table_of(procs: Vec<RawProcess>) -> ProcessTable {
-        ProcessTracker::default().ingest(procs)
+        ProcessTracker::default().ingest(procs, Some(OWN_UID))
     }
 
     fn pids(snap: &ProcessSnapshot) -> Vec<u32> {
@@ -599,11 +631,11 @@ mod tests {
     #[test]
     fn a_recycled_pid_takes_its_new_identity() {
         let mut tracker = ProcessTracker::default();
-        let table = tracker.ingest(vec![raw(50, 100, "old")]);
+        let table = tracker.ingest(vec![raw(50, 100, "old")], Some(OWN_UID));
         assert_eq!(table.rows[0].name, "old");
         assert!(table.rows[0].command.contains("/usr/bin/old"));
 
-        let table = tracker.ingest(vec![raw(50, 200, "new")]);
+        let table = tracker.ingest(vec![raw(50, 200, "new")], Some(OWN_UID));
         assert_eq!(table.rows[0].name, "new");
         assert!(table.rows[0].command.contains("/usr/bin/new"));
         assert_eq!(tracker.cache.len(), 1, "the predecessor's entry is gone");
@@ -614,17 +646,63 @@ mod tests {
         let mut tracker = ProcessTracker::default();
         let mut early = raw(60, 100, "");
         early.cmd.clear();
-        let table = tracker.ingest(vec![early]);
+        let table = tracker.ingest(vec![early], Some(OWN_UID));
         assert_eq!(table.rows[0].name, "<unknown>");
         assert_eq!(table.rows[0].command, "");
 
-        let table = tracker.ingest(vec![raw(60, 100, "tool")]);
+        let table = tracker.ingest(vec![raw(60, 100, "tool")], Some(OWN_UID));
         assert_eq!(table.rows[0].name, "tool");
         assert_eq!(table.rows[0].command, "/usr/bin/tool --secret-flag");
-        // Once filled the cached identity stands.
-        let mut later = raw(60, 100, "renamed");
+        // Once filled the cached identity stands while the name does not change, and an
+        // empty name (a refresh racing an exec) never replaces it.
+        let mut later = raw(60, 100, "tool");
         later.cmd = vec!["other".into()];
-        assert_eq!(tracker.ingest(vec![later]).rows[0].name, "tool");
+        let row = &tracker.ingest(vec![later], Some(OWN_UID)).rows[0];
+        assert_eq!(row.command, "/usr/bin/tool --secret-flag");
+        let mut blank = raw(60, 100, "");
+        blank.cmd = vec!["other".into()];
+        assert_eq!(
+            tracker.ingest(vec![blank], Some(OWN_UID)).rows[0].name,
+            "tool"
+        );
+    }
+
+    #[test]
+    fn a_new_name_for_the_same_pid_and_start_replaces_the_identity() {
+        let mut tracker = ProcessTracker::default();
+        // Seen between fork and exec: the parent's name and command line.
+        let forked = raw(80, 100, "bash");
+        let table = tracker.ingest(vec![forked], Some(OWN_UID));
+        assert_eq!(table.rows[0].name, "bash");
+        let mut execd = raw(80, 100, "make");
+        execd.user = "bob".into();
+        let table = tracker.ingest(vec![execd], Some(OWN_UID));
+        assert_eq!(table.rows[0].name, "make");
+        assert_eq!(table.rows[0].command, "/usr/bin/make --secret-flag");
+        assert_eq!(table.rows[0].user, "bob");
+        assert_eq!(tracker.cache.len(), 1);
+    }
+
+    #[test]
+    fn only_rows_of_our_own_uid_keep_their_command_line() {
+        let mut theirs = raw(91, 1, "postgres");
+        theirs.uid = Some(OWN_UID + 1);
+        theirs.user = "postgres".into();
+        let mut unknown = raw(92, 1, "");
+        unknown.uid = None;
+        let table = table_of(vec![raw(90, 1, "mine"), theirs, unknown]);
+        assert_eq!(table.rows[0].command, "/usr/bin/mine --secret-flag");
+        assert_eq!(table.rows[1].command, "", "another uid: no command line");
+        assert_eq!(table.rows[1].name, "postgres", "name unchanged");
+        assert_eq!(table.rows[1].user, "postgres", "user unchanged");
+        assert_eq!(table.rows[2].command, "", "an unknown uid: no command line");
+        assert_eq!(
+            table.rows[2].name, "<unknown>",
+            "no fallback to a dropped command line"
+        );
+        // Without our own uid nothing keeps a command line.
+        let table = ProcessTracker::default().ingest(vec![raw(90, 1, "mine")], None);
+        assert_eq!(table.rows[0].command, "");
     }
 
     #[test]
@@ -654,6 +732,8 @@ mod tests {
         statuses: HashMap<u32, String>,
         refreshes: usize,
         released: usize,
+        /// When set, refresh `n` (1-based) reports this cpu figure on every row.
+        cpu_by_refresh: Option<fn(usize) -> f32>,
     }
 
     struct FakeHost(Arc<Mutex<Script>>);
@@ -670,7 +750,16 @@ mod tests {
         fn read_processes(&mut self) -> anyhow::Result<Vec<RawProcess>> {
             let mut script = self.0.lock().unwrap();
             script.refreshes += 1;
-            Ok(script.procs.clone())
+            let mut procs = script.procs.clone();
+            if let Some(cpu) = script.cpu_by_refresh {
+                let figure = cpu(script.refreshes);
+                procs.iter_mut().for_each(|p| p.cpu_percent = figure);
+            }
+            Ok(procs)
+        }
+
+        fn own_uid(&mut self) -> Option<u32> {
+            Some(OWN_UID)
         }
 
         fn read_proc_status(&mut self, pid: u32) -> Option<String> {
@@ -828,7 +917,11 @@ mod tests {
         assert_eq!(pids(&a), [2]);
         assert_eq!(pids(&b), [1]);
         assert_eq!(a.revision, b.revision, "one refresh");
-        assert_eq!(rig.refreshes(), 1);
+        assert_eq!(
+            rig.refreshes(),
+            2,
+            "the priming refresh, then the published one"
+        );
     }
 
     #[tokio::test(start_paused = true)]
@@ -875,10 +968,13 @@ mod tests {
         tokio::time::sleep(Duration::from_secs(120)).await;
         assert_eq!(rig.refreshes(), settled, "no refresh without a watcher");
 
-        // Same (pid, start) with a new name: a cache that survived would show the old one.
-        rig.script().procs = vec![raw(4, 10, "second")];
+        // Same (pid, start, name) with a new command line: a cache that survived would show
+        // the old one.
+        let mut changed = raw(4, 10, "first");
+        changed.cmd = vec!["second".into()];
+        rig.script().procs = vec![changed];
         let mut again = rig.handle.watch_processes(ProcessQuery::default());
-        assert_eq!(again.recv().await.unwrap().rows[0].name, "second");
+        assert_eq!(again.recv().await.unwrap().rows[0].command, "second");
     }
 
     #[tokio::test(start_paused = true)]
@@ -891,5 +987,70 @@ mod tests {
         assert!(sub.recv().await.is_none(), "terminal");
         let mut off = rig.handle.watch_processes(ProcessQuery::default());
         assert!(off.recv().await.is_none());
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn the_priming_refresh_is_never_published() {
+        let rig = rig(vec![raw(1, 1, "a"), raw(2, 1, "b")]);
+        // The first refresh of a table reads 0 % (sysinfo has nothing to diff against).
+        rig.script().cpu_by_refresh = Some(|n| if n == 1 { 0.0 } else { 25.0 });
+        let mut sub = rig.handle.watch_processes(ProcessQuery::default());
+        let first = sub.recv().await.unwrap();
+        assert_eq!(rig.refreshes(), 2, "published from the second refresh");
+        assert!(
+            first.rows.iter().all(|r| r.cpu_percent == 25.0),
+            "{first:?}"
+        );
+        let primed_at = tokio::time::Instant::now();
+        sub.recv().await.unwrap();
+        assert_eq!(
+            primed_at.elapsed(),
+            MIN_PROCESS_INTERVAL,
+            "then the normal cadence"
+        );
+
+        // Dropping the table and watching again primes again.
+        drop(sub);
+        tokio::time::sleep(Duration::from_secs(30)).await;
+        let before = rig.refreshes();
+        rig.script().cpu_by_refresh = None;
+        rig.script().procs = vec![with(raw(1, 1, "a"), 40.0, Some(0))];
+        let mut again = rig.handle.watch_processes(ProcessQuery::default());
+        let snap = again.recv().await.unwrap();
+        assert_eq!(rig.refreshes(), before + 2);
+        assert_eq!(snap.rows[0].cpu_percent, 40.0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_exec_after_the_first_sighting_shows_the_new_name_and_command() {
+        let rig = rig(vec![raw(7, 50, "bash")]);
+        let mut sub = rig.handle.watch_processes(ProcessQuery::default());
+        assert_eq!(sub.recv().await.unwrap().rows[0].name, "bash");
+        let mut execd = raw(7, 50, "cargo");
+        execd.cmd = vec!["cargo".into(), "build".into()];
+        rig.script().procs = vec![execd];
+        let snap = sub.recv().await.unwrap();
+        assert_eq!(snap.rows[0].name, "cargo");
+        assert_eq!(snap.rows[0].command, "cargo build");
+        assert_eq!(snap.rows[0].start_unix_s, 50);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn another_uids_row_has_no_command_line_through_the_sampler() {
+        let mut theirs = raw(3, 1, "sshd");
+        theirs.uid = Some(0);
+        theirs.user = "root".into();
+        let rig = rig(vec![raw(2, 1, "mine"), theirs]);
+        let mut sub = rig.handle.watch_processes(ProcessQuery {
+            sort: ProcessSort::Pid,
+            ..ProcessQuery::default()
+        });
+        let snap = sub.recv().await.unwrap();
+        assert_eq!(snap.rows[0].command, "/usr/bin/mine --secret-flag");
+        assert_eq!(snap.rows[1].command, "");
+        assert_eq!(
+            (snap.rows[1].name.as_str(), snap.rows[1].user.as_str()),
+            ("sshd", "root")
+        );
     }
 }

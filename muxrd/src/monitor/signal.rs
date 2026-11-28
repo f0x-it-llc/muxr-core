@@ -4,6 +4,10 @@
 //! time compared first, so a recycled pid is never signalled. The check and the `kill` are two
 //! steps and cannot be made atomic from user space; the window is the few microseconds between
 //! them.
+//!
+//! On Linux `kill(2)` with the id of any thread signals that thread's whole thread group, so a
+//! pid is only accepted when `/proc/<pid>/status` names it as its own thread group leader: a
+//! thread id of muxrd itself can never get past the own-pid guard that way.
 
 use std::fmt;
 
@@ -40,7 +44,8 @@ pub enum SignalRefusal {
     NotFound,
     /// The pid exists but its start time differs from the expected one: a different process.
     Recycled,
-    /// Pid 0, pid 1, a pid that is not a valid `pid_t`, or muxrd itself.
+    /// Pid 0, pid 1, a pid that is not a valid `pid_t`, muxrd itself, or (Linux) a thread id
+    /// rather than a process id.
     Forbidden,
     /// The kernel refused (`EPERM` or another errno).
     NotPermitted(i32),
@@ -73,6 +78,17 @@ pub fn send_signal(
         _ => return Err(SignalRefusal::Forbidden),
     };
 
+    // A thread id would address its whole thread group, which may be muxrd's own.
+    #[cfg(target_os = "linux")]
+    {
+        let Ok(status) = std::fs::read_to_string(format!("/proc/{pid}/status")) else {
+            return Err(SignalRefusal::NotFound);
+        };
+        if tgid_from_status(&status) != Some(pid) {
+            return Err(SignalRefusal::Forbidden);
+        }
+    }
+
     let Some(start) = start_time_of(pid) else {
         return Err(SignalRefusal::NotFound);
     };
@@ -81,7 +97,8 @@ pub fn send_signal(
     }
 
     // SAFETY: kill(2) takes plain integers and touches no memory of ours; the pid is a positive
-    // pid_t that is neither 0, 1 nor this process, so it names exactly one other process.
+    // pid_t that is neither 0, 1 nor this process (and on Linux a thread group leader), so it
+    // names exactly one other process.
     let rc = unsafe { libc::kill(raw_pid, signal.number()) };
     if rc == 0 {
         return Ok(());
@@ -91,6 +108,14 @@ pub fn send_signal(
         libc::ESRCH => SignalRefusal::NotFound,
         other => SignalRefusal::NotPermitted(other),
     })
+}
+
+/// The `Tgid:` figure of `/proc/<pid>/status` text: the process a thread id belongs to.
+#[cfg(target_os = "linux")]
+fn tgid_from_status(text: &str) -> Option<u32> {
+    text.lines()
+        .find_map(|l| l.strip_prefix("Tgid:"))
+        .and_then(|rest| rest.trim().parse().ok())
 }
 
 /// The start time of `pid` right now, from a fresh single-pid refresh; `None` when it is gone.
@@ -172,6 +197,54 @@ mod tests {
                 "pid {pid}"
             );
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_thread_id_of_this_process_is_forbidden_and_the_process_survives() {
+        let (tid_tx, tid_rx) = std::sync::mpsc::channel();
+        let (done_tx, done_rx) = std::sync::mpsc::channel::<()>();
+        let thread = std::thread::spawn(move || {
+            // `/proc/thread-self` links to `<pid>/task/<tid>` for the calling thread.
+            let link = std::fs::read_link("/proc/thread-self").expect("read /proc/thread-self");
+            let tid: u32 = link
+                .file_name()
+                .and_then(|n| n.to_str())
+                .and_then(|n| n.parse().ok())
+                .expect("a numeric tid");
+            tid_tx.send(tid).unwrap();
+            let _ = done_rx.recv();
+        });
+        let tid = tid_rx.recv().unwrap();
+        assert_ne!(
+            tid,
+            std::process::id(),
+            "a spawned thread is not the leader"
+        );
+        assert!(
+            std::path::Path::new(&format!("/proc/self/task/{tid}")).exists(),
+            "the tid is one of this process's threads"
+        );
+        let start = start_time_of(tid).unwrap_or(0);
+        for signal in [ProcessSignal::Term, ProcessSignal::Kill] {
+            assert_eq!(
+                send_signal(tid, start, signal),
+                Err(SignalRefusal::Forbidden)
+            );
+        }
+        done_tx.send(()).unwrap();
+        thread.join().unwrap();
+        // Still here: nothing was delivered to this thread group.
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn tgid_parses_from_the_status_text() {
+        assert_eq!(
+            tgid_from_status("Name:\tx\nTgid:\t42\nPid:\t43\n"),
+            Some(42)
+        );
+        assert_eq!(tgid_from_status("Name:\tx\n"), None);
     }
 
     #[test]

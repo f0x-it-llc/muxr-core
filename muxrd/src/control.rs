@@ -279,6 +279,16 @@ pub fn handle_request(req: &ControlRequest, ctx: &ControlContext) -> ControlResp
                 let _guard = ctx.runtime.enter();
                 ctx.monitor.set_enabled(*enabled);
             }
+            // Enabling is refused once shutdown has fired (or without a runtime): report
+            // that, and do not persist a choice the daemon did not take.
+            if ctx.monitor.is_enabled() != *enabled {
+                log::warn!("control: monitoring could not be turned on (shutting down)");
+                return ControlResponse::Error(
+                    "monitoring could not be turned on: the server is shutting down; \
+                     nothing was saved"
+                        .to_owned(),
+                );
+            }
             match (ctx.persist_monitoring)(*enabled) {
                 Ok(()) => ControlResponse::Ok,
                 Err(e) => {
@@ -644,5 +654,35 @@ mod tests {
             .join()
             .unwrap();
         });
+    }
+
+    #[test]
+    fn set_monitoring_refused_during_shutdown_reports_an_error_and_persists_nothing() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let persisted = std::sync::Arc::new(Mutex::new(Vec::<bool>::new()));
+        let sink = persisted.clone();
+        let (ctx, stop) = test_ctx(
+            &rt,
+            Box::new(move |v| {
+                sink.lock().unwrap().push(v);
+                Ok(())
+            }),
+        );
+        stop.send(true).unwrap();
+        std::thread::scope(|s| {
+            s.spawn(|| {
+                let r = handle_request(&ControlRequest::SetMonitoring { enabled: true }, &ctx);
+                match r {
+                    ControlResponse::Error(msg) => {
+                        assert!(msg.contains("shutting down"), "{msg}");
+                    }
+                    other => panic!("expected Error, got {other:?}"),
+                }
+                assert!(!status_monitoring(&ctx), "still off");
+            })
+            .join()
+            .unwrap();
+        });
+        assert!(persisted.lock().unwrap().is_empty(), "nothing persisted");
     }
 }

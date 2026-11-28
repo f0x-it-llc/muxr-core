@@ -811,8 +811,8 @@ async fn serve(
     // it happens here, inside the runtime. Off means no task exists at all.
     let monitor = muxrd::monitor::MonitorHandle::new(kernel_shutdown_tx.subscribe());
     if monitoring {
+        // Logs `monitor: enabled` itself.
         monitor.set_enabled(true);
-        log::info!("monitoring: enabled");
     } else {
         log::info!("monitoring: disabled");
     }
