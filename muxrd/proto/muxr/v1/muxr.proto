@@ -136,8 +136,8 @@ service Muxr {
   rpc WatchProcesses(WatchProcessesRequest) returns (stream ProcessSnapshot);
   // Sends a signal to one process, identified by pid and start time. Refused for read-only
   // tokens with PERMISSION_DENIED; FAILED_PRECONDITION when monitoring is off;
-  // INVALID_ARGUMENT for pid 0 or an unspecified signal. A target that is not found, has
-  // changed since it was listed, is not allowed (pid 0/1, muxrd itself, a thread id) or is
+  // INVALID_ARGUMENT for pid 0 or an unspecified or unknown signal. A target that is not found, has
+  // changed since it was listed, is not allowed (pid 1, muxrd itself, a thread id) or is
   // refused by the OS comes back as ActionAck{ok: false} with display-only error text:
   // treat any ok: false as "not signalled" and do not parse the text. ok: true means the
   // signal was sent, not that the process exited.

@@ -420,8 +420,8 @@ mostly NaN until the rings fill.
 
 `SignalProcess` answers `PERMISSION_DENIED` for a read-only token,
 `FAILED_PRECONDITION` when monitoring is off, and `INVALID_ARGUMENT` for pid 0
-or an unspecified signal. A target that is not found, has changed since it was
-listed (start time), is not allowed (pid 0 or 1, muxrd itself, a thread id) or
+or an unspecified or unknown signal. A target that is not found, has changed since it was
+listed (start time), is not allowed (pid 1, muxrd itself, a thread id) or
 is refused by the operating system comes back as `ActionAck{ok: false}` with
 display-only error text: a client treats any `ok: false` as "not signalled"
 and must not parse the text. `ok: true` means the signal was sent, not that

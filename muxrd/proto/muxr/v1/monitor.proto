@@ -387,10 +387,11 @@ enum ProcessSignal {
 // The SignalProcess request. The reply is an ActionAck.
 //
 // Errors: PERMISSION_DENIED for a read-only token; FAILED_PRECONDITION when
-// monitoring is off; INVALID_ARGUMENT for pid 0 or an unspecified signal.
+// monitoring is off; INVALID_ARGUMENT for pid 0 or an unspecified or unknown
+// signal.
 // Everything else comes back as ActionAck{ok: false} with display-only error
 // text: a target that is not found, has changed since it was listed (start
-// time differs), is not allowed (pid 0 or 1, muxrd itself, a thread id), or is
+// time differs), is not allowed (pid 1, muxrd itself, a thread id), or is
 // refused by the operating system. A client must treat any ok: false as "not
 // signalled" and must not parse the text. ok: true means the signal was sent,
 // not that the process exited. A full token may signal any process the user
