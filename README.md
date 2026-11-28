@@ -12,6 +12,7 @@ Muxr puts your zellij, herdr and tmux terminal sessions, including the ones your
 - Works with [zellij](https://zellij.dev/), [herdr](https://herdr.dev/) and [tmux](https://github.com/tmux/tmux); `muxrd` auto-detects whichever is installed. Muxr works with the herdr 0.9.x server (0.9.0 to 0.9.5). herdr-core is not supported.
 - Browse, open, create, rename and close sessions, tabs and panes from the app.
 - On herdr and tmux, an agents list shows the coding agents running in a session, most urgent first.
+- Host monitoring, off by default: CPU, memory, disk, network and process vitals for the machine `muxrd` runs on, streamed to clients that ask for them.
 - Pair by scanning a QR code. With a self-signed server the code also pins the server's certificate, so the phone trusts only your server.
 - Per-device tokens, including read-only tokens for a view-only phone.
 - Works with a self-signed certificate, a certificate from a certificate authority, or behind a proxy that handles TLS.
@@ -130,6 +131,10 @@ not listed. Three things a tmux user will notice:
 Space presses the focused one, and Esc closes a dialog. Ctrl-C quits from any screen. The
 last line of each screen lists the letters that screen answers to.
 
+`m` on the dashboard switches host monitoring on or off. While `muxrd` is running the
+change takes effect at once, and it is saved to the config file (see
+[host monitoring](#grpc-contract)).
+
 `c` copies. It copies the new token in the "New token" dialog, the pairing link on the QR
 screen and on the wizard's Pair step, and the certificate fingerprint in the Certificate
 dialog (`e` on the dashboard).
@@ -244,6 +249,26 @@ output and the pane title, and are labelled "(inferred)"; tmux releases after 3.
 answer the probe. Servers that can report agents advertise the `"agents"`
 capability on `GetVersion`; the same data appears as `PaneMsg.agent` on `GetLayout` and as
 `SessionInfo.agents` on `ListSessions`.
+
+**Host monitoring:** off by default. Turn it on with `monitoring = true` in
+`config.toml` (in the `muxrd` data directory), with `MUXRD_MONITORING` (read when
+`muxrd` starts and overriding the file; `1`, `true`, `on` or `yes` to enable,
+`0`, `false`, `off` or `no` to disable, case-insensitive), or with `m` on
+`muxrctl`'s dashboard, which takes effect while the server runs. While it is on,
+`GetVersion` lists the `host-vitals` capability, and a client must not call the
+four RPCs below unless it does; while it is off they answer `FAILED_PRECONDITION`.
+`WatchVitals` streams live samples (a summary, or every field at a chosen
+interval), `GetVitalsHistory` returns a fixed-step window from one minute to one
+hour, `WatchProcesses` streams the host's process table, filtered and sorted on
+the server, and `SignalProcess` sends one signal to one process. Read-only tokens
+may call the first three but not `SignalProcess`, and they get process rows with
+no command lines. A full token sees a command line only for a process owned by
+the user `muxrd` runs as. `SignalProcess` names a process by pid and start time,
+so a recycled pid is not signalled; it refuses pid 0 and 1, `muxrd` itself and
+thread ids, and otherwise whether the signal is delivered is up to the operating
+system. Inside a container, the cpu and memory figures are the host's and the
+process list shows only the container's own processes; temperatures appear only
+where the container can read the host's sensors.
 
 ## Releasing
 
