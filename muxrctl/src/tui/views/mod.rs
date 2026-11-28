@@ -540,6 +540,7 @@ mod tests {
             notify_relay_url: None,
             push_device_count: 0,
             latest_version: latest_version.map(str::to_owned),
+            monitoring_enabled: false,
         }
     }
 
@@ -797,6 +798,37 @@ mod tests {
     }
 
     #[test]
+    fn the_dashboard_footer_fits_80_columns_and_keeps_quit() {
+        let harness = Harness::sized(80, 24);
+        let row = harness.last_row();
+        assert!(row.contains("q quit") && row.contains("m mon"), "{row:?}");
+    }
+
+    #[test]
+    fn the_daemon_box_shows_the_monitoring_row_unclipped() {
+        let mut harness = Harness::sized(80, 30);
+        harness.state.server.status = Some(crate::app::state::ServerInfo {
+            monitoring_enabled: true,
+            ..running(None)
+        });
+        harness.draw();
+        let screen = harness.screen();
+        assert!(screen.contains("Monitoring"), "{screen}");
+        assert!(screen.contains("Clients"), "{screen}");
+
+        harness.state.server.status = None;
+        harness.state.server.stopped = true;
+        harness.state.monitoring_configured = true;
+        harness.draw();
+        assert!(harness.screen().contains("on (configured)"));
+        assert!(!harness.screen().contains("env MUXRD_MONITORING"));
+
+        harness.state.monitoring_env_override = true;
+        harness.draw();
+        assert!(harness.screen().contains("env MUXRD_MONITORING overrides"));
+    }
+
+    #[test]
     fn the_footer_names_the_dialog_keys() {
         let mut harness = Harness::new();
         let dashboard = harness.last_row();
@@ -964,6 +996,7 @@ mod tests {
             notify_relay_url: None,
             push_device_count: 0,
             latest_version: None,
+            monitoring_enabled: false,
         });
         harness.draw();
         harness.key(KeyCode::Char('s'));

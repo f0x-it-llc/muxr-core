@@ -36,6 +36,7 @@ fn server_info_from(info: StatusInfo) -> ServerInfo {
         notify_relay_url: info.notify_relay_url,
         push_device_count: info.push_device_count,
         latest_version: info.latest_version,
+        monitoring_enabled: info.monitoring_enabled,
     }
 }
 
@@ -304,6 +305,63 @@ pub fn set_bind_addr(addr: &str) -> Result<()> {
         .with_context(|| format!("set_bind_addr: failed to write {addr:?}"))
 }
 
+/// The `monitoring` value the config FILE holds (off when the file is missing
+/// or unreadable). Unlike [`effective_config`] this ignores muxrctl's own
+/// `MUXRD_MONITORING`, which says nothing about the daemon.
+pub fn configured_monitoring() -> bool {
+    muxrd::config::config_file_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| parse_file_monitoring(&text))
+}
+
+/// The top-level `monitoring = true|false` of a config file's text (off when
+/// absent or malformed). Pure: only keys before the first `[table]` count.
+pub fn parse_file_monitoring(text: &str) -> bool {
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            break;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "monitoring"
+        {
+            return value.trim() == "true";
+        }
+    }
+    false
+}
+
+/// Whether an `MUXRD_MONITORING` value (as read from muxrctl's environment)
+/// is set to something non-blank, i.e. overrides the file for a daemon started
+/// from this environment.
+pub fn monitoring_env_overrides(env_value: Option<&str>) -> bool {
+    env_value.is_some_and(|v| !v.trim().is_empty())
+}
+
+/// [`monitoring_env_overrides`] for the real process environment.
+pub fn monitoring_env_is_set() -> bool {
+    monitoring_env_overrides(std::env::var(muxrd::config::MONITORING_ENV).ok().as_deref())
+}
+
+/// Turn host monitoring on or off.
+///
+/// A running daemon is flipped (and persisted) over the control socket; a
+/// stopped one is persisted straight to the config file.
+pub fn set_monitoring(enabled: bool, daemon_running: bool) -> Result<()> {
+    if !daemon_running {
+        return muxrd::config::set_monitoring(enabled)
+            .with_context(|| format!("set_monitoring: failed to write {enabled}"));
+    }
+    match muxrd::control::query(&ControlRequest::SetMonitoring { enabled })
+        .context("set_monitoring: control socket query failed")?
+    {
+        ControlResponse::Ok => Ok(()),
+        ControlResponse::Error(msg) => anyhow::bail!(msg),
+        other => anyhow::bail!("set_monitoring: unexpected reply {other:?}"),
+    }
+}
+
 // ── TLS / cert ────────────────────────────────────────────────────────────────
 
 /// Load or generate the TLS identity for the given SANs, returning the cert PEM.
@@ -363,6 +421,23 @@ mod tests {
     use super::*;
 
     const DEFAULT: &str = muxrd::config::DEFAULT_BIND;
+
+    #[test]
+    fn file_monitoring_reads_the_top_level_key_only() {
+        assert!(parse_file_monitoring(
+            "bind_addr = \"x\"\nmonitoring = true # on\n"
+        ));
+        assert!(!parse_file_monitoring("monitoring = false\n"));
+        assert!(!parse_file_monitoring(""));
+        assert!(!parse_file_monitoring("[other]\nmonitoring = true\n"));
+    }
+
+    #[test]
+    fn the_env_override_is_a_non_blank_value() {
+        assert!(monitoring_env_overrides(Some("1")));
+        assert!(!monitoring_env_overrides(Some("  ")));
+        assert!(!monitoring_env_overrides(None));
+    }
 
     #[test]
     fn build_daemon_args_default_bind_omits_bind_flag() {

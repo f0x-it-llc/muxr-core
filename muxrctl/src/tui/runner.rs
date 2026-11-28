@@ -85,6 +85,9 @@ pub fn run(terminal: &mut DefaultTerminal, state: &mut AppState) -> Result<()> {
             crate::app::state::cert::AdvertiseTrust::from_persist_str(persisted);
     }
 
+    state.monitoring_configured = crate::server::configured_monitoring();
+    state.monitoring_env_override = crate::server::monitoring_env_is_set();
+
     // Seed the dashboard: every section loads once before the first key.
     state.server.loading = true;
     state.config.loading = true;
@@ -357,6 +360,25 @@ fn apply_actions(state: &mut AppState, actions: Vec<UpdateAction>, tx: mpsc::Sen
                         Err(e) => Message::ActionFailed(e.to_string()),
                     };
                     let _ = tx.blocking_send(msg);
+                });
+            }
+            UpdateAction::SetMonitoring {
+                enabled,
+                daemon_running,
+            } => {
+                let tx = tx.clone();
+                tokio::task::spawn_blocking(move || {
+                    let msg = match crate::server::set_monitoring(enabled, daemon_running) {
+                        Ok(()) => Message::MonitoringSet {
+                            enabled,
+                            configured: crate::server::configured_monitoring(),
+                        },
+                        Err(e) => Message::MonitoringFailed {
+                            error: e.to_string(),
+                        },
+                    };
+                    let _ = tx.blocking_send(msg);
+                    let _ = tx.blocking_send(Message::StatusLoaded(crate::server::status()));
                 });
             }
             UpdateAction::EnsureCert(sans) => {

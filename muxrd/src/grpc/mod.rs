@@ -2,8 +2,10 @@
 //!
 //! Surface: `GetVersion`, `Login` (public, no bearer), `AttachTerminal` (bidi
 //! relay), `ListSessions`/`GetLayout`/`GetSpaces`/`ListAgents` (typed reads),
-//! `WatchAgents` (server-streaming read over the internal event bus), and the
-//! pane/tab/session/space mutating ops.
+//! `WatchAgents` (server-streaming read over the internal event bus), the
+//! host-vitals RPCs `WatchVitals`/`GetVitalsHistory`/`WatchProcesses`/`SignalProcess`
+//! (over the monitor handle; `SignalProcess` is the mutating one, refused for read-only
+//! tokens), and the pane/tab/session/space mutating ops.
 //!
 //! Auth note: `Login` and `GetVersion` are **public** (no bearer required).
 //! Every other RPC requires a valid bearer token injected by the tower layer in
@@ -21,13 +23,15 @@ use crate::proto::{
     Empty, Layout, ListPushTargetsReq, ListPushTargetsResp, LoginRequest, LoginResponse,
     NewPaneReq, NewTabReq, PaneTarget, RegisterPushTargetReq, RemovePushTargetReq, RenamePaneReq,
     RenameSessionReq, RenameSpaceReq, RenameTabReq, ResizePaneReq, ScrollReq, SessionList,
-    SessionRef, SpaceList, SwitchSpaceReq, TabTarget, ToggleFullscreenReq, VersionInfo,
+    SessionRef, SignalProcessRequest, SpaceList, SwitchSpaceReq, TabTarget, ToggleFullscreenReq,
+    VersionInfo, VitalsHistory, VitalsHistoryRequest, WatchProcessesRequest, WatchVitalsRequest,
     WriteToPaneReq,
 };
 
 mod agent_ops;
 pub mod helpers;
 mod layout;
+mod monitor_ops;
 mod pane_ops;
 mod push_ops;
 mod session_ops;
@@ -104,6 +108,13 @@ pub struct MuxrService {
     /// shares one state with the check task via
     /// [`MuxrService::with_update_state`].
     update: crate::update::UpdateState,
+    /// The host-monitoring switch and its samples (`monitor::MonitorHandle`).
+    /// `None` until [`MuxrService::with_monitor`] hands one in; `GetVersion`
+    /// advertises `"host-vitals"` only while it reports enabled, read at call
+    /// time so a runtime flip shows on the next call.
+    monitor: Option<crate::monitor::MonitorHandle>,
+    /// The server-wide caps on concurrent `WatchVitals` and `WatchProcesses` streams.
+    watch_slots: monitor_ops::WatchSlots,
 }
 
 impl Default for MuxrService {
@@ -134,6 +145,8 @@ impl MuxrService {
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
             update: crate::update::UpdateState::default(),
+            monitor: None,
+            watch_slots: monitor_ops::WatchSlots::default(),
         }
     }
 
@@ -163,6 +176,8 @@ impl MuxrService {
             push_devices: crate::notify::devices::PushDeviceStore::new(),
             event_bus: None,
             update: crate::update::UpdateState::default(),
+            monitor: None,
+            watch_slots: monitor_ops::WatchSlots::default(),
         }
     }
 
@@ -211,6 +226,20 @@ impl MuxrService {
     pub fn with_update_state(mut self, update: crate::update::UpdateState) -> Self {
         self.update = update;
         self
+    }
+
+    /// Hand this service the host-monitoring handle (see the `monitor` field
+    /// doc). Builder-style, chainable like [`MuxrService::with_update_state`];
+    /// `bin/muxrd.rs` shares one handle with the control socket.
+    #[must_use]
+    pub fn with_monitor(mut self, monitor: crate::monitor::MonitorHandle) -> Self {
+        self.monitor = Some(monitor);
+        self
+    }
+
+    /// The host-monitoring handle, when one was supplied.
+    pub fn monitor(&self) -> Option<&crate::monitor::MonitorHandle> {
+        self.monitor.as_ref()
     }
 
     /// Resolve an opaque session `id` (`"<backend>:<bare>"`) to the backend that
@@ -578,5 +607,47 @@ impl Muxr for MuxrService {
         request: Request<RemovePushTargetReq>,
     ) -> Result<Response<ProtoAck>, Status> {
         self.remove_push_target_impl(request).await
+    }
+
+    // ── Host vitals (capability `host-vitals`) ──────────────────────────────
+    //
+    // Reads over the monitor handle, permitted for read-only tokens, except
+    // SignalProcess. Every one answers failed_precondition while monitoring is
+    // off. See [`monitor_ops`].
+
+    type WatchVitalsStream = monitor_ops::VitalsEventStream;
+
+    /// Stream host vitals at summary or full detail. Read-only allowed.
+    async fn watch_vitals(
+        &self,
+        request: Request<WatchVitalsRequest>,
+    ) -> Result<Response<Self::WatchVitalsStream>, Status> {
+        self.watch_vitals_impl(request).await
+    }
+
+    /// One fixed-step window of vitals history. Read-only allowed.
+    async fn get_vitals_history(
+        &self,
+        request: Request<VitalsHistoryRequest>,
+    ) -> Result<Response<VitalsHistory>, Status> {
+        self.get_vitals_history_impl(request).await
+    }
+
+    type WatchProcessesStream = monitor_ops::ProcessSnapshotStream;
+
+    /// Stream the host's process table. Read-only allowed (command lines empty).
+    async fn watch_processes(
+        &self,
+        request: Request<WatchProcessesRequest>,
+    ) -> Result<Response<Self::WatchProcessesStream>, Status> {
+        self.watch_processes_impl(request).await
+    }
+
+    /// Signal one process by pid and start time. MUTATING (read-only rejected).
+    async fn signal_process(
+        &self,
+        request: Request<SignalProcessRequest>,
+    ) -> Result<Response<ProtoAck>, Status> {
+        self.signal_process_impl(request).await
     }
 }

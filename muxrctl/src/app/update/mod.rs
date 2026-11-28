@@ -65,6 +65,20 @@ pub fn update(state: &mut AppState, message: Message) -> Vec<UpdateAction> {
             actions.extend(wizard::on_action_ok(state, &msg));
             actions
         }
+        Message::MonitoringSet {
+            enabled,
+            configured,
+        } => {
+            state.monitoring_pending = None;
+            state.monitoring_configured = configured;
+            state.toast_ok(format!("Monitoring {}", if enabled { "on" } else { "off" }));
+            Vec::new()
+        }
+        Message::MonitoringFailed { error } => {
+            state.monitoring_pending = None;
+            state.toast_err(error);
+            Vec::new()
+        }
         Message::ActionFailed(msg) => {
             clear_loading(state);
             state.config.pending_save = false;
@@ -289,6 +303,7 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
             };
             server::update(state, msg)
         }
+        KeyCode::Char('m') => toggle_monitoring(state),
         KeyCode::Char('r') => vec![
             UpdateAction::RefreshStatus,
             UpdateAction::LoadConfig,
@@ -298,6 +313,33 @@ fn handle_key(state: &mut AppState, key: KeyEvent) -> Vec<UpdateAction> {
         ],
         _ => Vec::new(),
     }
+}
+
+/// Flip host monitoring, but only when the daemon state is known.
+///
+/// Running (status known, not stopped) flips the live value over the control
+/// socket; stopped flips the configured value in the file. In the unknown
+/// state (loading, starting, a failed poll) nothing is written. While one
+/// write is outstanding a second press does nothing. The action carries the
+/// path so the runner never re-reads the state at apply time.
+fn toggle_monitoring(state: &mut AppState) -> Vec<UpdateAction> {
+    if state.monitoring_pending.is_some() {
+        state.toast_err("Monitoring change in progress");
+        return Vec::new();
+    }
+    let (enabled, daemon_running) = match (state.server.status.as_ref(), state.server.stopped) {
+        (Some(info), false) => (!info.monitoring_enabled, true),
+        (None, true) => (!state.monitoring_configured, false),
+        _ => {
+            state.toast_err("Daemon status not known yet");
+            return Vec::new();
+        }
+    };
+    state.monitoring_pending = Some(enabled);
+    vec![UpdateAction::SetMonitoring {
+        enabled,
+        daemon_running,
+    }]
 }
 
 /// Tick handler — the ~1 s daemon status poll plus the QR overlay's own poll.
@@ -420,7 +462,141 @@ mod tests {
             notify_relay_url: None,
             push_device_count: 0,
             latest_version: None,
+            monitoring_enabled: false,
         }
+    }
+
+    fn running_with_monitoring(enabled: bool) -> AppState {
+        let mut state = AppState::new();
+        state.server.status = Some(ServerInfo {
+            monitoring_enabled: enabled,
+            ..server_info(0)
+        });
+        state
+    }
+
+    fn press_m(state: &mut AppState) -> Vec<UpdateAction> {
+        update(state, Message::Key(key(KeyCode::Char('m'))))
+    }
+
+    fn stopped_state(configured: bool) -> AppState {
+        let mut state = AppState::new();
+        state.server.stopped = true;
+        state.monitoring_configured = configured;
+        state
+    }
+
+    #[test]
+    fn m_turns_monitoring_on_when_it_is_off() {
+        let mut state = running_with_monitoring(false);
+        let actions = press_m(&mut state);
+        assert!(matches!(
+            actions.as_slice(),
+            [UpdateAction::SetMonitoring {
+                enabled: true,
+                daemon_running: true
+            }]
+        ));
+    }
+
+    #[test]
+    fn m_turns_monitoring_off_when_it_is_on() {
+        let mut state = running_with_monitoring(true);
+        let actions = press_m(&mut state);
+        assert!(matches!(
+            actions.as_slice(),
+            [UpdateAction::SetMonitoring {
+                enabled: false,
+                daemon_running: true
+            }]
+        ));
+    }
+
+    #[test]
+    fn m_with_a_dialog_open_does_nothing() {
+        let mut state = running_with_monitoring(false);
+        state.open_dialog(DialogId::Config);
+        assert!(press_m(&mut state).is_empty());
+    }
+
+    #[test]
+    fn m_in_the_unknown_state_writes_nothing_and_flips_nothing() {
+        let mut state = AppState::new();
+        state.server.loading = true;
+        state.monitoring_configured = false;
+        assert!(press_m(&mut state).is_empty());
+        assert!(!state.monitoring_configured);
+        assert_eq!(state.monitoring_pending, None);
+        assert_eq!(state.ui.toasts.len(), 1);
+    }
+
+    #[test]
+    fn m_on_a_stopped_daemon_takes_the_config_file_path() {
+        let mut state = stopped_state(false);
+        let actions = press_m(&mut state);
+        assert!(matches!(
+            actions.as_slice(),
+            [UpdateAction::SetMonitoring {
+                enabled: true,
+                daemon_running: false
+            }]
+        ));
+        assert_eq!(state.monitoring_pending, Some(true));
+    }
+
+    #[test]
+    fn a_second_m_while_one_write_is_in_flight_does_nothing() {
+        let mut state = running_with_monitoring(false);
+        assert_eq!(press_m(&mut state).len(), 1);
+        assert!(press_m(&mut state).is_empty());
+        assert_eq!(state.monitoring_pending, Some(true));
+    }
+
+    #[test]
+    fn unrelated_action_results_leave_the_monitoring_state_alone() {
+        let mut state = stopped_state(false);
+        press_m(&mut state);
+        update(&mut state, Message::ActionOk("x".into()));
+        update(&mut state, Message::ActionFailed("y".into()));
+        assert_eq!(state.monitoring_pending, Some(true));
+        assert!(!state.monitoring_configured);
+    }
+
+    #[test]
+    fn the_monitoring_failure_restores_the_previous_display() {
+        let mut state = stopped_state(false);
+        press_m(&mut state);
+        update(&mut state, Message::MonitoringFailed { error: "no".into() });
+        assert_eq!(state.monitoring_pending, None);
+        assert!(!state.monitoring_configured);
+        assert!(press_m(&mut state).len() == 1, "the slot is free again");
+    }
+
+    #[test]
+    fn the_monitoring_success_takes_the_value_reloaded_from_the_file() {
+        let mut state = stopped_state(false);
+        press_m(&mut state);
+        update(
+            &mut state,
+            Message::MonitoringSet {
+                enabled: true,
+                configured: true,
+            },
+        );
+        assert_eq!(state.monitoring_pending, None);
+        assert!(state.monitoring_configured);
+    }
+
+    #[test]
+    fn a_status_refresh_does_not_overwrite_the_configured_value() {
+        let mut state = AppState::new();
+        let info = ServerInfo {
+            monitoring_enabled: true,
+            ..server_info(0)
+        };
+        update(&mut state, Message::StatusLoaded(Some(info)));
+        assert!(state.server.status.as_ref().unwrap().monitoring_enabled);
+        assert!(!state.monitoring_configured);
     }
 
     #[test]

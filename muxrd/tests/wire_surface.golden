@@ -8,8 +8,32 @@ enum muxr.v1.Backend.BACKEND_HERDR = 2
 enum muxr.v1.Backend.BACKEND_TMUX = 3
 enum muxr.v1.Backend.BACKEND_UNSPECIFIED = 0
 enum muxr.v1.Backend.BACKEND_ZELLIJ = 1
+enum muxr.v1.HistoryRange.HISTORY_RANGE_15M = 3
+enum muxr.v1.HistoryRange.HISTORY_RANGE_1H = 4
+enum muxr.v1.HistoryRange.HISTORY_RANGE_1M = 1
+enum muxr.v1.HistoryRange.HISTORY_RANGE_5M = 2
+enum muxr.v1.HistoryRange.HISTORY_RANGE_UNSPECIFIED = 0
 enum muxr.v1.MouseKind.MOUSE_KIND_WHEEL_DOWN = 1
 enum muxr.v1.MouseKind.MOUSE_KIND_WHEEL_UP = 0
+enum muxr.v1.ProcessSignal.PROCESS_SIGNAL_HUP = 4
+enum muxr.v1.ProcessSignal.PROCESS_SIGNAL_INT = 3
+enum muxr.v1.ProcessSignal.PROCESS_SIGNAL_KILL = 2
+enum muxr.v1.ProcessSignal.PROCESS_SIGNAL_TERM = 1
+enum muxr.v1.ProcessSignal.PROCESS_SIGNAL_UNSPECIFIED = 0
+enum muxr.v1.ProcessSort.PROCESS_SORT_CPU = 1
+enum muxr.v1.ProcessSort.PROCESS_SORT_MEMORY = 2
+enum muxr.v1.ProcessSort.PROCESS_SORT_NAME = 4
+enum muxr.v1.ProcessSort.PROCESS_SORT_PID = 3
+enum muxr.v1.ProcessSort.PROCESS_SORT_UNSPECIFIED = 0
+enum muxr.v1.ProcessState.PROCESS_STATE_DEAD = 7
+enum muxr.v1.ProcessState.PROCESS_STATE_DISK_WAIT = 3
+enum muxr.v1.ProcessState.PROCESS_STATE_IDLE = 6
+enum muxr.v1.ProcessState.PROCESS_STATE_RUNNING = 1
+enum muxr.v1.ProcessState.PROCESS_STATE_SLEEPING = 2
+enum muxr.v1.ProcessState.PROCESS_STATE_STOPPED = 5
+enum muxr.v1.ProcessState.PROCESS_STATE_UNKNOWN = 8
+enum muxr.v1.ProcessState.PROCESS_STATE_UNSPECIFIED = 0
+enum muxr.v1.ProcessState.PROCESS_STATE_ZOMBIE = 4
 enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_DOWN = 4
 enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_LEFT = 1
 enum muxr.v1.ResizeDirection.RESIZE_DIRECTION_RIGHT = 2
@@ -25,6 +49,17 @@ enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_PAGE_UP = 4
 enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_TO_BOTTOM = 3
 enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_TO_TOP = 2
 enum muxr.v1.ScrollDirection.SCROLL_DIRECTION_UP = 0
+enum muxr.v1.SeriesKind.SERIES_KIND_CPU_SYSTEM = 2
+enum muxr.v1.SeriesKind.SERIES_KIND_CPU_TOTAL = 1
+enum muxr.v1.SeriesKind.SERIES_KIND_DISK_READ_BPS = 6
+enum muxr.v1.SeriesKind.SERIES_KIND_DISK_WRITE_BPS = 7
+enum muxr.v1.SeriesKind.SERIES_KIND_MEMORY_USED_FRACTION = 3
+enum muxr.v1.SeriesKind.SERIES_KIND_NET_RX_BPS = 4
+enum muxr.v1.SeriesKind.SERIES_KIND_NET_TX_BPS = 5
+enum muxr.v1.SeriesKind.SERIES_KIND_UNSPECIFIED = 0
+enum muxr.v1.VitalsDetail.VITALS_DETAIL_FULL = 2
+enum muxr.v1.VitalsDetail.VITALS_DETAIL_SUMMARY = 1
+enum muxr.v1.VitalsDetail.VITALS_DETAIL_UNSPECIFIED = 0
 field muxr.v1.ActionAck.error = 2 optional string
 field muxr.v1.ActionAck.info = 3 optional string
 field muxr.v1.ActionAck.ok = 1 optional bool
@@ -86,8 +121,34 @@ field muxr.v1.CreateSpaceReq.label = 2 optional string
 field muxr.v1.CreateSpaceReq.session = 1 optional string
 field muxr.v1.CreateTokenReq.name = 1 optional string
 field muxr.v1.CreateTokenReq.read_only = 2 optional bool
+field muxr.v1.DiskVolume.fs = 2 optional string
+field muxr.v1.DiskVolume.mount = 1 optional string
+field muxr.v1.DiskVolume.total_bytes = 3 optional uint64
+field muxr.v1.DiskVolume.used_bytes = 4 optional uint64
+field muxr.v1.HistorySeries.kind = 1 optional enum muxr.v1.SeriesKind
+field muxr.v1.HistorySeries.values = 2 repeated float
+field muxr.v1.HostInfo.arch = 5 optional string
+field muxr.v1.HostInfo.boot_unix_s = 10 optional int64
+field muxr.v1.HostInfo.cpu_brand = 6 optional string
+field muxr.v1.HostInfo.hostname = 1 optional string
+field muxr.v1.HostInfo.kernel_version = 4 optional string
+field muxr.v1.HostInfo.logical_cores = 7 optional uint32
+field muxr.v1.HostInfo.memory_total_bytes = 9 optional uint64
+field muxr.v1.HostInfo.os_name = 2 optional string
+field muxr.v1.HostInfo.os_version = 3 optional string
+field muxr.v1.HostInfo.physical_cores = 8 optional uint32 oneof=_physical_cores proto3_optional
+field muxr.v1.HostMemory.available_bytes = 5 optional uint64
+field muxr.v1.HostMemory.cache_bytes = 3 optional uint64
+field muxr.v1.HostMemory.free_bytes = 4 optional uint64
+field muxr.v1.HostMemory.total_bytes = 1 optional uint64
+field muxr.v1.HostMemory.used_bytes = 2 optional uint64
+field muxr.v1.HostTemperature.celsius = 2 optional float
+field muxr.v1.HostTemperature.label = 1 optional string
 field muxr.v1.Layout.tabs = 1 repeated message muxr.v1.TabMsg
 field muxr.v1.ListPushTargetsResp.targets = 1 repeated message muxr.v1.PushTargetInfo
+field muxr.v1.LoadAverage.load_1 = 1 optional double
+field muxr.v1.LoadAverage.load_15 = 3 optional double
+field muxr.v1.LoadAverage.load_5 = 2 optional double
 field muxr.v1.LoginRequest.auth_token = 1 optional string
 field muxr.v1.LoginRequest.remember_me = 2 optional bool
 field muxr.v1.LoginResponse.is_read_only = 2 optional bool
@@ -95,6 +156,12 @@ field muxr.v1.LoginResponse.session_token = 1 optional string
 field muxr.v1.MouseInput.col = 2 optional uint32
 field muxr.v1.MouseInput.kind = 1 optional enum muxr.v1.MouseKind
 field muxr.v1.MouseInput.row = 3 optional uint32
+field muxr.v1.NetInterface.address = 2 optional string oneof=_address proto3_optional
+field muxr.v1.NetInterface.name = 1 optional string
+field muxr.v1.NetInterface.rx_bps = 3 optional uint64 oneof=_rx_bps proto3_optional
+field muxr.v1.NetInterface.rx_total_bytes = 5 optional uint64
+field muxr.v1.NetInterface.tx_bps = 4 optional uint64 oneof=_tx_bps proto3_optional
+field muxr.v1.NetInterface.tx_total_bytes = 6 optional uint64
 field muxr.v1.NewPaneReq.connection_id = 4 optional string
 field muxr.v1.NewPaneReq.floating = 2 optional bool
 field muxr.v1.NewPaneReq.pane_name = 3 optional string
@@ -120,6 +187,23 @@ field muxr.v1.PaneTarget.connection_id = 4 optional string
 field muxr.v1.PaneTarget.is_plugin = 3 optional bool
 field muxr.v1.PaneTarget.pane_id = 2 optional uint32
 field muxr.v1.PaneTarget.session = 1 optional string
+field muxr.v1.ProcessRow.command = 4 optional string
+field muxr.v1.ProcessRow.cpu_percent = 6 optional float
+field muxr.v1.ProcessRow.cpu_time_ms = 10 optional uint64
+field muxr.v1.ProcessRow.memory_bytes = 7 optional uint64 oneof=_memory_bytes proto3_optional
+field muxr.v1.ProcessRow.name = 3 optional string
+field muxr.v1.ProcessRow.parent_pid = 2 optional uint32 oneof=_parent_pid proto3_optional
+field muxr.v1.ProcessRow.pid = 1 optional uint32
+field muxr.v1.ProcessRow.start_unix_s = 9 optional int64
+field muxr.v1.ProcessRow.state = 11 optional enum muxr.v1.ProcessState
+field muxr.v1.ProcessRow.threads = 8 optional uint32 oneof=_threads proto3_optional
+field muxr.v1.ProcessRow.user = 5 optional string
+field muxr.v1.ProcessSnapshot.disabled = 6 optional bool
+field muxr.v1.ProcessSnapshot.revision = 1 optional uint64
+field muxr.v1.ProcessSnapshot.rows = 5 repeated message muxr.v1.ProcessRow
+field muxr.v1.ProcessSnapshot.running = 4 optional uint32
+field muxr.v1.ProcessSnapshot.total = 3 optional uint32
+field muxr.v1.ProcessSnapshot.unix_ms = 2 optional int64
 field muxr.v1.PushTargetInfo.device_name = 1 optional string
 field muxr.v1.PushTargetInfo.handle_prefix = 4 optional string
 field muxr.v1.PushTargetInfo.platform = 2 optional string
@@ -165,6 +249,9 @@ field muxr.v1.SessionList.sessions = 1 repeated message muxr.v1.SessionInfo
 field muxr.v1.SessionRef.connection_id = 2 optional string
 field muxr.v1.SessionRef.session = 1 optional string
 field muxr.v1.SessionRef.space_id = 3 optional string
+field muxr.v1.SignalProcessRequest.pid = 1 optional uint32
+field muxr.v1.SignalProcessRequest.signal = 3 optional enum muxr.v1.ProcessSignal
+field muxr.v1.SignalProcessRequest.start_unix_s = 2 optional int64
 field muxr.v1.Space.active = 3 optional bool
 field muxr.v1.Space.id = 1 optional string
 field muxr.v1.Space.name = 2 optional string
@@ -201,6 +288,43 @@ field muxr.v1.VersionInfo.latest_version = 7 optional string
 field muxr.v1.VersionInfo.notification_relay_url = 6 optional string
 field muxr.v1.VersionInfo.server_version = 1 optional string
 field muxr.v1.VersionInfo.zellij_version = 2 optional string
+field muxr.v1.VitalsEvent.disabled = 4 optional bool
+field muxr.v1.VitalsEvent.host = 2 optional message muxr.v1.HostInfo
+field muxr.v1.VitalsEvent.lagged = 5 optional uint64
+field muxr.v1.VitalsEvent.revision = 1 optional uint64
+field muxr.v1.VitalsEvent.sample = 3 optional message muxr.v1.VitalsSample
+field muxr.v1.VitalsHistory.end_unix_ms = 2 optional int64
+field muxr.v1.VitalsHistory.revision = 3 optional uint64
+field muxr.v1.VitalsHistory.series = 4 repeated message muxr.v1.HistorySeries
+field muxr.v1.VitalsHistory.step_ms = 1 optional uint32
+field muxr.v1.VitalsHistoryRequest.range = 1 optional enum muxr.v1.HistoryRange
+field muxr.v1.VitalsSample.core_percent = 6 repeated float
+field muxr.v1.VitalsSample.cpu_freq_mhz = 8 optional uint32 oneof=_cpu_freq_mhz proto3_optional
+field muxr.v1.VitalsSample.cpu_iowait_percent = 5 optional float oneof=_cpu_iowait_percent proto3_optional
+field muxr.v1.VitalsSample.cpu_percent = 2 optional float
+field muxr.v1.VitalsSample.cpu_system_percent = 4 optional float oneof=_cpu_system_percent proto3_optional
+field muxr.v1.VitalsSample.cpu_user_percent = 3 optional float oneof=_cpu_user_percent proto3_optional
+field muxr.v1.VitalsSample.disk_read_bps = 13 optional uint64 oneof=_disk_read_bps proto3_optional
+field muxr.v1.VitalsSample.disk_write_bps = 14 optional uint64 oneof=_disk_write_bps proto3_optional
+field muxr.v1.VitalsSample.disks = 12 repeated message muxr.v1.DiskVolume
+field muxr.v1.VitalsSample.load = 7 optional message muxr.v1.LoadAverage
+field muxr.v1.VitalsSample.memory = 9 optional message muxr.v1.HostMemory
+field muxr.v1.VitalsSample.net = 15 optional message muxr.v1.NetInterface
+field muxr.v1.VitalsSample.process_count = 17 optional uint32 oneof=_process_count proto3_optional
+field muxr.v1.VitalsSample.running_count = 18 optional uint32 oneof=_running_count proto3_optional
+field muxr.v1.VitalsSample.swap_total_bytes = 11 optional uint64
+field muxr.v1.VitalsSample.swap_used_bytes = 10 optional uint64
+field muxr.v1.VitalsSample.temperatures = 16 repeated message muxr.v1.HostTemperature
+field muxr.v1.VitalsSample.unix_ms = 1 optional int64
+field muxr.v1.WatchProcessesRequest.filter = 3 optional string
+field muxr.v1.WatchProcessesRequest.interval_ms = 7 optional uint32
+field muxr.v1.WatchProcessesRequest.limit = 4 optional uint32
+field muxr.v1.WatchProcessesRequest.pinned_pid = 5 optional uint32
+field muxr.v1.WatchProcessesRequest.pinned_start_unix_s = 6 optional int64
+field muxr.v1.WatchProcessesRequest.reverse = 2 optional bool
+field muxr.v1.WatchProcessesRequest.sort = 1 optional enum muxr.v1.ProcessSort
+field muxr.v1.WatchVitalsRequest.detail = 1 optional enum muxr.v1.VitalsDetail
+field muxr.v1.WatchVitalsRequest.interval_ms = 2 optional uint32
 field muxr.v1.WriteToPaneReq.data = 2 optional bytes
 field muxr.v1.WriteToPaneReq.target = 1 optional message muxr.v1.PaneTarget
 message muxr.v1.Empty
@@ -216,6 +340,7 @@ rpc muxr.v1.Muxr/FocusPane (muxr.v1.PaneTarget) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/GetLayout (muxr.v1.SessionRef) returns (muxr.v1.Layout)
 rpc muxr.v1.Muxr/GetSpaces (muxr.v1.SessionRef) returns (muxr.v1.SpaceList)
 rpc muxr.v1.Muxr/GetVersion (muxr.v1.Empty) returns (muxr.v1.VersionInfo)
+rpc muxr.v1.Muxr/GetVitalsHistory (muxr.v1.VitalsHistoryRequest) returns (muxr.v1.VitalsHistory)
 rpc muxr.v1.Muxr/GoToTab (muxr.v1.TabTarget) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/KillSession (muxr.v1.SessionRef) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/ListAgents (muxr.v1.SessionRef) returns (muxr.v1.AgentList)
@@ -234,8 +359,11 @@ rpc muxr.v1.Muxr/RenameTab (muxr.v1.RenameTabReq) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/ResizePane (muxr.v1.ResizePaneReq) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/RevokeToken (muxr.v1.RevokeTokenReq) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/ScrollPane (muxr.v1.ScrollReq) returns (muxr.v1.ActionAck)
+rpc muxr.v1.Muxr/SignalProcess (muxr.v1.SignalProcessRequest) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/SwitchSpace (muxr.v1.SwitchSpaceReq) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/TogglePaneFloating (muxr.v1.PaneTarget) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/TogglePaneFullscreen (muxr.v1.ToggleFullscreenReq) returns (muxr.v1.ActionAck)
 rpc muxr.v1.Muxr/WatchAgents (muxr.v1.SessionRef) returns (stream muxr.v1.AgentEvent)
+rpc muxr.v1.Muxr/WatchProcesses (muxr.v1.WatchProcessesRequest) returns (stream muxr.v1.ProcessSnapshot)
+rpc muxr.v1.Muxr/WatchVitals (muxr.v1.WatchVitalsRequest) returns (stream muxr.v1.VitalsEvent)
 rpc muxr.v1.Muxr/WriteToPane (muxr.v1.WriteToPaneReq) returns (muxr.v1.ActionAck)

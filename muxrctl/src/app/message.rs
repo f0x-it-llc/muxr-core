@@ -141,6 +141,11 @@ pub enum Message {
     ActionFailed(String),
     /// A background action completed successfully with a message.
     ActionOk(String),
+    /// The in-flight `SetMonitoring` write succeeded. `configured` is the
+    /// `monitoring` value re-read from the config file afterwards.
+    MonitoringSet { enabled: bool, configured: bool },
+    /// The in-flight `SetMonitoring` write failed.
+    MonitoringFailed { error: String },
 
     // ── Token messages ────────────────────────────────────────────────────────
     /// Tokens list loaded from the token DB.
