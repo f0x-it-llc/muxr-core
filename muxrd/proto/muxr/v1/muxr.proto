@@ -121,13 +121,25 @@ service Muxr {
 
   // Host vitals (capability host-vitals). See proto/README.md#host-vitals.
 
-  // Live samples of the host, the first event carrying HostInfo. Permitted for read-only tokens.
+  // Live samples of the host, the first event carrying HostInfo. Each stream
+  // is paced by its own interval (summary 5 s; full WatchVitalsRequest.interval_ms).
+  // At most 16 WatchVitals streams may be open server-wide; the next answers
+  // RESOURCE_EXHAUSTED. Permitted for read-only tokens.
   rpc WatchVitals(WatchVitalsRequest) returns (stream VitalsEvent);
   // A fixed-step history window of the host's vitals. Permitted for read-only tokens.
   rpc GetVitalsHistory(VitalsHistoryRequest) returns (VitalsHistory);
-  // The host's process table, filtered and sorted, refreshed live; command lines are empty for
-  // read-only tokens. Permitted for read-only tokens.
+  // The host's process table, filtered and sorted, refreshed live at the stream's own
+  // interval. Read-only tokens see every process's pid, name, user and numbers with empty
+  // command lines; full tokens see command lines only for processes owned by muxrd's user.
+  // At most 16 WatchProcesses streams may be open server-wide; the next answers
+  // RESOURCE_EXHAUSTED. Permitted for read-only tokens.
   rpc WatchProcesses(WatchProcessesRequest) returns (stream ProcessSnapshot);
-  // Sends a signal to one process, identified by pid and start time. Refused for read-only tokens.
+  // Sends a signal to one process, identified by pid and start time. Refused for read-only
+  // tokens with PERMISSION_DENIED; FAILED_PRECONDITION when monitoring is off;
+  // INVALID_ARGUMENT for pid 0 or an unspecified signal. A target that is not found, has
+  // changed since it was listed, is not allowed (pid 0/1, muxrd itself, a thread id) or is
+  // refused by the OS comes back as ActionAck{ok: false} with display-only error text:
+  // treat any ok: false as "not signalled" and do not parse the text. ok: true means the
+  // signal was sent, not that the process exited.
   rpc SignalProcess(SignalProcessRequest) returns (ActionAck);
 }

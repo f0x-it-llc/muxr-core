@@ -20,7 +20,7 @@ the rules that need more than a line and the ones several RPCs share.
 | `muxr/v1/tab.proto` | `NewTabReq`, `RenameTabReq` |
 | `muxr/v1/space.proto` | `Space`, `SpaceList`, `SwitchSpaceReq`, `CreateSpaceReq`, `RenameSpaceReq`, `CloseSpaceReq` |
 | `muxr/v1/agent.proto` | `AgentStatus`, `AgentMark`, `AgentMsg`, `AgentSummary`, `AgentList`, `AgentEvent` |
-| `muxr/v1/monitor.proto` | `VitalsDetail`, `WatchVitalsRequest`, `VitalsEvent`, `HostInfo`, `LoadAverage`, `Memory`, `DiskVolume`, `NetInterface`, `Temperature`, `VitalsSample`, `HistoryRange`, `VitalsHistoryRequest`, `VitalsHistory`, `SeriesKind`, `HistorySeries`, `ProcessSort`, `WatchProcessesRequest`, `ProcessState`, `ProcessRow`, `ProcessSnapshot`, `ProcessSignal`, `SignalProcessRequest` |
+| `muxr/v1/monitor.proto` | `VitalsDetail`, `WatchVitalsRequest`, `VitalsEvent`, `HostInfo`, `LoadAverage`, `HostMemory`, `DiskVolume`, `NetInterface`, `HostTemperature`, `VitalsSample`, `HistoryRange`, `VitalsHistoryRequest`, `VitalsHistory`, `SeriesKind`, `HistorySeries`, `ProcessSort`, `WatchProcessesRequest`, `ProcessState`, `ProcessRow`, `ProcessSnapshot`, `ProcessSignal`, `SignalProcessRequest` |
 
 ## Compiling
 
@@ -403,4 +403,27 @@ and `GetVitalsHistory` are reads, permitted for read-only tokens;
 `SignalProcess` is refused for them with `PERMISSION_DENIED`. A process
 command line is never shown to a read-only token, and a full token sees it
 only for processes owned by the user muxrd runs as; every other row carries
-an empty `command`.
+an empty `command`. Read-only tokens still see every process's pid, name,
+user and numbers.
+
+Each stream is paced by its own interval (`WatchVitals` summary 5 s, full
+`interval_ms` clamped to 2-10 s, 0 = 3 s; `WatchProcesses` `interval_ms`
+clamped to 3-10 s, 0 = 3 s): it gets at most one message per interval,
+whatever other clients ask of the server. At most 16 `WatchVitals` and 16
+`WatchProcesses` streams are open server-wide; the next open answers
+`RESOURCE_EXHAUSTED`. After a lag, `VitalsEvent.lagged` counts the skipped
+samples and the event carries the next sample the server still had, which may
+itself be older than the newest. `WatchProcesses` `limit` 0 = 50 and above
+200 = 200; `pinned_start_unix_s` is ignored when `pinned_pid` is 0, and a
+pinned row is matched by pid and start time. A fresh daemon's history is
+mostly NaN until the rings fill.
+
+`SignalProcess` answers `PERMISSION_DENIED` for a read-only token,
+`FAILED_PRECONDITION` when monitoring is off, and `INVALID_ARGUMENT` for pid 0
+or an unspecified signal. A target that is not found, has changed since it was
+listed (start time), is not allowed (pid 0 or 1, muxrd itself, a thread id) or
+is refused by the operating system comes back as `ActionAck{ok: false}` with
+display-only error text: a client treats any `ok: false` as "not signalled"
+and must not parse the text. `ok: true` means the signal was sent, not that
+the process exited. A full token may signal any process the user muxrd runs as
+may signal.
