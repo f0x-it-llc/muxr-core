@@ -799,15 +799,7 @@ mod tests {
 
     #[test]
     fn the_dashboard_footer_fits_80_columns_and_keeps_quit() {
-        let width: usize = crate::app::shortcuts::hint(None, &AppState::new())
-            .iter()
-            .map(|(k, l)| {
-                ratcn::text_width::display_width(k) + 1 + ratcn::text_width::display_width(l)
-            })
-            .sum::<usize>()
-            + 2 * (crate::app::shortcuts::hint(None, &AppState::new()).len() - 1);
-        assert!(width <= 80, "{width} columns");
-        let harness = Harness::new();
+        let harness = Harness::sized(80, 24);
         let row = harness.last_row();
         assert!(row.contains("q quit") && row.contains("m mon"), "{row:?}");
     }
@@ -829,6 +821,11 @@ mod tests {
         harness.state.monitoring_configured = true;
         harness.draw();
         assert!(harness.screen().contains("on (configured)"));
+        assert!(!harness.screen().contains("env MUXRD_MONITORING"));
+
+        harness.state.monitoring_env_override = true;
+        harness.draw();
+        assert!(harness.screen().contains("env MUXRD_MONITORING overrides"));
     }
 
     #[test]

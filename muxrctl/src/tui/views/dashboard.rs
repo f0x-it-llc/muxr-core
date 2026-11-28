@@ -187,8 +187,22 @@ fn daemon_lines(state: &AppState, theme: &Theme) -> Vec<Line<'static>> {
                 "  press s to start",
                 Style::default().fg(theme.muted_foreground),
             )),
-            monitoring_field(state.monitoring_configured, true, theme),
-        ],
+            monitoring_field(
+                state
+                    .monitoring_pending
+                    .unwrap_or(state.monitoring_configured),
+                true,
+                theme,
+            ),
+        ]
+        .into_iter()
+        .chain(state.monitoring_env_override.then(|| {
+            Line::from(Span::styled(
+                "  env MUXRD_MONITORING overrides",
+                Style::default().fg(theme.muted_foreground),
+            ))
+        }))
+        .collect(),
     }
 }
 

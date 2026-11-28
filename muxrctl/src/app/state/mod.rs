@@ -235,13 +235,16 @@ pub struct AppState {
     /// overlay was since closed (or superseded) is discarded.
     #[allow(dead_code)] // bumped by the tokens card when it opens the overlay.
     pub qr_seq: u64,
-    /// The `monitoring` value the config file holds. The dashboard shows it
-    /// while the daemon is stopped; it follows the daemon's answer while one
-    /// runs and the toggle while one does not.
+    /// The `monitoring` value the config FILE holds (not muxrctl's env). The
+    /// stopped row shows it; the running row shows the daemon's live value
+    /// from the status instead.
     pub monitoring_configured: bool,
-    /// The configured value to restore if a stopped-daemon toggle fails to
-    /// persist; cleared by the next action result.
-    pub monitoring_revert: Option<bool>,
+    /// The value an outstanding `SetMonitoring` write asks for. `Some` means
+    /// one write is in flight; only that write's own result clears it.
+    pub monitoring_pending: Option<bool>,
+    /// Whether muxrctl's environment sets `MUXRD_MONITORING` (the next daemon
+    /// start may then differ from the file).
+    pub monitoring_env_override: bool,
 }
 
 impl AppState {

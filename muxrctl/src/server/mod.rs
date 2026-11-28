@@ -305,9 +305,43 @@ pub fn set_bind_addr(addr: &str) -> Result<()> {
         .with_context(|| format!("set_bind_addr: failed to write {addr:?}"))
 }
 
-/// The `monitoring` value the resolved config holds (off when it cannot be read).
+/// The `monitoring` value the config FILE holds (off when the file is missing
+/// or unreadable). Unlike [`effective_config`] this ignores muxrctl's own
+/// `MUXRD_MONITORING`, which says nothing about the daemon.
 pub fn configured_monitoring() -> bool {
-    effective_config().is_ok_and(|c| c.monitoring)
+    muxrd::config::config_file_path()
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|text| parse_file_monitoring(&text))
+}
+
+/// The top-level `monitoring = true|false` of a config file's text (off when
+/// absent or malformed). Pure: only keys before the first `[table]` count.
+pub fn parse_file_monitoring(text: &str) -> bool {
+    for line in text.lines() {
+        let line = line.split('#').next().unwrap_or("").trim();
+        if line.starts_with('[') {
+            break;
+        }
+        if let Some((key, value)) = line.split_once('=')
+            && key.trim() == "monitoring"
+        {
+            return value.trim() == "true";
+        }
+    }
+    false
+}
+
+/// Whether an `MUXRD_MONITORING` value (as read from muxrctl's environment)
+/// is set to something non-blank, i.e. overrides the file for a daemon started
+/// from this environment.
+pub fn monitoring_env_overrides(env_value: Option<&str>) -> bool {
+    env_value.is_some_and(|v| !v.trim().is_empty())
+}
+
+/// [`monitoring_env_overrides`] for the real process environment.
+pub fn monitoring_env_is_set() -> bool {
+    monitoring_env_overrides(std::env::var(muxrd::config::MONITORING_ENV).ok().as_deref())
 }
 
 /// Turn host monitoring on or off.
@@ -387,6 +421,23 @@ mod tests {
     use super::*;
 
     const DEFAULT: &str = muxrd::config::DEFAULT_BIND;
+
+    #[test]
+    fn file_monitoring_reads_the_top_level_key_only() {
+        assert!(parse_file_monitoring(
+            "bind_addr = \"x\"\nmonitoring = true # on\n"
+        ));
+        assert!(!parse_file_monitoring("monitoring = false\n"));
+        assert!(!parse_file_monitoring(""));
+        assert!(!parse_file_monitoring("[other]\nmonitoring = true\n"));
+    }
+
+    #[test]
+    fn the_env_override_is_a_non_blank_value() {
+        assert!(monitoring_env_overrides(Some("1")));
+        assert!(!monitoring_env_overrides(Some("  ")));
+        assert!(!monitoring_env_overrides(None));
+    }
 
     #[test]
     fn build_daemon_args_default_bind_omits_bind_flag() {
